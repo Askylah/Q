@@ -6,6 +6,10 @@ A private AI companion sandbox built with **FastAPI + Vite + React**. Houses mul
 
 ---
 
+A private AI companion sandbox built with **FastAPI + Vite + React**. Houses multiple distinct AI personas with persistent memory, lorebook-driven knowledge graphs, and multi-model routing across OpenRouter, Google, Anthropic, and OpenAI.
+
+---
+
 ## Stack
 
 | Layer | Tech |
@@ -41,8 +45,25 @@ Read path (zero LLM cost per message):
 ### 🔀 Multi-Model Routing (`mode_engine.py` + `llm_engine.py`)
 Detects message intent (immersive RP, technical, creative) and routes to the appropriate model tier (base flash vs expert pro).
 
-### 🔒 Firewall (`firewall.py`)
-Semantic intent scanner on both user input and RAG results. Drops connections flagged as injection attempts.
+## 🛡️ Optional Security Architecture
+
+This sandbox is designed for high-fidelity experimentation. To protect your hardware, it includes a multi-layered security stack that can be toggled via **Settings > Maintenance**.
+
+### 1. Semantic Firewall (`firewall.py`)
+A dual-pass semantic intent scanner. It analyzes both **inbound user messages** and **outbound retrieval results** (RAG/Zettel) for malicious instructions or prompt injection attempts. If a violation is detected, the system automatically redacts the context or drops the connection before it reaches the expert model.
+
+### 2. Root-Jailed Workspace (`workspace_engine.py`)
+The IDE/Workspace integration uses a jailed filesystem interface. 
+- **Traversal Protection:** All file operations are resolved against a strict workspace root. Any attempt to escape via `../` traversal or symlinks triggers a `SecurityViolation`.
+- **Docker Ready:** Designed to run inside an isolated Docker container for total OS-level isolation while maintaining a persistent code sandbox.
+
+### 3. API Blackholing (The Blackhole Handler)
+The FastAPI backend is hardened against scanners and probing. If a request payload contains even a single unexpected key, the server returns an **Nginx-style 444 (No Response)**. It doesn't reject with an error; it simply drops the connection, making the API invisible to automated probing tools.
+
+### 4. Semantic Firewall Toggle
+You own the hardware. If the firewall interferes with your research or "red teaming" experiments, it can be completely disabled in the **Maintenance** tab of the app settings.
+
+---
 
 ### 📄 On-Demand Loader (`on_demand_loader.py`)
 Attaches large reference documents to personas. Splits into modules and injects only the most semantically relevant sections per message.
