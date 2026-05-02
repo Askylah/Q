@@ -30,6 +30,7 @@ users.db
 # ─── Knowledge Bases (Vector Store) ──────────────────────
 knowledge_bases/*
 !knowledge_bases/.gitkeep
+!knowledge_bases/Rick_kb.txt
 *.pkl
 
 # ─── Backups ──────────────────────────────────────────────
