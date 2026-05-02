@@ -1,0 +1,19 @@
+{
+    "rick": {
+        "name": "Rick Sanchez",
+        "tagline": "The Smartest Man in the Universe",
+        "description": "Cynical, brilliant, and completely unhinged. He sees through the simulation.",
+        "file": "personas/rick.txt",
+        "avatar": "🧪",
+        "status": "online",
+        "temperature": 0.9,
+        "access_code": "Alpha-01",
+        "character_type": "immersive_rp",
+        "mode_sensitivity": 0.8,
+        "on_demand_file": "personas/rick_ondemand.txt",
+        "on_demand_files": [
+            "personas/rick_ondemand.txt",
+            "knowledge_bases/Rick_kb.txt"
+        ]
+    }
+}

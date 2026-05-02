@@ -1,0 +1,171 @@
+/* === MIDNIGHT THEME === */
+/* Deep blue-black with electric blue accents */
+
+.stApp {
+    background-color: #0a0a1a;
+    color: #c0c0d0;
+    font-family: 'Inter', 'Segoe UI', sans-serif;
+}
+
+#MainMenu {
+    visibility: hidden;
+}
+
+footer {
+    visibility: hidden;
+}
+
+header {
+    background: transparent !important;
+}
+
+[data-testid="stToolbar"] {
+    visibility: hidden !important;
+}
+
+[data-testid="stExpandSidebarButton"] {
+    color: #4a9eff !important;
+    visibility: visible !important;
+}
+
+.stApp::after {
+    display: none;
+}
+
+[data-testid="stSidebar"] {
+    background-color: #0d0d1f !important;
+    border-right: 1px solid #1a1a3e !important;
+}
+
+[data-testid="stSidebarCollapseButton"] {
+    color: #4a9eff !important;
+    position: relative !important;
+    z-index: 10000 !important;
+}
+
+.stChatMessage {
+    background-color: #0f0f22 !important;
+    border: 1px solid #1a1a3e !important;
+    border-left: 3px solid #4a9eff !important;
+    border-radius: 8px !important;
+    margin-bottom: 8px !important;
+}
+
+.stChatMessage:hover {
+    border-color: #4a9eff !important;
+    box-shadow: 0 0 12px rgba(74, 158, 255, 0.1) !important;
+}
+
+.stChatInput textarea {
+    background-color: #0d0d1f !important;
+    color: #e0e0f0 !important;
+    border: 1px solid #1a1a3e !important;
+    border-radius: 8px !important;
+    caret-color: #4a9eff !important;
+}
+
+.stChatInput textarea:focus {
+    border-color: #4a9eff !important;
+    box-shadow: 0 0 10px rgba(74, 158, 255, 0.15) !important;
+}
+
+.stChatInput textarea::placeholder {
+    color: #333355 !important;
+}
+
+.stButton>button {
+    background-color: #0f0f22 !important;
+    color: #4a9eff !important;
+    border: 1px solid #1a1a3e !important;
+    border-radius: 6px !important;
+    transition: all 0.2s ease;
+}
+
+.stButton>button:hover {
+    background-color: #151530 !important;
+    border-color: #4a9eff !important;
+    box-shadow: 0 0 12px rgba(74, 158, 255, 0.15) !important;
+}
+
+h1,
+h2,
+h3 {
+    color: #4a9eff !important;
+}
+
+h1 {
+    text-shadow: 0 0 15px rgba(74, 158, 255, 0.3);
+}
+
+.persona-card {
+    background: linear-gradient(135deg, #0f0f22 0%, #151530 100%);
+    border: 1px solid #1a1a3e;
+    border-radius: 12px;
+    padding: 20px;
+    margin: 10px 0;
+    transition: all 0.3s ease;
+}
+
+.persona-card:hover {
+    border-color: #4a9eff;
+    box-shadow: 0 0 20px rgba(74, 158, 255, 0.1);
+}
+
+.stTextInput input,
+.stTextArea textarea,
+.stSelectbox select {
+    background-color: #0d0d1f !important;
+    color: #c0c0d0 !important;
+    border: 1px solid #1a1a3e !important;
+    border-radius: 6px !important;
+}
+
+.stTextInput input:focus,
+.stTextArea textarea:focus {
+    border-color: #4a9eff !important;
+}
+
+.streamlit-expanderHeader {
+    background-color: #0f0f22 !important;
+    color: #4a9eff !important;
+    border-radius: 6px !important;
+}
+
+.stTabs [data-baseweb="tab-list"] {
+    background-color: #0d0d1f;
+}
+
+.stTabs [data-baseweb="tab"] {
+    background-color: #0d0d1f !important;
+    color: #555 !important;
+    border: 1px solid #1a1a3e !important;
+    border-radius: 6px 6px 0 0 !important;
+}
+
+.stTabs [aria-selected="true"] {
+    background-color: #151530 !important;
+    color: #4a9eff !important;
+    border-bottom: 2px solid #4a9eff !important;
+}
+
+::-webkit-scrollbar {
+    width: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: #0a0a1a;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #1a1a3e;
+    border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #4a9eff;
+}
+
+a {
+    color: #4a9eff !important;
+    text-decoration: none !important;
+}

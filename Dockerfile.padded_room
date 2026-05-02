@@ -1,0 +1,19 @@
+# Padded Room - Secure Python Runtime
+FROM python:3.10-slim
+
+# Avoid generating .pyc files
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Create a non-privileged user
+RUN groupadd -r persona && useradd -r -g persona persona-user
+
+# Set up a strictly bounded workspace
+WORKDIR /sandbox
+RUN chown persona-user:persona /sandbox
+
+# Switch to non-root user
+USER persona-user
+
+# The container expects the code to be mounted or piped
+ENTRYPOINT ["python"]

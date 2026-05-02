@@ -1,0 +1,243 @@
+/* === TERMINAL THEME (DEFAULT) === */
+/* === BASE === */
+.stApp {
+    background-color: #030303;
+    color: #b0b0b0;
+    font-family: 'JetBrains Mono', 'Courier New', monospace;
+}
+
+#MainMenu {
+    visibility: hidden;
+}
+
+footer {
+    visibility: hidden;
+}
+
+header {
+    background: transparent !important;
+}
+
+[data-testid="stToolbar"] {
+    visibility: hidden !important;
+}
+
+[data-testid="stExpandSidebarButton"] {
+    color: #00ff41 !important;
+    visibility: visible !important;
+}
+
+/* === CRT SCAN-LINE OVERLAY & BLOOM === */
+@keyframes crt-bloom {
+    0% {
+        filter: drop-shadow(0 0 2px rgba(0, 255, 65, 0.1));
+    }
+
+    50% {
+        filter: drop-shadow(0 0 8px rgba(0, 255, 65, 0.3));
+    }
+
+    100% {
+        filter: drop-shadow(0 0 2px rgba(0, 255, 65, 0.1));
+    }
+}
+
+@keyframes scanline-drift {
+    0% {
+        background-position: 0 0;
+    }
+
+    100% {
+        background-position: 0 100vh;
+    }
+}
+
+.stApp {
+    background-color: #030303;
+    color: #b0b0b0;
+    font-family: 'JetBrains Mono', 'Courier New', monospace;
+    animation: crt-bloom 4s infinite alternate;
+}
+
+.stApp::after {
+    content: '';
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: repeating-linear-gradient(0deg,
+            transparent,
+            transparent 2px,
+            rgba(0, 255, 65, 0.04) 2px,
+            rgba(0, 255, 65, 0.04) 4px);
+    pointer-events: none;
+    z-index: 9999;
+    animation: scanline-drift 8s linear infinite;
+}
+
+/* === SIDEBAR === */
+[data-testid="stSidebar"] {
+    background-color: #050505 !important;
+    border-right: 1px solid #0a2a0a !important;
+}
+
+[data-testid="stSidebarCollapseButton"] {
+    color: #00ff41 !important;
+    position: relative !important;
+    z-index: 10000 !important;
+}
+
+/* === CHAT === */
+.stChatMessage {
+    background-color: #080808 !important;
+    border: 1px solid #0a2a0a !important;
+    border-left: 3px solid #00ff41 !important;
+    border-radius: 0px !important;
+    margin-bottom: 6px !important;
+}
+
+.stChatMessage:hover {
+    border-color: #00ff41 !important;
+    box-shadow: 0 0 8px rgba(0, 255, 65, 0.1) !important;
+}
+
+/* === CHAT INPUT === */
+.stChatInput textarea {
+    background-color: #050505 !important;
+    color: #00ff41 !important;
+    border: 1px solid #0a2a0a !important;
+    border-radius: 0px !important;
+    caret-color: #00ff41 !important;
+}
+
+.stChatInput textarea:focus {
+    border-color: #00ff41 !important;
+    box-shadow: 0 0 10px rgba(0, 255, 65, 0.15) !important;
+}
+
+.stChatInput textarea::placeholder {
+    color: #1a4a1a !important;
+}
+
+/* === BUTTONS === */
+.stButton>button {
+    background-color: #080808 !important;
+    color: #00ff41 !important;
+    border: 1px solid #0a2a0a !important;
+    border-radius: 0px !important;
+    font-family: 'Share Tech Mono', monospace !important;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    font-size: 0.8em;
+    transition: all 0.2s ease;
+}
+
+.stButton>button:hover {
+    background-color: #0a1a0a !important;
+    border-color: #00ff41 !important;
+    box-shadow: 0 0 12px rgba(0, 255, 65, 0.2) !important;
+}
+
+/* === HEADINGS === */
+h1,
+h2,
+h3 {
+    color: #00ff41 !important;
+    font-family: 'Share Tech Mono', monospace !important;
+    text-transform: uppercase;
+    letter-spacing: 3px;
+}
+
+h1 {
+    text-shadow: 0 0 10px rgba(0, 255, 65, 0.3), 0 0 20px rgba(0, 255, 65, 0.1);
+}
+
+/* === PERSONA CARDS === */
+.persona-card {
+    background: #080808;
+    border: 1px solid #0a2a0a;
+    border-left: 3px solid #00ff41;
+    border-radius: 0px;
+    padding: 20px;
+    margin: 10px 0;
+    transition: all 0.2s ease;
+}
+
+.persona-card:hover {
+    border-color: #00ff41;
+    box-shadow: 0 0 15px rgba(0, 255, 65, 0.15);
+}
+
+/* === INPUTS === */
+.stTextInput input,
+.stTextArea textarea,
+.stSelectbox select {
+    background-color: #050505 !important;
+    color: #b0b0b0 !important;
+    border: 1px solid #0a2a0a !important;
+    border-radius: 0px !important;
+}
+
+.stTextInput input:focus,
+.stTextArea textarea:focus {
+    border-color: #00ff41 !important;
+    box-shadow: 0 0 8px rgba(0, 255, 65, 0.1) !important;
+}
+
+/* === EXPANDERS === */
+.streamlit-expanderHeader {
+    background-color: #080808 !important;
+    color: #00ff41 !important;
+    border: 1px solid #0a2a0a !important;
+    border-radius: 0px !important;
+}
+
+/* === TABS === */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 0px;
+    background-color: #050505;
+}
+
+.stTabs [data-baseweb="tab"] {
+    background-color: #050505 !important;
+    color: #555 !important;
+    border: 1px solid #0a2a0a !important;
+    border-radius: 0px !important;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.stTabs [aria-selected="true"] {
+    background-color: #0a1a0a !important;
+    color: #00ff41 !important;
+    border-bottom: 2px solid #00ff41 !important;
+}
+
+/* === SCROLLBAR === */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: #030303;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #0a2a0a;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #00ff41;
+}
+
+/* === LINKS === */
+a {
+    color: #00ff41 !important;
+    text-decoration: none !important;
+}
+
+a:hover {
+    text-shadow: 0 0 5px rgba(0, 255, 65, 0.3);
+}

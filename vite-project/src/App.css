@@ -1,0 +1,861 @@
+/* App specific utility classes for The Trenches */
+
+.sidebar {
+  width: 350px;
+  height: 100%;
+  background-color: var(--secondary-bg-color);
+  border-right: var(--border-dashed);
+  display: flex;
+  flex-direction: column;
+  z-index: 10;
+  flex-shrink: 0;
+  transition: width 0.15s ease, padding 0.3s ease, border 0.3s ease;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.sidebar.collapsed {
+  width: 0;
+  border-right: none;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.sidebar-header {
+  padding: 20px;
+  padding-left: 65px;
+  /* Space for the floating toggle button */
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  white-space: nowrap;
+  /* Prevent breaking when collapsing */
+}
+
+/* Floating Sidebar Toggle Button */
+.sidebar-toggle-btn {
+  position: absolute;
+  top: 15px;
+  left: 20px;
+  z-index: 1000;
+  /* Absolute priority over the grid */
+  background: transparent;
+  border: none;
+  color: var(--primary-color);
+  cursor: pointer;
+  border-radius: 4px;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s ease-in-out;
+}
+
+.sidebar-toggle-btn>span {
+  font-size: 28px;
+}
+
+.sidebar-toggle-btn:hover {
+  transform: scale(1.1);
+}
+
+
+.sidebar-title {
+  font-family: var(--font-marker) !important;
+  font-size: 24px;
+  font-weight: bold;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--primary-color);
+}
+
+.persona-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.persona-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.persona-item:hover {
+  background: transparent;
+  border-color: transparent;
+  transform: scale(1.02);
+}
+
+.persona-item.active {
+  background: transparent;
+  border-color: transparent;
+}
+
+.persona-avatar {
+  font-size: 24px;
+}
+
+.persona-info {
+  display: flex;
+  flex-direction: column;
+}
+
+.persona-name {
+  font-weight: 600;
+  font-size: 16px;
+  color: var(--primary-color) !important;
+  font-family: var(--font-marker) !important;
+}
+
+.persona-tagline {
+  font-size: 12px;
+  color: var(--text-color) !important;
+}
+
+/* Chat Area */
+.chat-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+  /* Critical for preventing body scrollbars */
+  background: transparent;
+}
+
+.chat-header {
+  height: 64px;
+  padding: 0 24px;
+  border-bottom: var(--border-dashed);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background-color: var(--secondary-bg-color);
+  z-index: 5;
+  transition: padding-left 0.3s ease;
+}
+
+/* When sidebar collapsed, the chat-header expands under the toggle button, so add left padding */
+.app-container.sidebar-collapsed .chat-header {
+  padding-left: 70px;
+}
+
+/* Same for studio view */
+.app-container.sidebar-collapsed .studio-view {
+  padding-left: 70px !important;
+}
+
+/* Same for workspace file tree pane */
+.app-container.sidebar-collapsed .workspace-area > .workspace-pane:first-child {
+  padding-left: 70px !important;
+}
+
+
+.chat-header-info h2 {
+  font-size: 20px;
+  margin: 0;
+  color: var(--primary-color) !important;
+}
+
+.chat-header-info p {
+  font-family: var(--font-inter) !important;
+  font-size: 12px;
+  color: var(--text-color) !important;
+  margin: 0;
+  opacity: 0.8;
+}
+
+.header-button {
+  background: rgba(255, 0, 127, 0.05) !important;
+  border: none !important;
+  color: var(--primary-color) !important;
+  padding: 8px 16px;
+  border-radius: 4px !important;
+  cursor: pointer;
+  font-family: var(--font-marker) !important;
+  transition: all 0.2s ease-in-out;
+}
+
+.header-button:hover {
+  transform: scale(1.05);
+}
+
+.chat-history {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* Force horizontal lock */
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  background: transparent;
+}
+
+/* Legibility Overrides */
+.message-box {
+  width: 100%;
+  max-width: 700px;
+  display: flex;
+  position: relative;
+  word-wrap: break-word;
+}
+
+.message-box.user {
+  justify-content: flex-end;
+}
+
+.message-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  flex-shrink: 0;
+  position: absolute;
+  top: 0;
+}
+
+.message-box.assistant .message-avatar {
+  left: -56px;
+}
+
+.message-box.user .message-avatar {
+  right: -56px;
+}
+
+
+
+.message-content {
+  background-color: rgba(10, 10, 10, 0.75) !important;
+  border: 1px solid rgba(255, 0, 127, 0.3) !important;
+  border-radius: 8px !important;
+  padding: 15px !important;
+  color: var(--text-color) !important;
+  width: fit-content;
+  min-width: 0;
+  /* Prevent flex children from overflowing bounds */
+  white-space: pre-wrap;
+  line-height: 1.5;
+  font-family: var(--font-inter) !important;
+  font-size: 1.05rem !important;
+  overflow-x: auto;
+  /* Allow code blocks inside to scroll horizontally without breaking parent */
+}
+
+.message-content * {
+  font-family: var(--font-inter) !important;
+  color: var(--text-color) !important;
+  font-weight: 500 !important;
+}
+
+.message-content code {
+  background: rgba(255, 255, 255, 0.1);
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-family: monospace !important;
+  color: #00e5ff !important;
+}
+
+
+
+.chat-input-container {
+  padding: 24px;
+  background: transparent;
+}
+
+.chat-input-wrapper {
+  position: relative;
+  width: 100%;
+  max-width: 700px;
+  margin: 0 auto;
+}
+
+.chat-input {
+  width: 100%;
+  background: rgba(10, 10, 10, 0.98) !important;
+  border: 3px dashed var(--accent-purple) !important;
+  border-radius: 12px;
+  padding: 16px 60px 16px 48px;
+  color: var(--text-color) !important;
+  font-family: var(--font-marker) !important;
+  font-size: 16px;
+  resize: none;
+  min-height: 110px;
+  max-height: 200px;
+  outline: none;
+  transition: var(--transition-fast);
+}
+
+.chat-input:focus {
+  border-color: var(--primary-color) !important;
+}
+
+.attach-button {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+  background: transparent;
+  border: none;
+  color: var(--primary-color) !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 20px;
+  transition: var(--transition-fast);
+  opacity: 0.7;
+  z-index: 2;
+}
+
+.attach-button:hover {
+  opacity: 1;
+  color: var(--primary-color) !important;
+}
+
+.send-button {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  background: transparent;
+  border: none;
+  color: var(--primary-color) !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-family: 'Material Icons' !important;
+  font-size: 18px;
+  transition: var(--transition-fast);
+  opacity: 0.75;
+}
+
+.send-button:hover {
+  opacity: 1;
+  transform: scale(1.1);
+}
+
+.send-button:disabled {
+  background: transparent;
+  border: none;
+  color: var(--accent-purple) !important;
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.streaming-cursor {
+  color: var(--primary-color) !important;
+  font-family: var(--font-inter) !important;
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.glow-pulse {
+  animation: pulsing 1.5s infinite;
+}
+
+@keyframes pulsing {
+  0% {
+    opacity: 0.8;
+  }
+
+  50% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0.8;
+  }
+}
+
+/* WORKSPACE UI / IDE LAYOUT */
+.workspace-area {
+  flex: 1;
+  display: flex;
+  background-color: rgba(10, 10, 10, 0.95);
+  overflow: hidden;
+}
+
+.workspace-pane {
+  padding: 15px;
+  overflow-y: auto;
+  border-right: var(--border-dashed);
+  display: flex;
+  flex-direction: column;
+}
+
+.workspace-pane:first-child {
+  padding-top: 5px;
+  /* Normalized padding */
+}
+
+.monaco-editor,
+.monaco-editor .view-line,
+.monaco-editor .view-lines,
+.monaco-editor .line-numbers {
+  font-family: 'Inter', sans-serif !important;
+}
+
+/* Tactical Scrollbars for Artifact Viewer */
+.monaco-editor .scrollbar .slider {
+  background: var(--work-green) !important;
+  border-radius: 4px;
+}
+
+.monaco-editor .scrollbar .slider:hover {
+  background: #00ff88 !important;
+}
+
+.workspace-pane:first-child .workspace-pane-header {
+  padding-left: 60px !important;
+  color: var(--text-color) !important;
+}
+
+.workspace-pane-header {
+  color: var(--text-color) !important;
+  border-bottom: var(--border-dashed);
+  padding-bottom: 10px;
+  margin-bottom: 15px;
+  font-size: 1.2rem;
+  letter-spacing: 1px;
+}
+
+.workspace-pane:last-child {
+  border-right: none;
+}
+
+/* Tree Styling & Ergonomics */
+.directory-children {
+  margin-left: 12px;
+  border-left: 1px solid rgba(0, 204, 102, 0.1);
+  padding-left: 4px;
+}
+
+.file-tree-item {
+  transition: background 0.15s ease;
+  border-radius: 4px;
+  padding: 4px 8px !important;
+}
+
+.file-tree-item:hover {
+  background: rgba(0, 204, 102, 0.1);
+}
+
+.workspace-pane-header {
+  font-family: var(--font-marker);
+  color: var(--primary-color);
+  border-bottom: var(--border-dashed);
+  padding-bottom: 10px;
+  margin-bottom: 15px;
+  font-size: 1.1em;
+}
+
+/* ==========================================================
+   Q SKIN OVERRIDES — beats all hardcoded !important rules
+   via html[data-theme] two-element specificity
+   ========================================================== */
+
+/* ── Q DARK (Midnight) ───────────────────────────────────── */
+html[data-theme="q-dark"] body {
+  background-color: #080809 !important;
+  background-image: none !important;
+}
+
+html[data-theme="q-dark"] .app-container {
+  background-color: #080809 !important;
+}
+
+html[data-theme="q-dark"] .sidebar {
+  background-color: #020203 !important;
+  border-right: 1px solid #1f1f24 !important;
+}
+
+html[data-theme="q-dark"] .chat-header {
+  background-color: #020203 !important;
+  border-bottom: 1px solid #1f1f24 !important;
+}
+
+html[data-theme="q-dark"] .chat-header-info h2 {
+  color: #dcddde !important;
+  font-family: 'Inter', sans-serif !important;
+}
+
+html[data-theme="q-dark"] .chat-history {
+  background-color: #080809 !important;
+}
+
+html[data-theme="q-dark"] .message-content {
+  background-color: #111113 !important;
+  border: 1px solid #1f1f24 !important;
+  color: #dcddde !important;
+  font-family: 'Inter', sans-serif !important;
+}
+
+html[data-theme="q-dark"] .message-content * {
+  color: #dcddde !important;
+  font-family: 'Inter', sans-serif !important;
+  font-weight: 400 !important;
+}
+
+html[data-theme="q-dark"] .message-content code {
+  background: rgba(0,0,0,0.6) !important;
+  color: #a8b0c0 !important;
+}
+
+html[data-theme="q-dark"] .chat-input {
+  background: #17171a !important;
+  border: 1px solid #1f1f24 !important;
+  border-radius: 8px !important;
+  color: #dcddde !important;
+  font-family: 'Inter', sans-serif !important;
+}
+
+html[data-theme="q-dark"] .chat-input:focus {
+  border-color: #5865f2 !important;
+}
+
+html[data-theme="q-dark"] .chat-input-container {
+  background-color: #020203 !important;
+  border-top: 1px solid #1f1f24 !important;
+}
+
+html[data-theme="q-dark"] .send-button {
+  border: none !important;
+  color: #5865f2 !important;
+}
+
+html[data-theme="q-dark"] .attach-button {
+  color: #5865f2 !important;
+}
+
+html[data-theme="q-dark"] .workspace-area {
+  background-color: #080809 !important;
+}
+
+html[data-theme="q-dark"] .workspace-pane {
+  border-right: 1px solid #1f1f24 !important;
+  background-color: #111113 !important;
+}
+
+html[data-theme="q-dark"] .workspace-pane-header {
+  font-family: 'Inter', sans-serif !important;
+  color: #dcddde !important;
+  border-bottom: 1px solid #1f1f24 !important;
+}
+
+html[data-theme="q-dark"] .sidebar-title {
+  font-family: 'Inter', sans-serif !important;
+  color: #dcddde !important;
+  letter-spacing: 0.5px !important;
+  font-size: 18px !important;
+}
+
+html[data-theme="q-dark"] .persona-name {
+  font-family: 'Inter', sans-serif !important;
+  color: #dcddde !important;
+}
+
+html[data-theme="q-dark"] .persona-tagline {
+  color: #5a5a62 !important;
+}
+
+html[data-theme="q-dark"] .sidebar-toggle-btn {
+  color: #5a5a62 !important;
+}
+
+html[data-theme="q-dark"] .glass-panel {
+  background: #111113 !important;
+  border: 1px solid #1f1f24 !important;
+  backdrop-filter: none !important;
+}
+
+html[data-theme="q-dark"] .header-button {
+  font-family: 'Inter', sans-serif !important;
+  background: rgba(88,101,242,0.1) !important;
+  border: 1px solid rgba(88,101,242,0.3) !important;
+  color: #5865f2 !important;
+}
+
+html[data-theme="q-dark"] .directory-children {
+  border-left: 1px solid #1f1f24 !important;
+}
+
+html[data-theme="q-dark"] .file-tree-item:hover {
+  background: rgba(88,101,242,0.1) !important;
+}
+
+html[data-theme="q-dark"] ::-webkit-scrollbar-track {
+  background: #020203 !important;
+}
+html[data-theme="q-dark"] ::-webkit-scrollbar-thumb {
+  background: #1f1f2c !important;
+}
+html[data-theme="q-dark"] ::-webkit-scrollbar-thumb:hover {
+  background: #5865f2 !important;
+}
+
+/* ── Q LIGHT ─────────────────────────────────────────────── */
+html[data-theme="q-light"] body {
+  background-color: #f2f3f5 !important;
+  background-image: none !important;
+}
+
+html[data-theme="q-light"] .app-container {
+  background-color: #f2f3f5 !important;
+}
+
+html[data-theme="q-light"] .sidebar {
+  background-color: #e3e5e8 !important;
+  border-right: 1px solid #d1d3d6 !important;
+}
+
+html[data-theme="q-light"] .chat-header {
+  background-color: #e3e5e8 !important;
+  border-bottom: 1px solid #d1d3d6 !important;
+}
+
+html[data-theme="q-light"] .chat-header-info h2 {
+  color: #2e3338 !important;
+  font-family: 'Inter', sans-serif !important;
+}
+
+html[data-theme="q-light"] .chat-history {
+  background-color: #f2f3f5 !important;
+}
+
+html[data-theme="q-light"] .message-content {
+  background-color: #ffffff !important;
+  border: 1px solid #d1d3d6 !important;
+  color: #2e3338 !important;
+  font-family: 'Inter', sans-serif !important;
+}
+
+html[data-theme="q-light"] .message-content * {
+  color: #2e3338 !important;
+  font-family: 'Inter', sans-serif !important;
+  font-weight: 400 !important;
+}
+
+html[data-theme="q-light"] .message-content code {
+  background: #f2f3f5 !important;
+  color: #4e5058 !important;
+}
+
+html[data-theme="q-light"] .chat-input {
+  background: #ffffff !important;
+  border: 1px solid #d1d3d6 !important;
+  border-radius: 8px !important;
+  color: #2e3338 !important;
+  font-family: 'Inter', sans-serif !important;
+}
+
+html[data-theme="q-light"] .chat-input:focus {
+  border-color: #5865f2 !important;
+}
+
+html[data-theme="q-light"] .chat-input-container {
+  background-color: #e3e5e8 !important;
+  border-top: 1px solid #d1d3d6 !important;
+}
+
+html[data-theme="q-light"] .send-button {
+  border: 1px solid #5865f2 !important;
+  color: #5865f2 !important;
+}
+
+html[data-theme="q-light"] .attach-button {
+  color: #5865f2 !important;
+}
+
+html[data-theme="q-light"] .workspace-area {
+  background-color: #f2f3f5 !important;
+}
+
+html[data-theme="q-light"] .workspace-pane {
+  border-right: 1px solid #d1d3d6 !important;
+  background-color: #ffffff !important;
+}
+
+html[data-theme="q-light"] .workspace-pane-header {
+  font-family: 'Inter', sans-serif !important;
+  color: #2e3338 !important;
+  border-bottom: 1px solid #d1d3d6 !important;
+}
+
+html[data-theme="q-light"] .sidebar-title {
+  font-family: 'Inter', sans-serif !important;
+  color: #2e3338 !important;
+  letter-spacing: 0.5px !important;
+  font-size: 18px !important;
+}
+
+html[data-theme="q-light"] .persona-name {
+  font-family: 'Inter', sans-serif !important;
+  color: #2e3338 !important;
+}
+
+html[data-theme="q-light"] .persona-tagline {
+  color: #6d6f78 !important;
+}
+
+html[data-theme="q-light"] .sidebar-toggle-btn {
+  color: #6d6f78 !important;
+}
+
+html[data-theme="q-light"] .glass-panel {
+  background: #ffffff !important;
+  border: 1px solid #d1d3d6 !important;
+  backdrop-filter: none !important;
+}
+
+html[data-theme="q-light"] .header-button {
+  font-family: 'Inter', sans-serif !important;
+  background: rgba(88,101,242,0.08) !important;
+  border: 1px solid rgba(88,101,242,0.25) !important;
+  color: #5865f2 !important;
+}
+
+html[data-theme="q-light"] .directory-children {
+  border-left: 1px solid #d1d3d6 !important;
+}
+
+html[data-theme="q-light"] .file-tree-item:hover {
+  background: rgba(88,101,242,0.07) !important;
+}
+
+html[data-theme="q-light"] ::-webkit-scrollbar-track {
+  background: #e3e5e8 !important;
+}
+html[data-theme="q-light"] ::-webkit-scrollbar-thumb {
+  background: #c4c6cb !important;
+}
+html[data-theme="q-light"] ::-webkit-scrollbar-thumb:hover {
+  background: #5865f2 !important;
+}
+
+/* ==========================================================
+   GROUP CHAT STYLES
+   ========================================================== */
+
+/* Group message — glass backdrop matching regular chat bubbles */
+.group-message {
+  background: rgba(10, 10, 10, 0.75);
+  border: 1px solid rgba(255, 0, 127, 0.25);
+  border-left: 3px solid var(--primary-color);
+  border-radius: 8px;
+  padding: 12px 16px;
+  transition: background 0.15s;
+}
+
+.group-message:hover {
+  background: rgba(15, 15, 15, 0.82);
+}
+
+.group-message.observer {
+  border-left-color: #b060ff;
+  border-color: rgba(176, 96, 255, 0.25);
+  margin-left: 20px;
+}
+
+.group-message.group-live {
+  animation: group-live-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes group-live-pulse {
+  0%, 100% { background: rgba(10, 10, 10, 0.75); }
+  50% { background: rgba(20, 20, 20, 0.88); }
+}
+
+.group-live-indicator {
+  font-size: 9px;
+  font-family: 'Inter', sans-serif;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--work-green);
+  opacity: 0.7;
+  animation: blink 1s step-end infinite;
+  margin-left: 4px;
+}
+
+/* Persona selection cards */
+.group-persona-card {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px;
+  padding: 14px 12px;
+  cursor: pointer;
+  text-align: center;
+  transition: all 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.group-persona-card:hover {
+  border-color: var(--primary-color);
+  background: rgba(255,0,127,0.05);
+}
+
+.group-persona-card.selected {
+  border-color: var(--primary-color);
+  background: rgba(255,0,127,0.08);
+  box-shadow: 0 0 0 1px var(--primary-color) inset;
+}
+
+.group-persona-card.observer-set {
+  border-color: #b060ff;
+  background: rgba(176,96,255,0.08);
+  box-shadow: 0 0 0 1px #b060ff inset;
+}
+
+/* Markdown text inside group messages — scoped to avoid .message-content bleed */
+.group-text-content {
+  width: auto;
+  white-space: pre-wrap;
+  line-height: 1.55;
+  font-family: var(--font-inter) !important;
+  font-size: 1.05rem;
+  overflow-x: auto;
+}
+
+.group-text-content * {
+  font-family: var(--font-inter) !important;
+  color: var(--text-color) !important;
+  font-weight: 500 !important;
+}
+
+.group-text-content code {
+  background: rgba(255, 255, 255, 0.1);
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-family: monospace !important;
+  color: #00e5ff !important;
+}

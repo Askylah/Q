@@ -1,0 +1,268 @@
+/* === OCCULT CASE BOARD THEME === */
+/* Noir detective board with trembling red string, glitching anomalies, and Polaroid flicker. */
+
+@keyframes stringTremble {
+    0% {
+        transform: translateX(0);
+    }
+
+    50% {
+        transform: translateX(1px);
+    }
+
+    100% {
+        transform: translateX(0);
+    }
+}
+
+@keyframes anomalyGlitch {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    45% {
+        opacity: 0.8;
+    }
+
+    50% {
+        opacity: 0.4;
+    }
+
+    55% {
+        opacity: 0.8;
+    }
+}
+
+@keyframes polaroidFlicker {
+
+    0%,
+    100% {
+        filter: brightness(100%) contrast(100%);
+    }
+
+    20% {
+        filter: brightness(95%) contrast(105%);
+    }
+
+    40% {
+        filter: brightness(110%) contrast(90%);
+    }
+
+    60% {
+        filter: brightness(90%) contrast(115%);
+    }
+
+    80% {
+        filter: brightness(105%) contrast(95%);
+    }
+}
+
+.stApp {
+    background-color: #1a1816;
+    background-image: radial-gradient(#3a3028 2px, transparent 2px), radial-gradient(#3a3028 2px, transparent 2px);
+    background-size: 30px 30px;
+    background-position: 0 0, 15px 15px;
+    color: #f5f5f5;
+    font-family: 'Special Elite', 'Courier New', monospace;
+}
+
+#MainMenu {
+    visibility: hidden;
+}
+
+footer {
+    visibility: hidden;
+}
+
+header {
+    background: transparent !important;
+}
+
+[data-testid="stToolbar"] {
+    visibility: hidden !important;
+}
+
+/* Base tremoring strings in background */
+.stApp::after {
+    content: '';
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 9998;
+    background:
+        linear-gradient(15deg, transparent 49%, rgba(139, 0, 0, 0.4) 50%, transparent 51%) 0 0 / 100% 100% no-repeat,
+        linear-gradient(-35deg, transparent 49%, rgba(139, 0, 0, 0.3) 50%, transparent 51%) 0 0 / 100% 100% no-repeat;
+    animation: stringTremble 1.8s ease-in-out infinite;
+    mix-blend-mode: multiply;
+}
+
+[data-testid="stSidebar"] {
+    background-color: #221e1a !important;
+    border-right: 2px solid #8b0000 !important;
+    box-shadow: 2px 0 15px rgba(0, 0, 0, 0.5);
+}
+
+[data-testid="stExpandSidebarButton"] {
+    color: #e0d0c0 !important;
+    visibility: visible !important;
+}
+
+/* Chat bubles look like pinned polaroids or case notes */
+.stChatMessage {
+    background-color: #f2eadd !important;
+    color: #2a2520 !important;
+    border: 1px solid #d0c0b0 !important;
+    border-radius: 2px !important;
+    margin-bottom: 12px !important;
+    padding: 15px !important;
+    box-shadow: 2px 4px 10px rgba(0, 0, 0, 0.4) !important;
+    transform: rotate(-0.5deg);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.stChatMessage:nth-child(even) {
+    transform: rotate(0.8deg);
+}
+
+.stChatMessage:hover {
+    transform: rotate(0deg) scale(1.01);
+    box-shadow: 4px 6px 15px rgba(0, 0, 0, 0.5) !important;
+    z-index: 100;
+}
+
+/* User inputs look like typewriter text on dark ribbon */
+.stChatInput textarea {
+    background-color: #2a2520 !important;
+    color: #f5f5f5 !important;
+    border: 1px solid #4a4038 !important;
+    border-radius: 0px !important;
+    border-left: 4px solid #8b0000 !important;
+    caret-color: #8b0000 !important;
+    font-family: 'Special Elite', monospace !important;
+}
+
+.stChatInput textarea:focus {
+    border-color: #8b0000 !important;
+    box-shadow: 0 0 10px rgba(139, 0, 0, 0.2) !important;
+}
+
+.stChatInput textarea::placeholder {
+    color: #8a7a6a !important;
+}
+
+.stButton>button {
+    background-color: #2a2520 !important;
+    color: #e0d0c0 !important;
+    border: 1px solid #4a4038 !important;
+    border-radius: 0px !important;
+    font-family: 'Special Elite', monospace !important;
+    transition: all 0.2s ease;
+}
+
+.stButton>button:hover {
+    background-color: #3a3028 !important;
+    border-color: #8b0000 !important;
+    color: #f5f5f5 !important;
+    box-shadow: 0 0 8px rgba(139, 0, 0, 0.3) !important;
+}
+
+h1,
+h2,
+h3 {
+    color: #e0d0c0 !important;
+    font-family: 'Special Elite', monospace !important;
+    border-bottom: 2px dashed #4a4038;
+    padding-bottom: 5px;
+}
+
+h1 {
+    text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.8);
+    animation: anomalyGlitch 4s infinite;
+}
+
+/* Persona Cards look like suspect profiles */
+.persona-card {
+    background: #f2eadd;
+    color: #2a2520;
+    border: 1px solid #4a4038;
+    border-top: 10px solid #2a2520;
+    border-radius: 0px;
+    padding: 20px;
+    margin: 10px 0;
+    box-shadow: 2px 2px 8px rgba(0, 0, 0, 0.5);
+    transform: rotate(1deg);
+    transition: all 0.3s ease;
+}
+
+.persona-card:hover {
+    transform: rotate(0deg) scale(1.02);
+    border-color: #8b0000;
+    animation: polaroidFlicker 2s infinite;
+}
+
+.stTextInput input,
+.stTextArea textarea,
+.stSelectbox select {
+    background-color: #f2eadd !important;
+    color: #2a2520 !important;
+    border: 1px dashed #4a4038 !important;
+    border-radius: 0px !important;
+    font-family: 'Special Elite', monospace !important;
+}
+
+.stTextInput input:focus,
+.stTextArea textarea:focus {
+    border-color: #8b0000 !important;
+    background-color: #fff8f0 !important;
+}
+
+.streamlit-expanderHeader {
+    background-color: #221e1a !important;
+    color: #e0d0c0 !important;
+    border-radius: 0px !important;
+    border-bottom: 1px solid #4a4038 !important;
+}
+
+.stTabs [data-baseweb="tab-list"] {
+    background-color: #1a1816;
+}
+
+.stTabs [data-baseweb="tab"] {
+    background-color: #221e1a !important;
+    color: #8a7a6a !important;
+    border: 1px solid #4a4038 !important;
+    border-radius: 0px !important;
+}
+
+.stTabs [aria-selected="true"] {
+    background-color: #3a3028 !important;
+    color: #f5f5f5 !important;
+    border-bottom: 2px solid #8b0000 !important;
+}
+
+::-webkit-scrollbar {
+    width: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: #1a1816;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #4a4038;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #8b0000;
+}
+
+a {
+    color: #8b0000 !important;
+    text-decoration: underline !important;
+    text-decoration-style: dashed !important;
+}

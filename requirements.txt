@@ -1,0 +1,12 @@
+streamlit
+python-dotenv
+scikit-learn
+numpy
+requests
+duckduckgo-search
+
+# Phase 1: FastAPI Backend
+fastapi
+uvicorn
+python-multipart
+mcp

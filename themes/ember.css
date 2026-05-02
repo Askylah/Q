@@ -1,0 +1,192 @@
+/* === EMBER THEME === */
+/* Warm dark with amber/orange fire accents */
+
+.stApp {
+    background-color: #0f0a08;
+    color: #c0b0a0;
+    font-family: 'Inter', 'Segoe UI', sans-serif;
+}
+
+#MainMenu {
+    visibility: hidden;
+}
+
+footer {
+    visibility: hidden;
+}
+
+header {
+    background: transparent !important;
+}
+
+[data-testid="stToolbar"] {
+    visibility: hidden !important;
+}
+
+[data-testid="stExpandSidebarButton"] {
+    color: #ff8c41 !important;
+    visibility: visible !important;
+}
+
+@keyframes forge-pulse {
+    0% {
+        box-shadow: inset 0 0 20px rgba(255, 60, 0, 0.02);
+    }
+
+    50% {
+        box-shadow: inset 0 0 80px rgba(255, 90, 0, 0.12);
+    }
+
+    100% {
+        box-shadow: inset 0 0 20px rgba(255, 60, 0, 0.02);
+    }
+}
+
+.stApp::after {
+    content: '';
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 9999;
+    animation: forge-pulse 6s ease-in-out infinite;
+}
+
+[data-testid="stSidebar"] {
+    background-color: #120d0a !important;
+    border-right: 1px solid #2a1a0a !important;
+}
+
+[data-testid="stSidebarCollapseButton"] {
+    color: #ff8c41 !important;
+    position: relative !important;
+    z-index: 10000 !important;
+}
+
+.stChatMessage {
+    background-color: #140e0a !important;
+    border: 1px solid #2a1a0a !important;
+    border-left: 3px solid #ff8c41 !important;
+    border-radius: 4px !important;
+    margin-bottom: 6px !important;
+}
+
+.stChatMessage:hover {
+    border-color: #ff8c41 !important;
+    box-shadow: 0 0 10px rgba(255, 140, 65, 0.1) !important;
+}
+
+.stChatInput textarea {
+    background-color: #120d0a !important;
+    color: #ffb070 !important;
+    border: 1px solid #2a1a0a !important;
+    border-radius: 4px !important;
+    caret-color: #ff8c41 !important;
+}
+
+.stChatInput textarea:focus {
+    border-color: #ff8c41 !important;
+    box-shadow: 0 0 10px rgba(255, 140, 65, 0.15) !important;
+}
+
+.stChatInput textarea::placeholder {
+    color: #4a3020 !important;
+}
+
+.stButton>button {
+    background-color: #140e0a !important;
+    color: #ff8c41 !important;
+    border: 1px solid #2a1a0a !important;
+    border-radius: 4px !important;
+    transition: all 0.2s ease;
+}
+
+.stButton>button:hover {
+    background-color: #1a1208 !important;
+    border-color: #ff8c41 !important;
+    box-shadow: 0 0 12px rgba(255, 140, 65, 0.2) !important;
+}
+
+h1,
+h2,
+h3 {
+    color: #ff8c41 !important;
+}
+
+h1 {
+    text-shadow: 0 0 15px rgba(255, 140, 65, 0.3), 0 0 30px rgba(255, 80, 20, 0.1);
+}
+
+.persona-card {
+    background: #140e0a;
+    border: 1px solid #2a1a0a;
+    border-left: 3px solid #ff8c41;
+    border-radius: 4px;
+    padding: 20px;
+    margin: 10px 0;
+    transition: all 0.2s ease;
+}
+
+.persona-card:hover {
+    border-color: #ff8c41;
+    box-shadow: 0 0 15px rgba(255, 140, 65, 0.1);
+}
+
+.stTextInput input,
+.stTextArea textarea,
+.stSelectbox select {
+    background-color: #120d0a !important;
+    color: #c0b0a0 !important;
+    border: 1px solid #2a1a0a !important;
+    border-radius: 4px !important;
+}
+
+.stTextInput input:focus,
+.stTextArea textarea:focus {
+    border-color: #ff8c41 !important;
+}
+
+.streamlit-expanderHeader {
+    background-color: #140e0a !important;
+    color: #ff8c41 !important;
+    border-radius: 4px !important;
+}
+
+.stTabs [data-baseweb="tab-list"] {
+    background-color: #120d0a;
+}
+
+.stTabs [data-baseweb="tab"] {
+    background-color: #120d0a !important;
+    color: #555 !important;
+    border: 1px solid #2a1a0a !important;
+}
+
+.stTabs [aria-selected="true"] {
+    background-color: #1a1208 !important;
+    color: #ff8c41 !important;
+    border-bottom: 2px solid #ff8c41 !important;
+}
+
+::-webkit-scrollbar {
+    width: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: #0f0a08;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #2a1a0a;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #ff8c41;
+}
+
+a {
+    color: #ff8c41 !important;
+    text-decoration: none !important;
+}

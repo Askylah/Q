@@ -1,0 +1,320 @@
+@import url('https://fonts.googleapis.com/css2?family=Permanent+Marker&family=Inter:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/icon?family=Material+Icons');
+
+/* === Q — VOID SKIN (default) === */
+
+:root {
+  --primary-color: #ff007f;
+  --work-green: #00cc66;
+  --background-color: #000000;
+  --secondary-bg-color: rgba(5, 5, 5, 0.95);
+  --text-color: #00cc66;
+  --accent-purple: #1a0a2a;
+
+  --glass-bg: rgba(10, 10, 10, 0.98);
+  --border-dashed: 3px dashed #1a0a2a;
+  --border-neon: 1px solid rgba(255, 0, 127, 0.3);
+  --border-active: 1px solid rgba(255, 0, 127, 0.5);
+
+  --font-marker: 'Permanent Marker', cursive;
+  --font-inter: 'Inter', sans-serif;
+
+  --transition-fast: 0.15s ease-in-out;
+
+  /* Q skin tokens (unused in Void) */
+  --q-bg: transparent;
+  --q-sidebar: transparent;
+  --q-panel: transparent;
+  --q-border: transparent;
+  --q-text-primary: var(--text-color);
+  --q-text-dim: rgba(0, 204, 102, 0.5);
+  --q-accent: #ff007f;
+  --q-input-bg: rgba(10, 10, 10, 0.98);
+}
+
+/* === Q — DARK SKIN === */
+
+[data-theme="q-dark"] {
+  --primary-color: #5865f2;
+  --work-green: #5865f2;
+  --background-color: #313338;
+  --secondary-bg-color: #2b2d31;
+  --text-color: #dcddde;
+  --accent-purple: #3f4147;
+
+  --glass-bg: #2b2d31;
+  --border-dashed: 1px solid #3f4147;
+  --border-neon: 1px solid #3f4147;
+  --border-active: 1px solid #5865f2;
+
+  --font-marker: 'Inter', sans-serif;
+  --font-inter: 'Inter', sans-serif;
+
+  --q-bg: #313338;
+  --q-sidebar: #2b2d31;
+  --q-panel: #2b2d31;
+  --q-panel-alt: #35373c;
+  --q-border: #3f4147;
+  --q-text-primary: #dcddde;
+  --q-text-dim: #949ba4;
+  --q-text-muted: #6d6f78;
+  --q-accent: #5865f2;
+  --q-input-bg: #383a40;
+  --q-hover: rgba(255,255,255,0.06);
+  --q-active: rgba(88,101,242,0.15);
+}
+
+/* === Q — LIGHT SKIN === */
+
+[data-theme="q-light"] {
+  --primary-color: #5865f2;
+  --work-green: #5865f2;
+  --background-color: #f2f3f5;
+  --secondary-bg-color: #ffffff;
+  --text-color: #2e3338;
+  --accent-purple: #d1d3d6;
+
+  --glass-bg: #ffffff;
+  --border-dashed: 1px solid #d1d3d6;
+  --border-neon: 1px solid #d1d3d6;
+  --border-active: 1px solid #5865f2;
+
+  --font-marker: 'Inter', sans-serif;
+  --font-inter: 'Inter', sans-serif;
+
+  --q-bg: #f2f3f5;
+  --q-sidebar: #e3e5e8;
+  --q-panel: #ffffff;
+  --q-border: #d1d3d6;
+  --q-text-primary: #2e3338;
+  --q-text-dim: #6d6f78;
+  --q-accent: #5865f2;
+  --q-input-bg: #ffffff;
+}
+
+/* Q skin: suppress the void background art, use plain color */
+[data-theme="q-dark"] body,
+[data-theme="q-light"] body {
+  background-image: none !important;
+  font-family: 'Inter', sans-serif !important;
+}
+
+/* Q skin: sidebar gets its own bg token */
+[data-theme="q-dark"] .sidebar,
+[data-theme="q-light"] .sidebar {
+  background-color: var(--q-sidebar) !important;
+  border-right: 1px solid var(--q-border) !important;
+}
+
+[data-theme="q-light"] .sidebar {
+  background-color: #e3e5e8 !important;
+}
+
+/* Q skin: dashed borders become clean lines */
+[data-theme="q-dark"] .glass-panel,
+[data-theme="q-light"] .glass-panel {
+  background: var(--q-panel) !important;
+  border: 1px solid var(--q-border) !important;
+  backdrop-filter: none !important;
+}
+
+/* Q skin: chat input */
+[data-theme="q-dark"] .chat-input,
+[data-theme="q-light"] .chat-input {
+  background: var(--q-input-bg) !important;
+  border: 1px solid var(--q-border) !important;
+  color: var(--q-text-primary) !important;
+  font-family: 'Inter', sans-serif !important;
+}
+
+/* Q skin: message bubbles */
+[data-theme="q-dark"] .message-content,
+[data-theme="q-light"] .message-content {
+  background-color: var(--q-panel) !important;
+  border: 1px solid var(--q-border) !important;
+  color: var(--q-text-primary) !important;
+  font-family: 'Inter', sans-serif !important;
+}
+
+[data-theme="q-dark"] .message-content *,
+[data-theme="q-light"] .message-content * {
+  color: var(--q-text-primary) !important;
+  font-family: 'Inter', sans-serif !important;
+}
+
+/* Q skin: header */
+[data-theme="q-dark"] .chat-header,
+[data-theme="q-light"] .chat-header {
+  background-color: var(--q-sidebar) !important;
+  border-bottom: 1px solid var(--q-border) !important;
+}
+
+[data-theme="q-light"] .chat-header {
+  background-color: #e3e5e8 !important;
+}
+
+/* Q skin: sidebar title uses Inter instead of Marker */
+[data-theme="q-dark"] .sidebar-title,
+[data-theme="q-light"] .sidebar-title {
+  font-family: 'Inter', sans-serif !important;
+  font-weight: 700;
+  font-size: 20px;
+  letter-spacing: 0.5px;
+}
+
+/* Q skin: persona names */
+[data-theme="q-dark"] .persona-name,
+[data-theme="q-light"] .persona-name {
+  font-family: 'Inter', sans-serif !important;
+}
+
+/* Q skin: file tree hover */
+[data-theme="q-dark"] .file-tree-item:hover {
+  background: rgba(88, 101, 242, 0.1) !important;
+}
+
+[data-theme="q-light"] .file-tree-item:hover {
+  background: rgba(88, 101, 242, 0.08) !important;
+}
+
+/* Q skin: scrollbars */
+[data-theme="q-dark"] ::-webkit-scrollbar-thumb {
+  background: #4e5058 !important;
+}
+
+[data-theme="q-light"] ::-webkit-scrollbar-thumb {
+  background: #c4c6cb !important;
+}
+
+[data-theme="q-dark"] ::-webkit-scrollbar-thumb:hover,
+[data-theme="q-light"] ::-webkit-scrollbar-thumb:hover {
+  background: var(--q-accent) !important;
+}
+
+/* Q skin: header buttons */
+[data-theme="q-dark"] .header-button,
+[data-theme="q-light"] .header-button {
+  font-family: 'Inter', sans-serif !important;
+  font-weight: 600;
+  background: rgba(88, 101, 242, 0.1) !important;
+  border: 1px solid rgba(88, 101, 242, 0.3) !important;
+  color: #5865f2 !important;
+}
+
+[data-theme="q-dark"] .header-button:hover,
+[data-theme="q-light"] .header-button:hover {
+  background: rgba(88, 101, 242, 0.2) !important;
+}
+
+/* Q light: text overrides */
+[data-theme="q-light"] * {
+  color: var(--q-text-primary);
+}
+
+[data-theme="q-light"] .material-icons {
+  color: var(--q-accent) !important;
+}
+
+[data-theme="q-dark"] .material-icons {
+  color: var(--q-accent) !important;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-marker);
+  color: var(--text-color);
+  background-color: var(--background-color);
+  background-image: url('/void_bg.svg');
+  background-position: center;
+  background-size: cover;
+  background-attachment: fixed;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+#root {
+  height: 100%;
+  width: 100%;
+  display: flex;
+}
+
+/* Material Icons styling */
+.material-icons {
+  font-family: 'Material Icons' !important;
+  color: var(--primary-color);
+  visibility: visible !important;
+}
+
+/* Common Layout Components */
+.app-container {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  background: transparent;
+}
+
+/* Custom Scrollbar for Trenches */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--accent-purple);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--primary-color);
+}
+
+/* === CUSTOM RANGE SLIDERS (WORKSHOP) === */
+input[type=range] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  background: transparent;
+  height: 6px;
+  border-radius: 3px;
+  outline: none;
+  border: none !important;
+}
+
+/* The Track */
+input[type=range]::-webkit-slider-runnable-track {
+  width: 100%;
+  height: 6px;
+  cursor: pointer;
+  background: rgba(176, 96, 255, 0.3);
+  border-radius: 3px;
+}
+
+/* The Thumb */
+input[type=range]::-webkit-slider-thumb {
+  height: 18px;
+  width: 18px;
+  border-radius: 50%;
+  background: var(--primary-color);
+  cursor: pointer;
+  -webkit-appearance: none;
+  margin-top: -6px;
+  /* Center thumb on track */
+  box-shadow: 0 0 10px var(--primary-color);
+}
+
+/* The filled portion (Progress) */
+/* Requires JS to calculate percentage dynamically, or we use a clever CSS trick/accent color */
+/* Fortunately, modern browsers support accent-color which we can apply directly */
+input[type=range] {
+  accent-color: var(--primary-color);
+}
