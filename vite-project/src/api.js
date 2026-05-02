@@ -342,6 +342,15 @@ class PersonaAPI {
     }
 
     // --- GROUP CHAT ---
+    async fetchUserGroupSessions(username = "default_user") {
+        try {
+            const data = await this._fetch(`/groupchats/sessions/${encodeURIComponent(username)}`);
+            return data.sessions || [];
+        } catch (e) {
+            return [];
+        }
+    }
+
     async fetchGroupHistory(sessionId, username = "default_user", limit = 100) {
         try {
             const data = await this._fetch(`/groupchat/${encodeURIComponent(sessionId)}?username=${username}&limit=${limit}`);

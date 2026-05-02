@@ -254,6 +254,13 @@ def delete_chat_message(message_id: int):
         raise HTTPException(status_code=500, detail="Failed to delete message.")
     return {"status": "success"}
 
+@app.get("/groupchats/sessions/{username}")
+def get_user_group_sessions(username: str):
+    """Retrieve all unique group session IDs for a specific user."""
+    db_conn = db.UserManager()
+    sessions = db_conn.get_user_group_sessions(username)
+    return {"sessions": sessions}
+
 @app.post("/groupchat/{session_id}")
 def save_group_chat_message(session_id: str, msg: GroupMessagePayload):
     """Save a message to the group conversation history."""

@@ -394,6 +394,19 @@ class UserManager:
             print(f"DB ERROR (clear_group_history): {e}")
             return False
 
+    def get_user_group_sessions(self, username):
+        """Retrieve all unique group session IDs for a specific user."""
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT DISTINCT session_id FROM group_conversations WHERE username=?", (username,))
+            rows = c.fetchall()
+            conn.close()
+            return [r[0] for r in rows]
+        except Exception as e:
+            print(f"DB ERROR (get_user_group_sessions): {e}")
+            return []
+
     
     def hash_password(self, password):
         """Hash a password using bcrypt with salt."""

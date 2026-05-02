@@ -43,6 +43,8 @@ function App() {
   const [groupLiveSlot, setGroupLiveSlot] = useState(null);
   const [groupSessionStarted, setGroupSessionStarted] = useState(false);
   const [groupMemberModels, setGroupMemberModels] = useState({}); // { personaKey: modelId }
+  const [groupSessionName, setGroupSessionName] = useState("main");
+  const [allGroupSessions, setAllGroupSessions] = useState([]);
   const groupAbortRef = useRef(null);
   const groupEndRef = useRef(null);
   const personaSnapshotsRef = useRef({}); // snapshot of individual histories before group contamination
@@ -145,8 +147,21 @@ function App() {
 
   // Auto-scroll group chat to bottom
   useEffect(() => {
-    groupEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [groupHistory, groupLiveSlot]);
+    setTimeout(() => {
+      groupEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, 10);
+  }, [groupHistory, groupLiveSlot, currentView]);
+
+  // Auto-scroll individual chat to bottom
+  useEffect(() => {
+    setTimeout(() => {
+      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, 10);
+  }, [chatHistory, liveStreamText, currentView]);
+
+  const getGroupSessionId = () => {
+    return [...groupMembers].sort().join('_') + '_' + USERNAME + '_' + (groupSessionName.trim().toLowerCase() || 'main');
+  };
 
   // ─── GROUP CHAT ORCHESTRATION ─────────────────────────────────────────────
   const runGroupRound = async (userMessage) => {
@@ -155,7 +170,7 @@ function App() {
     groupAbortRef.current = controller;
     setGroupStreaming(true);
 
-    const sessionId = [...groupMembers].sort().join('_') + '_' + USERNAME;
+    const sessionId = getGroupSessionId();
 
     const userMsg = { role: 'user', persona_key: 'user', persona_name: USERNAME, persona_avatar: userAvatar, content: userMessage, is_observer: false };
     setGroupHistory(prev => [...prev, userMsg]);
@@ -255,9 +270,16 @@ function App() {
   };
 
   const startGroupSession = async () => {
-    const sessionId = [...groupMembers].sort().join('_') + '_' + USERNAME;
+    const sessionId = getGroupSessionId();
     const hist = await api.fetchGroupHistory(sessionId, USERNAME);
     setGroupHistory(hist.length > 0 ? hist : []);
+    
+    // Add to our tracked sessions list so it shows in the dropdown
+    setAllGroupSessions(prev => {
+      if (!prev.includes(sessionId)) return [...prev, sessionId];
+      return prev;
+    });
+
     // Snapshot each member's real individual chat history before group rounds contaminate it
     const snapshots = {};
     for (const key of groupMembers) {
@@ -376,6 +398,52 @@ function App() {
             </div>
           )}
 
+          {groupMembers.length > 0 && (
+            <div style={{ marginBottom: '24px', display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <label style={{ color: 'var(--text-dim)', fontSize: '13px', fontFamily: 'var(--font-inter)' }}>Session Name:</label>
+              <input 
+                list="session-namespaces" 
+                value={groupSessionName}
+                onChange={(e) => setGroupSessionName(e.target.value)}
+                placeholder="main"
+                style={{
+                  background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(255,255,255,0.1)',
+                  color: 'var(--text-color)', fontSize: '13px', fontFamily: 'var(--font-inter)',
+                  padding: '6px 10px', borderRadius: '4px', outline: 'none', flex: 1, maxWidth: '200px'
+                }}
+              />
+              <datalist id="session-namespaces">
+                {(() => {
+                  const basePrefix = [...groupMembers].sort().join('_') + '_' + USERNAME + '_';
+                  const namespaces = allGroupSessions
+                    .filter(s => s.startsWith(basePrefix))
+                    .map(s => s.replace(basePrefix, ''));
+                  if (!namespaces.includes('main')) namespaces.unshift('main');
+                  return [...new Set(namespaces)].map(ns => <option key={ns} value={ns} />);
+                })()}
+              </datalist>
+              <button
+                title="Delete this session"
+                onClick={async () => {
+                  if (window.confirm(`Delete the entire "${groupSessionName}" session for this group?`)) {
+                    const sid = getGroupSessionId();
+                    await api.clearGroupHistory(sid, USERNAME);
+                    setAllGroupSessions(prev => prev.filter(s => s !== sid));
+                    setGroupSessionName("main");
+                  }
+                }}
+                style={{
+                  background: 'transparent', border: 'none', color: '#ed4245', cursor: 'pointer',
+                  opacity: 0.7, padding: '4px', display: 'flex', alignItems: 'center'
+                }}
+                onMouseEnter={e => e.currentTarget.style.opacity = '1'}
+                onMouseLeave={e => e.currentTarget.style.opacity = '0.7'}
+              >
+                <span className="material-icons" style={{ fontSize: '18px' }}>delete</span>
+              </button>
+            </div>
+          )}
+
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px', maxWidth: '280px' }}>
             <label style={{ color: 'var(--text-dim)', fontSize: '13px', fontFamily: 'var(--font-inter)' }}>Turns per persona:</label>
             <input type="range" min={1} max={4} value={groupTurnLimit} onChange={e => setGroupTurnLimit(Number(e.target.value))}
@@ -423,7 +491,7 @@ function App() {
             )}
             <button onClick={async () => {
               if (window.confirm('Wipe history for this group? This cannot be undone.')) {
-                const sessionId = [...groupMembers].sort().join('_') + '_' + USERNAME;
+                const sessionId = getGroupSessionId();
                 await api.clearGroupHistory(sessionId, USERNAME);
                 setGroupHistory([]);
               }
@@ -607,6 +675,8 @@ function App() {
           setActivePersona("rick");
         }
       }
+      const sessions = await api.fetchUserGroupSessions(USERNAME);
+      setAllGroupSessions(sessions);
     };
     initData();
   }, []);
