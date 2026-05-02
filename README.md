@@ -2,11 +2,10 @@
 
 You can name your app folder whatever you want though, so the path name may vary. Rick is integrated for now, fully deletable if you prefer. We have group chat logic. Thats the latest thing. To get started you want to click settings and input an API key. Its pretty straight forward. I don't reccommend messing with parameters if you don't understand them. There is more refinement to come. As of now I am a one woman show. This isn't just a roleplay app....Its an IDE but thats got a fair bit more work. There is also a security architecture I built but it relies on docker. Its entirely optional. Parts of the firewall might still work. It can be turned off though under maintenence in settings. Its your system after all.
 
-A private AI companion sandbox built with **FastAPI + Vite + React**. Houses multiple distinct AI personas with persistent memory, lorebook-driven knowledge graphs, and multi-model routing across OpenRouter, Google, Anthropic, and OpenAI.
 
 ---
 
-A private AI companion sandbox built with **FastAPI + Vite + React**. Houses multiple distinct AI personas with persistent memory, lorebook-driven knowledge graphs, and multi-model routing across OpenRouter, Google, Anthropic, and OpenAI.
+A private AI companion sandbox built with **FastAPI + Vite + React**. Houses multiple distinct AI personas with persistent memory, lorebook-driven knowledge graphs, and multi-model routing across OpenRouter, Google, Anthropic, and OpenAI. An IDE...its also an IDE in progress, you will see.
 
 ---
 
