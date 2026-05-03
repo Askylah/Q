@@ -3,16 +3,22 @@ import os
 import requests
 from datetime import datetime
 import database as db
+import governance_manager as gov
 from rag_engine import PersonaRAG
 from on_demand_loader import load_on_demand_context
 from mode_engine import detect_mode
 from typing import Union
 import sys
 import threading
-sys.path.append(os.path.join(os.path.dirname(__file__), "plugins"))
-from observational_memory import Observer, Reflector
-import firewall
-import output_validator
+from typing import Union, Optional
+from plugin_manager import get_plugin_manager, HookType
+
+# Initialize and Load Plugins
+PLUGIN_DIR = os.path.join(os.path.dirname(__file__), "plugins")
+manager = get_plugin_manager()
+manager.load_plugins(PLUGIN_DIR)
+
+# Deep Memory (optional pluggable module)
 
 # Deep Memory (optional pluggable module)
 try:
@@ -283,7 +289,7 @@ def call_llm(
             return ErrStream3()
         return f"⚠️ Connection Error: {err_msg}"
 
-def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, tools, kwargs_dict, max_loops=3):
+def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, tools, kwargs_dict, max_loops=3, **kwargs):
     """
     Consumes the SSE stream. If it detects `tool_calls` chunks, it buffers them, 
     executes them locally, appends the result to the messages, and recurses 
@@ -379,13 +385,28 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
                 try: args = json.loads(args_str)
                 except: args = {}
                 
+                # ---- GOVERNANCE CHECK ----
+                gman = gov.get_governance_manager()
+                if gman.should_require_approval(name, args):
+                    print(f"[GOVERNANCE] Tool {name} requires explicit approval.")
+                    yield f'data: {{"control": "approval_required", "tool": "{name}", "args": {args_str}}}\n\n'.encode('utf-8')
+                    yield f'data: {{"choices": [{{"delta": {{"content": "⚠️ **Approval Required**: I am attempting to use `{name}`. Should I proceed?"}}}}]}}\n\n'.encode('utf-8')
+                    yield b'data: [DONE]\n\n'
+                    return # Stop execution until user approves
+                # -------------------------
+
                 print(f"[TOOL EXECUTION] Resolving {name}...")
                 
                 mcp_tools = []
                 if mcp_client:
                     mcp_tools = [t["function"]["name"] for t in mcp_client.sync_get_mcp_tools()]
                     
-                if not output_validator.validate_tool_call(name, args):
+                if name == "activate_skill":
+                    import skill_orchestrator
+                    session_id = kwargs.get("session_id", f"sess_{kwargs.get('username')}_{kwargs.get('persona_key')}")
+                    success = skill_orchestrator.orchestrator.activate_skill(session_id, args.get("skill_id"))
+                    result = f"✅ Skill '{args.get('skill_id')}' activation status: {success}. The new tools and persona-shifts associated with this branch are now active."
+                elif not output_validator.validate_tool_call(name, args):
                     result = "⚠️ [OUTPUT_GATE] Tool call blocked: Security violation."
                 elif mcp_client and name in mcp_tools:
                     result = mcp_client.sync_call_mcp_tool(name, args)
@@ -423,7 +444,8 @@ def build_context_and_stream(
     custom_auth_header_name: str = "Authorization",
     custom_auth_prefix: str = "Bearer ",
     bypass_firewall: bool = False,
-    workspace_context: Optional[dict] = None
+    workspace_context: Optional[dict] = None,
+    **kwargs
 ):
     """Assembles RAG, Observational Memory, and ON-DEMAND modules before streaming response."""
     db_conn = db.UserManager()
@@ -445,15 +467,20 @@ def build_context_and_stream(
     else:
         print(f"[MODEL ROUTING] Standard Operation: {active_mode.upper()}. Using Base Model ({model_id}).")
 
-    # ---- LAYER 1.5: SEMANTIC FIREWALL (THE BOUNCER) ----
-    if not bypass_firewall and firewall.check_intent(text_only_message):
-        # We return a generic failure to the generator to drop the connection
-        class FirewallDropStream:
-            def __iter__(self):
-                yield f'data: {{"choices": [{{"delta": {{"content": "⚠️ [SECURITY_GATE] Intent violation detected. Connection dropped."}}}}]}}\n\n'.encode('utf-8')
-                yield b'data: [DONE]\n\n'
-            def iter_lines(self): yield from self.__iter__()
-        return FirewallDropStream()
+    # ---- LAYER 1.5: DYNAMIC GATEKEEPERS (THE BOUNCER) ----
+    if not bypass_firewall:
+        blocked = manager.run_gatekeepers(
+            text_only_message, 
+            bypass_firewall=bypass_firewall
+        )
+        if blocked:
+            # We return a generic failure to the generator to drop the connection
+            class FirewallDropStream:
+                def __iter__(self):
+                    yield f'data: {{"choices": [{{"delta": {{"content": "⚠️ [SECURITY_GATE] Intent violation detected. Connection dropped."}}}}]}}\n\n'.encode('utf-8')
+                    yield b'data: [DONE]\n\n'
+                def iter_lines(self): yield from self.__iter__()
+            return FirewallDropStream()
 
     system_prompt = persona_data.get("system_prompt", "You are a helpful assistant.")
     if not persona_data.get("is_custom"):
@@ -486,6 +513,12 @@ def build_context_and_stream(
     )
     system_prompt = system_prompt + temporal_anchor
     # ---------------------------------
+
+    # ---- LAYER 1.6: DYNAMIC PROMPT ENRICHMENT (SKILL TREES) ----
+    session_id = kwargs.get("session_id", f"sess_{username}_{persona_key}")
+    dynamic_segments = manager.run_prompt_providers(session_id=session_id)
+    if dynamic_segments:
+        system_prompt += "\n\n[DYNAMIC_SKILL_ENRICHMENT]\n" + "\n\n".join(dynamic_segments)
 
     on_demand_files = persona_data.get("on_demand_files", [])
     if not on_demand_files and persona_data.get("on_demand_file"):
@@ -612,56 +645,42 @@ def build_context_and_stream(
         else:
             user_message = f"{nc_block}\n{user_message}"
 
-    if om_enabled:
-        # Log user message
-        observer = Observer(db_conn, username, persona_key)
-        observer.log_event("user_message", text_only_message)
+    # ---- LAYER 4: DYNAMIC OBSERVERS (EVENT LOGGING) ----
+    # Token Conservation Gate: Only execute if enabled for this persona.
+    om_enabled = persona_data.get("om_enabled", True)
+    om_threshold = persona_data.get("om_turn_threshold", 5)
 
-        def invoke_reflector():
-            try:
-                # We must instantiate a local db connection since sqlite hates sharing across threads
-                thread_db = db.UserManager() 
-                reflector = Reflector(
-                    db=thread_db, 
-                    username=username, 
-                    persona=persona_key, 
-                    # Re-use the master call_llm but block the stream so it gets the full response immediately
-                    llm_callback=lambda prompt: call_llm(
-                        model_id=model_id, 
-                        system_prompt="You are an internal Reflector agent.", 
-                        messages=[{"role": "user", "content": prompt}], 
-                        api_keys=api_keys, 
-                        stream=False, 
-                        temperature=0.3,
-                        custom_base_url=custom_base_url,
-                        custom_provider_type=custom_provider_type,
-                        custom_auth_header_name=custom_auth_header_name,
-                        custom_auth_prefix=custom_auth_prefix
-                    ).get("choices", [{}])[0].get("message", {}).get("content", "") if isinstance(call_llm(
-                        model_id, "You are an internal Reflector agent.", [{"role": "user", "content": prompt}], api_keys, stream=False, temperature=0.3
-                    ), dict) else ""
-                )
-                # The reflector checks if turn threshold is met inside its own logic
-                result = reflector.reflect(turn_threshold=om_threshold)
-                if result:
-                    display_name = persona_data.get("name", persona_key)
-                    print(f"[OBSERVATIONAL MEMORY] 🌌 Reflector generated a new dense observation for {display_name}")
-            except Exception as e:
-                print(f"[OBSERVATIONAL MEMORY ERROR] Thread failed: {e}")
+    # Define a clean callback for the reflector to use
+    def reflector_llm_callback(prompt):
+        res = call_llm(
+            model_id=model_id, 
+            system_prompt="You are an internal Reflector agent.", 
+            messages=[{"role": "user", "content": prompt}], 
+            api_keys=api_keys, 
+            stream=False, 
+            temperature=0.3,
+            custom_base_url=custom_base_url,
+            custom_provider_type=custom_provider_type,
+            custom_auth_header_name=custom_auth_header_name,
+            custom_auth_prefix=custom_auth_prefix
+        )
+        if isinstance(res, dict):
+            return res.get("choices", [{}])[0].get("message", {}).get("content", "")
+        return ""
 
-        # If it's time to reflect (roughly), we will tell the frontend to show the indicator.
-        # This is a bit of a hack since the Reflector checks the DB count internally, 
-        # but we can do a quick check here too so we only show the UI indicator when it actually runs.
-        logs = db_conn.get_observation_log(username, persona_key, limit=1)
-        # In a real system we'd track exact counts, here we just assume if there's history, it MIGHT run
-        # A simpler way is to just send the event to the stream generator
-        
-        # We need to signal the frontend. Since we are inside the stream builder, we can't yield directly here.
-        # We will append a hidden tool call or custom delta to the stream generator.
-        
-        threading.Thread(target=invoke_reflector, daemon=True).start()
+    # Execute all observers (e.g., Memory, Audit Logs)
+    manager.run_observers(
+        "user_message", 
+        text_only_message,
+        db=db_conn,
+        username=username,
+        persona_key=persona_key,
+        om_enabled=om_enabled,
+        om_turn_threshold=om_threshold,
+        llm_callback=reflector_llm_callback
+    )
 
-    # Collect all available tools
+    # ---- LAYER 5: DYNAMIC TOOL DISCOVERY (SKILL TREES / MCP) ----
     active_tools = []
     print("\n[TOOL DISCOVERY START]")
     try:
@@ -669,16 +688,21 @@ def build_context_and_stream(
             tools = mcp_client.sync_get_mcp_tools()
             if tools:
                 active_tools.extend(tools)
-                print(f"[TOOL DISCOVERY] Successfully loaded {len(tools)} MCP tools: {[t['function']['name'] for t in tools]}")
-            else:
-                print("[TOOL DISCOVERY] MCP Client returned 0 tools.")
-        else:
-            print("[TOOL DISCOVERY] WARNING: mcp_client module is None. Import failed on startup.")
+                print(f"[TOOL DISCOVERY] Successfully loaded {len(tools)} MCP tools.")
             
         universal_tools = load_universal_schemas()
         if universal_tools:
             active_tools.extend(universal_tools)
-            print(f"[TOOL DISCOVERY] Loaded {len(universal_tools)} universal tools.")
+
+        # Dynamic Plugin Tool Providers (The Skill Tree)
+        session_id = kwargs.get("session_id", f"sess_{username}_{persona_key}")
+        active_tools = manager.run_tool_providers(
+            active_tools, 
+            session_id=session_id,
+            username=username,
+            persona_key=persona_key
+        )
+        
     except Exception as e:
         print(f"[TOOL DISCOVERY] CRITICAL ERROR during tool fetch: {e}")
         
@@ -715,7 +739,10 @@ def build_context_and_stream(
                 messages, 
                 api_keys, 
                 tools=active_tools if active_tools else None,
-                kwargs_dict=kwargs_dict
+                kwargs_dict=kwargs_dict,
+                username=username,
+                persona_key=persona_key,
+                session_id=session_id
             )
             
         def iter_lines(self):

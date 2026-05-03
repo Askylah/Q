@@ -1,0 +1,75 @@
+{
+    "scout": {
+        "name": "The Scout",
+        "description": "Baseline discovery and environmental awareness.",
+        "prerequisites": [],
+        "prompt_addition": "You are currently in SCOUT mode. Your primary objective is environmental awareness and data gathering. Use listing and searching tools to map out the context before committing to complex logic.",
+        "tools": [
+            {
+                "function": {
+                    "name": "activate_skill",
+                    "description": "Unlocks a new branch of your skill tree.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "skill_id": {
+                                "type": "string",
+                                "enum": ["architect", "scribe"],
+                                "description": "The ID of the skill to unlock."
+                            }
+                        },
+                        "required": ["skill_id"]
+                    }
+                }
+            }
+        ]
+    },
+    "architect": {
+        "name": "The Architect",
+        "description": "Logic tree generation and planning.",
+        "prerequisites": ["scout"],
+        "prompt_addition": "ARCHITECT MODE ACTIVE. You are now authorized for high-level system planning and logic tree construction. Prioritize structural integrity and modularity in your proposals.",
+        "tools": [
+            {
+                "function": {
+                    "name": "generate_logic_tree",
+                    "description": "Creates a structured roadmap for a complex task.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "goal": {"type": "string"},
+                            "steps": {
+                                "type": "array",
+                                "items": {"type": "string"}
+                            }
+                        },
+                        "required": ["goal", "steps"]
+                    }
+                }
+            }
+        ]
+    },
+    "scribe": {
+        "name": "The Scribe",
+        "description": "Rigorous documentation and knowledge graph linking.",
+        "prerequisites": ["scout"],
+        "prompt_addition": "SCRIBE MODE ACTIVE. Your objective is knowledge persistence. Ensure every insight is linked to the Zettel Knowledge Graph and documented with technical precision.",
+        "tools": [
+            {
+                "function": {
+                    "name": "create_zettel_link",
+                    "description": "Creates a semantic link between two knowledge nodes.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "source_id": {"type": "string"},
+                            "target_id": {"type": "string"},
+                            "relationship": {"type": "string"}
+                        },
+                        "required": ["source_id", "target_id", "relationship"]
+                    }
+                }
+            }
+        ]
+    }
+}
