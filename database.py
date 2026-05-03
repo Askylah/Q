@@ -180,14 +180,14 @@ class UserManager:
             )
         ''')
 
-        # FTS5 virtual table for keyword search across zettel nodes
+        # User Settings table
         c.execute('''
-            CREATE VIRTUAL TABLE IF NOT EXISTS zettel_fts USING fts5(
-                node_db_id,
-                content,
-                title,
-                category,
-                content_rowid='rowid'
+            CREATE TABLE IF NOT EXISTS user_settings (
+                username TEXT PRIMARY KEY,
+                review_policy TEXT DEFAULT 'ask',
+                auto_execute_terminal INTEGER DEFAULT 0,
+                active_persona_key TEXT,
+                security_level TEXT DEFAULT 'strict'
             )
         ''')
 
@@ -968,3 +968,36 @@ class UserManager:
         except Exception as e:
             print(f"DB ERROR (mark_zettel_entry_processed): {e}")
             return False
+    def get_user_settings(self, username: str) -> dict:
+        """Fetches the governance and UI settings for a user."""
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute("SELECT * FROM user_settings WHERE username = ?", (username,))
+            row = c.fetchone()
+            conn.close()
+            if row:
+                return dict(row)
+            return {"username": username, "review_policy": "ask", "auto_execute_terminal": 0, "security_level": "strict"}
+        except Exception as e:
+            print(f"[DB_ERROR] Failed to fetch settings: {e}")
+            return {"review_policy": "ask"}
+
+    def update_user_settings(self, username: str, settings: dict):
+        """Updates user governance settings."""
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            
+            # Ensure the row exists
+            c.execute("INSERT OR IGNORE INTO user_settings (username) VALUES (?)", (username,))
+            
+            for key, value in settings.items():
+                if key in ["review_policy", "auto_execute_terminal", "active_persona_key", "security_level"]:
+                    c.execute(f"UPDATE user_settings SET {key} = ? WHERE username = ?", (value, username))
+            
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"[DB_ERROR] Failed to update settings: {e}")

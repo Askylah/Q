@@ -133,6 +133,12 @@ function App() {
     };
   });
 
+  const [userSettings, setUserSettings] = useState({
+    review_policy: 'ask',
+    auto_execute_terminal: 0,
+    security_level: 'strict'
+  });
+
   // Persist State to localStorage on change
   useEffect(() => {
     localStorage.setItem('persona_api_keys', JSON.stringify(apiKeys));
@@ -677,6 +683,8 @@ function App() {
       }
       const sessions = await api.fetchUserGroupSessions(USERNAME);
       setAllGroupSessions(sessions);
+      const settings = await api.fetchUserSettings(USERNAME);
+      if (settings) setUserSettings(settings);
     };
     initData();
   }, []);
@@ -2078,6 +2086,12 @@ function App() {
           <div style={S.navItem(id)} onClick={() => setSettingsSection(id)}>{label}</div>
         );
 
+        const updateGovSetting = async (key, value) => {
+          const newSettings = { ...userSettings, [key]: value };
+          setUserSettings(newSettings);
+          await api.updateUserSettings(USERNAME, newSettings);
+        };
+
         const renderContent = () => {
           if (settingsSection === 'api') return (
             <div>
@@ -2290,6 +2304,46 @@ function App() {
             </div>
           );
 
+          if (settingsSection === 'governance') return (
+            <div>
+              <div style={S.sectionTitle}>Governance & Safety</div>
+              <div style={S.sectionSub}>Configure the "Strict Physics" and human-in-the-loop gates.</div>
+
+              <label style={S.label}>Review Policy</label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '24px' }}>
+                {[
+                  { id: 'ask', label: 'Balanced (Ask)', desc: 'Requires approval only for KINETIC actions (File writing, terminal execution).' },
+                  { id: 'always', label: 'Paranoid (Always)', desc: 'Requires explicit approval for EVERY tool call, including information gathering.' },
+                  { id: 'never', label: 'Autonomous (Never)', desc: 'No approvals required. Agent operates within Docker sandbox automatically.' }
+                ].map(opt => (
+                  <div key={opt.id} 
+                    onClick={() => updateGovSetting('review_policy', opt.id)}
+                    style={{
+                      padding: '12px', borderRadius: '6px', cursor: 'pointer',
+                      background: userSettings.review_policy === opt.id ? 'rgba(88,101,242,0.1)' : 'transparent',
+                      border: userSettings.review_policy === opt.id ? '1px solid #5865f2' : '1px solid rgba(255,255,255,0.1)',
+                    }}>
+                    <div style={{ fontWeight: '600', fontSize: '14px', color: userSettings.review_policy === opt.id ? '#5865f2' : 'var(--text-color)' }}>{opt.label}</div>
+                    <div style={{ fontSize: '12px', opacity: 0.6, marginTop: '2px' }}>{opt.desc}</div>
+                  </div>
+                ))}
+              </div>
+
+              <div style={S.divider} />
+
+              <label style={S.label}>Security Level</label>
+              <select style={{...S.input, appearance: 'menulist', cursor: 'pointer'}}
+                value={userSettings.security_level}
+                onChange={e => updateGovSetting('security_level', e.target.value)}>
+                <option value="strict">Strict (Docker + Paths + Gates)</option>
+                <option value="permissive">Permissive (Warning: Local Execution)</option>
+              </select>
+              <div style={{ fontSize: '11px', opacity: 0.5, marginTop: '4px' }}>
+                Note: "Permissive" mode is currently disabled in the backend for your protection.
+              </div>
+            </div>
+          );
+
           if (settingsSection === 'profile') return (
             <div>
               <div style={S.sectionTitle}>Profile</div>
@@ -2338,6 +2392,7 @@ function App() {
                 {navSection('profile', 'Profile')}
                 <div style={S.categoryLabel}>Danger Zone</div>
                 {navSection('maintenance', 'Maintenance')}
+                {navSection('governance', 'Governance')}
 
                 {/* Close at bottom of nav */}
                 <div style={{ marginTop: 'auto', padding: '16px 8px 4px 8px' }}>

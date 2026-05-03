@@ -104,6 +104,14 @@ class LoreEntryPayload(BaseModel):
     content: str
     active_api_keys: dict = {}
 
+class SettingsPayload(BaseModel):
+    model_config = {"extra": "forbid"}
+    username: str = "default_user"
+    review_policy: str = "ask"
+    auto_execute_terminal: int = 0
+    active_persona_key: str = ""
+    security_level: str = "strict"
+
 # --- CORE LOGIC (Decoupled from Streamlit) ---
 def load_personas_logic(username: str = None):
     personas = {}
@@ -561,6 +569,17 @@ def delete_workspace_item(path: str):
         return ws.delete_item(path)
     except SecurityViolation as e:
         raise HTTPException(status_code=403, detail=f"Security Violation: {str(e)}")
+
+@app.get("/settings/{username}")
+async def get_settings(username: str):
+    db_conn = db.UserManager()
+    return db_conn.get_user_settings(username)
+
+@app.post("/settings")
+async def update_settings(payload: SettingsPayload):
+    db_conn = db.UserManager()
+    db_conn.update_user_settings(payload.username, payload.model_dump())
+    return {"status": "success"}
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)

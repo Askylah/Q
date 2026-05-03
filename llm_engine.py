@@ -387,7 +387,7 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
                 
                 # ---- GOVERNANCE CHECK ----
                 gman = gov.get_governance_manager()
-                if gman.should_require_approval(name, args):
+                if gman.should_require_approval(name, args, username=kwargs.get('username', 'default')):
                     print(f"[GOVERNANCE] Tool {name} requires explicit approval.")
                     yield f'data: {{"control": "approval_required", "tool": "{name}", "args": {args_str}}}\n\n'.encode('utf-8')
                     yield f'data: {{"choices": [{{"delta": {{"content": "⚠️ **Approval Required**: I am attempting to use `{name}`. Should I proceed?"}}}}]}}\n\n'.encode('utf-8')

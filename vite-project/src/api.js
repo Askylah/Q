@@ -389,6 +389,26 @@ class PersonaAPI {
             return false;
         }
     }
+
+    // --- SETTINGS & GOVERNANCE ---
+    async fetchUserSettings(username = "default_user") {
+        try {
+            return await this._fetch(`/settings/${encodeURIComponent(username)}`);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    async updateUserSettings(username, settings) {
+        try {
+            return await this._fetch(`/settings`, {
+                method: 'POST',
+                body: JSON.stringify({ username, ...settings })
+            });
+        } catch (e) {
+            return null;
+        }
+    }
 }
 
 // Export a singleton instance globally for the App to use

@@ -32,16 +32,22 @@ class GovernanceManager:
     def get_danger_level(self, tool_name: str) -> DangerLevel:
         return self.registry.get(tool_name, DangerLevel.KINETIC) # Default to Kinetic if unknown
 
-    def should_require_approval(self, tool_name: str, args: Dict[str, Any]) -> bool:
+    def should_require_approval(self, tool_name: str, args: dict, username: str = "default") -> bool:
+        import database as db
         level = self.get_danger_level(tool_name)
         
+        # Load user-specific policy
+        user_db = db.UserManager()
+        settings = user_db.get_user_settings(username)
+        policy = settings.get("review_policy", "ask")
+
         if level == DangerLevel.DESTRUCTIVE:
             return True # Always require approval for destruction
             
-        if self.review_policy == "always":
+        if policy == "always":
             return True
             
-        if self.review_policy == "ask" and level >= DangerLevel.KINETIC:
+        if policy == "ask" and level >= DangerLevel.KINETIC:
             return True
             
         return False
