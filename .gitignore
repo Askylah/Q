@@ -9,9 +9,10 @@ dist/
 build/
 
 # ─── Private Character Files ──────────────────────────────
-personas/calypso.txt
-personas/dante.txt
-
+personas/rick.txt
+personas/rick_ondemand.txt
+personas.json
+!personas/global_rules.txt
 
 # ─── Environment & Secrets ────────────────────────────────
 .env
@@ -30,7 +31,6 @@ users.db
 # ─── Knowledge Bases (Vector Store) ──────────────────────
 knowledge_bases/*
 !knowledge_bases/.gitkeep
-!knowledge_bases/Rick_kb.txt
 *.pkl
 
 # ─── Backups ──────────────────────────────────────────────
