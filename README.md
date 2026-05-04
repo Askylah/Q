@@ -3,7 +3,7 @@
 To run the program:
 1. **Backend**: `cd C:\Users\insom\OneDrive\Desktop\Personas\PersonaApp-merged` -> `py main.py`
 2. **Frontend**: `cd vite-project` -> `npm run dev`
-
+3. **settings**: API&Routing set your API key here and set your model. Or model switching here.
 ---
 
 ## 🏛️ Architectural Doctrine: "Strict Physics"
