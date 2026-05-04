@@ -1,7 +1,14 @@
 # Q — The Cognitive Sandbox
 
+<<<<<<< HEAD
 **Q** is a high-fidelity, multi-agent sandbox designed for immersive roleplay (LARPing), tabletop RPG orchestration, and adversarial agentic research. It combines a dynamic React interface with a hardened "Strict Physics" backend, allowing you to safely unleash autonomous personas in isolated, stateful environments.
 
+=======
+To run the program:
+1. **Backend**: `cd C:\Users\insom\OneDrive\Desktop\Personas\PersonaApp-merged` -> `py main.py`
+2. **Frontend**: `cd vite-project` -> `npm run dev`
+3. **Settings**: API&Routing set your API key here and set your model. Or model switching here. If you don't want model switching just set both models to the same model.
+>>>>>>> 262d508939950660a887e9c2acbc58b6469707a3
 ---
 
 ## 🏛️ The Three Pillars

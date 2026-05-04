@@ -663,7 +663,7 @@ function App() {
   const [USERNAME, setUSERNAME] = useState(() => {
     let saved = localStorage.getItem('persona_username');
     if (!saved) {
-      saved = window.prompt("Welcome to Q. What is your name?", "Sky");
+      saved = window.prompt("Welcome! What is your name?", "Sky");
       if (!saved || !saved.trim()) saved = "Sky";
       localStorage.setItem('persona_username', saved.trim());
     }
