@@ -1,6 +1,6 @@
 # Q — The Cognitive Sandbox
 
-<<<<<<< HEAD
+
 **Q** is a high-fidelity, multi-agent sandbox designed for immersive roleplay (LARPing), tabletop RPG orchestration, and adversarial agentic research. It combines a dynamic React interface with a hardened "Strict Physics" backend, allowing you to safely unleash autonomous personas in isolated, stateful environments.
 
 =======
