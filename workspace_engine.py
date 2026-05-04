@@ -165,6 +165,7 @@ class SafeWorkspace:
                 "docker", "run", "--rm",
                 "--network", "none",
                 "--memory", "512m",
+                "--memory-swap", "512m",
                 "--cpus", "1.0",
                 "--pids-limit", "64",
                 "--security-opt", "no-new-privileges",
@@ -181,6 +182,8 @@ class SafeWorkspace:
             )
 
             output = result.stdout
+            if result.returncode != 0:
+                output += f"\n[SANDBOX_EXIT_CODE]: {result.returncode}"
             if result.stderr:
                 output += f"\n[SANDBOX_STDERR]\n{result.stderr}"
 

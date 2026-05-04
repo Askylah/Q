@@ -1,6 +1,10 @@
-import workspace_engine as workspace
 import os
+import sys
 import time
+
+# Ensure parent directory is in path so we can import the engine
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import workspace_engine as workspace
 
 def test_strict_security():
     print("--- [STRICT SECURITY VERIFICATION] ---")
@@ -34,7 +38,7 @@ print("Allocated 1GB")
 """
     result = ws.run_code_secure(memory_hog_code)
     print(f"Result: {result}")
-    if "ENGINE_ERROR" in result or "Killed" in result or "137" in str(result):
+    if "ENGINE_ERROR" in result or "Killed" in result or "137" in str(result) or "[SANDBOX_EXIT_CODE]: 137" in result:
         print("SUCCESS: Memory limit enforced (SIGKILL/OOM).")
     else:
         print("FAILURE: Memory limit might not be enforced.")
