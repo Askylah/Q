@@ -1,4 +1,4 @@
-# Persona App — The Strict Security Sandbox
+# Q — The Strict Security Sandbox
 
 To run the program:
 1. **Backend**: `cd C:\Users\insom\OneDrive\Desktop\Personas\PersonaApp-merged` -> `py main.py`
