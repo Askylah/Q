@@ -80,6 +80,7 @@ class StreamRequest(BaseModel):
     custom_auth_header_name: str = "Authorization"
     custom_auth_prefix: str = "Bearer "
     workspace_context: Optional[Dict[str, Any]] = None
+    max_tool_output: int = 8192
 
 class PersonaCreatePayload(BaseModel):
     model_config = {"extra": "forbid"}
@@ -96,6 +97,7 @@ class PersonaCreatePayload(BaseModel):
     om_enabled: bool = True
     om_turn_threshold: int = 5
     deep_memory_enabled: bool = False
+    direct_wire: bool = False
 
 class LoreEntryPayload(BaseModel):
     model_config = {"extra": "forbid"}
@@ -384,7 +386,8 @@ def stream_chat(persona_key: str, req: StreamRequest):
         custom_auth_header_name=req.custom_auth_header_name,
         custom_auth_prefix=req.custom_auth_prefix,
         bypass_firewall=req.bypass_firewall,
-        workspace_context=req.workspace_context
+        workspace_context=req.workspace_context,
+        max_tool_output=req.max_tool_output
     )
     
     if isinstance(stream_obj, str):
@@ -540,10 +543,11 @@ class WorkspaceSave(BaseModel):
 
 @app.post("/workspace/save")
 def save_workspace_file(data: WorkspaceSave):
+    """Stages a file write for approval. Returns a diff and staging_id — does NOT write yet."""
     root = os.path.dirname(os.path.abspath(data.path))
     try:
         ws = SafeWorkspace(root)
-        return ws.save_file_content(data.path, data.content)
+        return ws.stage_write(data.path, data.content)
     except SecurityViolation as e:
         raise HTTPException(status_code=403, detail=f"Security Violation: {str(e)}")
 
@@ -569,6 +573,32 @@ def delete_workspace_item(path: str):
         return ws.delete_item(path)
     except SecurityViolation as e:
         raise HTTPException(status_code=403, detail=f"Security Violation: {str(e)}")
+
+# --- Staged Write Approval Endpoints ---
+
+@app.post("/workspace/stage/{staging_id}/commit")
+def commit_staged_write(staging_id: str):
+    """Approves a staged write. Backs up the current file (.bak) then commits the change."""
+    ws = SafeWorkspace(_APP_ROOT)
+    result = ws.commit_staged_write(staging_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error"))
+    return result
+
+@app.delete("/workspace/stage/{staging_id}")
+def discard_staged_write(staging_id: str):
+    """Discards a pending staged write without modifying any real files."""
+    ws = SafeWorkspace(_APP_ROOT)
+    result = ws.discard_staged_write(staging_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=404, detail=result.get("error"))
+    return result
+
+@app.get("/workspace/staged")
+def list_staged_writes():
+    """Lists all pending staged writes awaiting approval."""
+    ws = SafeWorkspace(_APP_ROOT)
+    return {"staged": ws.list_staged_writes()}
 
 @app.get("/settings/{username}")
 async def get_settings(username: str):

@@ -3,7 +3,14 @@ import shutil
 import subprocess
 import uuid
 import pathlib
+import difflib
+import json
+from datetime import datetime
 from typing import Optional, Dict, Any
+
+
+# Global staging directory — all staged writes land here regardless of target location.
+_STAGING_DIR = pathlib.Path(__file__).resolve().parent / ".staging"
 
 
 class SecurityViolation(Exception):
@@ -130,7 +137,7 @@ class SafeWorkspace:
     #  Execution API (The Lab Bench)                                      #
     # ------------------------------------------------------------------ #
 
-    def run_code_secure(self, code: str, timeout: int = 30) -> str:
+    def run_code_secure(self, code: str, timeout: int = 30, max_output: int = 8192) -> str:
         """
         Executes code inside a hardened Docker container with 'Strict' constraints.
         - Memory: 512MB
@@ -139,6 +146,7 @@ class SafeWorkspace:
         - Network: None
         - User: persona-user (Non-root)
         - Temporal Guillotine: 30s
+        - Output Cap: max_output chars (default 8192)
         """
         temp_id = str(uuid.uuid4())[:8]
         temp_filename = f"lab_exec_{temp_id}.py"
@@ -187,7 +195,13 @@ class SafeWorkspace:
             if result.stderr:
                 output += f"\n[SANDBOX_STDERR]\n{result.stderr}"
 
-            return output or "Execution complete (No output returned)."
+            if not output:
+                return "Execution complete (No output returned)."
+
+            # Layer A: Truncate + Untrusted Envelope at the source
+            if len(output) > max_output:
+                output = output[:max_output] + f"\n[TRUNCATED: Output exceeded {max_output} chars]"
+            return f"[UNTRUSTED_TOOL_OUTPUT]\n{output}\n[/UNTRUSTED_TOOL_OUTPUT]"
 
         except subprocess.TimeoutExpired:
             return "CRITICAL FAILURE: Temporal Guillotine triggered. Execution timed out (Possible infinite loop)."
@@ -196,6 +210,130 @@ class SafeWorkspace:
         finally:
             if temp_path.exists():
                 temp_path.unlink()
+
+
+    # ------------------------------------------------------------------ #
+    #  Staged Write API                                                  #
+    # ------------------------------------------------------------------ #
+
+    def stage_write(self, path: str, new_content: str) -> dict:
+        """
+        Stages a file write for approval. Does NOT touch the target file.
+        Writes proposed content to .staging/<id>.tmp and generates a unified diff.
+
+        Returns:
+            staging_id:   Opaque token for commit/discard.
+            target_path:  Absolute path of the intended write.
+            diff:         Unified diff (current → proposed).
+            is_new_file:  True if the target does not yet exist.
+            control:      Always 'approval_required'.
+        """
+        safe_path = self._resolve(path)
+
+        # Read existing content for diff
+        if safe_path.exists():
+            try:
+                current_content = safe_path.read_text(encoding="utf-8")
+            except Exception:
+                current_content = ""
+            is_new_file = False
+        else:
+            current_content = ""
+            is_new_file = True
+
+        diff_lines = list(difflib.unified_diff(
+            current_content.splitlines(keepends=True),
+            new_content.splitlines(keepends=True),
+            fromfile=f"a/{safe_path.name}",
+            tofile=f"b/{safe_path.name}",
+            lineterm="",
+        ))
+        diff_str = "\n".join(diff_lines) if diff_lines else "(No changes detected)"
+
+        staging_id = str(uuid.uuid4())[:12]
+        _STAGING_DIR.mkdir(parents=True, exist_ok=True)
+        tmp_path = _STAGING_DIR / f"{staging_id}.tmp"
+        meta_path = _STAGING_DIR / f"{staging_id}.meta.json"
+
+        tmp_path.write_text(new_content, encoding="utf-8")
+        meta_path.write_text(json.dumps({
+            "staging_id": staging_id,
+            "target_path": str(safe_path),
+            "workspace_root": str(self.root),
+            "staged_at": datetime.now().isoformat(),
+            "is_new_file": is_new_file,
+        }, indent=2), encoding="utf-8")
+
+        return {
+            "staging_id": staging_id,
+            "target_path": str(safe_path),
+            "diff": diff_str,
+            "is_new_file": is_new_file,
+            "control": "approval_required",
+        }
+
+    def commit_staged_write(self, staging_id: str) -> dict:
+        """
+        Commits a staged write:
+          1. Backs up the current file to <name><ext>.bak (N=1, overwrites previous .bak).
+          2. Atomically moves .tmp into the target path.
+          3. Cleans up the .meta.json.
+        """
+        # Sanitize — no path traversal in staging_id
+        staging_id = "".join(c for c in staging_id if c.isalnum() or c == "-")
+        tmp_path = _STAGING_DIR / f"{staging_id}.tmp"
+        meta_path = _STAGING_DIR / f"{staging_id}.meta.json"
+
+        if not tmp_path.exists() or not meta_path.exists():
+            return {"success": False, "error": f"No staged write found for ID: {staging_id}"}
+
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            target_path = pathlib.Path(meta["target_path"])
+            workspace_root = pathlib.Path(meta["workspace_root"]).resolve()
+
+            # Re-validate target path hasn't drifted outside its original workspace root
+            if not str(target_path.resolve()).startswith(str(workspace_root)):
+                return {"success": False, "error": "Security violation: target path outside workspace root."}
+
+            # N=1 backup — copy current file to .bak, overwriting any previous .bak
+            if target_path.exists():
+                bak_path = target_path.with_suffix(target_path.suffix + ".bak")
+                shutil.copy2(str(target_path), str(bak_path))
+
+            # Ensure parent dirs exist, then atomic move
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(tmp_path), str(target_path))
+
+            meta_path.unlink(missing_ok=True)
+            return {"success": True, "committed_path": str(target_path)}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def discard_staged_write(self, staging_id: str) -> dict:
+        """Discards a pending staged write without touching any real files."""
+        staging_id = "".join(c for c in staging_id if c.isalnum() or c == "-")
+        tmp_path = _STAGING_DIR / f"{staging_id}.tmp"
+        meta_path = _STAGING_DIR / f"{staging_id}.meta.json"
+
+        if not tmp_path.exists() and not meta_path.exists():
+            return {"success": False, "error": f"No staged write found for ID: {staging_id}"}
+
+        tmp_path.unlink(missing_ok=True)
+        meta_path.unlink(missing_ok=True)
+        return {"success": True}
+
+    def list_staged_writes(self) -> list:
+        """Returns metadata for all pending staged writes."""
+        results = []
+        if not _STAGING_DIR.exists():
+            return results
+        for meta_file in sorted(_STAGING_DIR.glob("*.meta.json")):
+            try:
+                results.append(json.loads(meta_file.read_text(encoding="utf-8")))
+            except Exception:
+                pass
+        return results
 
 
 def get_safe_workspace(root: str) -> SafeWorkspace:

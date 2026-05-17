@@ -194,6 +194,7 @@ class PersonaAPI {
         customAuthHeaderName = "Authorization",
         customAuthPrefix = "Bearer ",
         bypass_firewall = false,
+        maxToolOutput = 8192,
         apiKeys = {},
         workspaceContext = null,
         abortController,
@@ -202,6 +203,7 @@ class PersonaAPI {
         onError
     }) {
         let fullStreamedContent = '';
+        let streamDone = false;
         try {
             const fetchOptions = {
                 method: 'POST',
@@ -227,7 +229,8 @@ class PersonaAPI {
                     custom_auth_header_name: customAuthHeaderName,
                     custom_auth_prefix: customAuthPrefix,
                     active_api_keys: apiKeys,
-                    workspace_context: workspaceContext
+                    workspace_context: workspaceContext,
+                    max_tool_output: maxToolOutput
                 })
             };
 
@@ -260,6 +263,7 @@ class PersonaAPI {
                     if (!trimmedLine) continue;
 
                     if (trimmedLine === 'data: [DONE]') {
+                        streamDone = true;
                         if (onDone) onDone(fullStreamedContent);
                         return;
                     }
@@ -295,7 +299,14 @@ class PersonaAPI {
             }
 
             if (buffer.trim() === 'data: [DONE]') {
+                streamDone = true;
                 if (onDone) onDone(fullStreamedContent);
+            }
+
+            // Fallback: stream closed abruptly without [DONE] (e.g. 429, network drop).
+            // Without this, isStreaming stays true and the input locks up permanently.
+            if (!streamDone && onDone) {
+                onDone(fullStreamedContent);
             }
 
         } catch (error) {

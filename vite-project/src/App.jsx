@@ -76,6 +76,7 @@ function App() {
   });
 
   const [chatAttachments, setChatAttachments] = useState([]);
+  const [groupAttachments, setGroupAttachments] = useState([]);
 
   // --- LOREBOOK STATE ---
   const [loreEntries, setLoreEntries] = useState([]);
@@ -100,6 +101,7 @@ function App() {
           topP: parsed.topP ?? 1.0,
           topK: parsed.topK ?? 0,
           maxTokens: parsed.maxTokens ?? 4096,
+          maxToolOutput: parsed.maxToolOutput ?? 8192,
           presencePenalty: parsed.presencePenalty ?? 0.0,
           frequencyPenalty: parsed.frequencyPenalty ?? 0.0,
           thinkingLevel: parsed.thinkingLevel ?? "Off",
@@ -120,6 +122,7 @@ function App() {
       topP: 1.0,
       topK: 0,
       maxTokens: 4096,
+      maxToolOutput: 8192,
       presencePenalty: 0.0,
       frequencyPenalty: 0.0,
       thinkingLevel: "Off",
@@ -170,7 +173,7 @@ function App() {
   };
 
   // ─── GROUP CHAT ORCHESTRATION ─────────────────────────────────────────────
-  const runGroupRound = async (userMessage) => {
+  const runGroupRound = async (userMessage, displayContent = null) => {
     if (groupMembers.length === 0) return;
     const controller = new AbortController();
     groupAbortRef.current = controller;
@@ -178,7 +181,8 @@ function App() {
 
     const sessionId = getGroupSessionId();
 
-    const userMsg = { role: 'user', persona_key: 'user', persona_name: USERNAME, persona_avatar: userAvatar, content: userMessage, is_observer: false };
+    const contentForDisplay = displayContent || (typeof userMessage === 'string' ? userMessage : '[Multimodal Attachment]');
+    const userMsg = { role: 'user', persona_key: 'user', persona_name: USERNAME, persona_avatar: userAvatar, content: contentForDisplay, rawContent: userMessage, is_observer: false };
     setGroupHistory(prev => [...prev, userMsg]);
     await api.saveGroupMessage(sessionId, { username: USERNAME, ...userMsg });
 
@@ -193,11 +197,13 @@ function App() {
         const p = personas[pKey];
         if (!p) continue;
 
-        const groupCtx = `[Group chat context: You are in a group conversation with ${memberNames}. Stay in character. Keep replies concise and natural.]`;
+        const groupCtx = `[Group chat context: You are participating in a group conversation with ${memberNames}. It is now your turn to respond as ${p.name}. Stay in character. Keep your reply concise and natural. Do not begin your response with "[${p.name}]:" or any name label — just speak directly.]`;
 
         const chatHistoryForPersona = thread.map(m => ({
           role: m.persona_key === pKey ? 'assistant' : 'user',
-          content: m.role === 'user' ? m.content : `[${m.persona_name}]: ${m.content}`
+          content: m.role === 'user'
+            ? (m.rawContent || m.content)
+            : `[${m.persona_name}]: ${m.content}`
         }));
 
         let accumulated = '';
@@ -221,6 +227,12 @@ function App() {
             },
             onDone: async () => {
               if (!accumulated.trim()) { resolve(); return; }
+              // Scrub any leading [Name]: prefix the model leaked from history format.
+              // Safety valve: if the scrub removes everything, keep the original so the
+              // persona isn't silently dropped from the round.
+              const namePattern = new RegExp(`^\\s*\\[${p.name}\\]:\\s*`, 'i');
+              const scrubbed = accumulated.replace(namePattern, '').trim();
+              accumulated = scrubbed || accumulated.trim();
               const newMsg = { role: 'assistant', persona_key: pKey, persona_name: p.name, persona_avatar: p.avatar, content: accumulated, is_observer: false };
               thread = [...thread, newMsg];
               setGroupHistory(prev => [...prev, newMsg]);
@@ -243,7 +255,9 @@ function App() {
         const obsCtx = `[You are silently observing this group conversation between ${memberNames}. Offer one brief, reflective observation. Do not lead or dominate the conversation.]`;
         const obsHistory = thread.map(m => ({
           role: m.persona_key === groupObserver ? 'assistant' : 'user',
-          content: m.role === 'user' ? m.content : `[${m.persona_name}]: ${m.content}`
+          content: m.role === 'user'
+            ? (m.rawContent || m.content)
+            : `[${m.persona_name}]: ${m.content}`
         }));
         let obsAccum = '';
         setGroupLiveSlot({ personaKey: groupObserver, name: obs.name, avatar: obs.avatar, text: '', isObserver: true });
@@ -256,6 +270,9 @@ function App() {
             onChunk: (chunk) => { if (typeof chunk === 'string') { obsAccum += chunk; setGroupLiveSlot(prev => prev ? { ...prev, text: obsAccum } : null); } },
             onDone: async () => {
               if (obsAccum.trim()) {
+                // Scrub any leading [Name]: prefix from observer output too
+                const obsNamePattern = new RegExp(`^\\s*\\[${obs.name}\\]:\\s*`, 'i');
+                obsAccum = obsAccum.replace(obsNamePattern, '').trim();
                 const obsMsg = { role: 'assistant', persona_key: groupObserver, persona_name: obs.name, persona_avatar: obs.avatar, content: obsAccum, is_observer: true };
                 setGroupHistory(prev => [...prev, obsMsg]);
                 await api.saveGroupMessage(sessionId, { username: USERNAME, ...obsMsg });
@@ -321,7 +338,7 @@ function App() {
       return (
         <div style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: '30px', paddingLeft: !isSidebarOpen ? '70px' : '30px', overflowY: 'auto', transition: 'padding-left 0.2s' }}>
           <h2 style={{ color: 'var(--primary-color)', fontFamily: 'var(--font-marker)', marginBottom: '6px', fontSize: '22px' }}>GROUP CHAT</h2>
-          <p style={{ color: 'var(--text-dim)', fontSize: '13px', marginBottom: '24px', fontFamily: 'var(--font-inter)' }}>Click personas to add them (2–4). Configure models and optionally set one as Observer below.</p>
+          <p style={{ color: 'var(--text-dim)', fontSize: '13px', marginBottom: '24px', fontFamily: 'var(--font-inter)' }}>Click personas to add them (2–10). Configure models and optionally set one as Observer below.</p>
 
           {/* ── PHASE 1: PERSONA PICKER ── */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(110px, 1fr))', gap: '10px', marginBottom: '28px', maxWidth: '600px' }}>
@@ -329,7 +346,7 @@ function App() {
               const isSelected = groupMembers.includes(key);
               return (
                 <div key={key} className={`group-persona-card ${isSelected ? 'selected' : ''}`}
-                  onClick={() => setGroupMembers(prev => isSelected ? prev.filter(k => k !== key) : prev.length < 4 ? [...prev, key] : prev)}
+                  onClick={() => setGroupMembers(prev => isSelected ? prev.filter(k => k !== key) : prev.length < 10 ? [...prev, key] : prev)}
                 >
                   <div style={{ fontSize: '24px', marginBottom: '4px' }}>{p.avatar}</div>
                   <div style={{ fontSize: '12px', fontWeight: '600', color: isSelected ? 'var(--primary-color)' : 'var(--text-color)', fontFamily: 'var(--font-inter)' }}>{p.name}</div>
@@ -589,29 +606,106 @@ function App() {
         </div>
 
         <div style={{ padding: '16px 20px', borderTop: 'var(--border-dashed)', flexShrink: 0 }}>
-          <div style={{ position: 'relative', maxWidth: '100%' }}>
-            <textarea
-              id="group-chat-input"
-              disabled={groupStreaming}
-              placeholder={groupStreaming ? 'Conversation in progress...' : 'Message the group...'}
-              rows={3}
-              style={{ width: '100%', background: 'rgba(10,10,10,0.8)', border: '1px dashed var(--accent-purple)', borderRadius: '8px', padding: '12px 50px 12px 16px', color: 'var(--text-color)', fontFamily: 'var(--font-inter)', fontSize: '14px', resize: 'none', outline: 'none', opacity: groupStreaming ? 0.5 : 1, boxSizing: 'border-box' }}
-            />
+
+          {/* Attachment preview strip */}
+          {groupAttachments.length > 0 && (
+            <div style={{ display: 'flex', gap: '8px', padding: '8px', overflowX: 'auto', background: 'rgba(0,0,0,0.4)', borderRadius: '6px', marginBottom: '8px' }}>
+              {groupAttachments.map((att, idx) => (
+                <div key={idx} style={{ position: 'relative', width: '52px', height: '52px', borderRadius: '4px', overflow: 'hidden', border: '1px solid var(--accent-purple)', flexShrink: 0 }}>
+                  {att.type === 'image_url' ? (
+                    <img src={att.image_url.url} alt="attachment" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                  ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', background: '#1a1a2e' }}>
+                      <span className="material-icons" style={{ fontSize: '20px', color: 'var(--text-dim)' }}>description</span>
+                    </div>
+                  )}
+                  <button
+                    onClick={() => setGroupAttachments(prev => prev.filter((_, i) => i !== idx))}
+                    style={{ position: 'absolute', top: 0, right: 0, background: 'rgba(255,0,0,0.7)', border: 'none', color: 'white', cursor: 'pointer', fontSize: '10px', padding: '2px 4px' }}
+                  >✕</button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Hidden file input */}
+          <input
+            type="file"
+            id="group-chat-file-upload"
+            style={{ display: 'none' }}
+            multiple
+            accept="image/*,text/*"
+            onChange={async (e) => {
+              const files = Array.from(e.target.files);
+              if (!files.length) return;
+              for (const file of files) {
+                if (file.type.startsWith('image/')) {
+                  const reader = new FileReader();
+                  reader.onload = (ev) => {
+                    setGroupAttachments(prev => [...prev, { type: 'image_url', image_url: { url: ev.target.result } }]);
+                  };
+                  reader.readAsDataURL(file);
+                } else {
+                  const reader = new FileReader();
+                  reader.onload = (ev) => {
+                    setGroupAttachments(prev => [...prev, { type: 'text', text: `\n[FILE: ${file.name}]\n${ev.target.result}\n[/FILE]` }]);
+                  };
+                  reader.readAsText(file);
+                }
+              }
+              e.target.value = null;
+            }}
+          />
+
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: '6px' }}>
+            {/* Attach button */}
             <button
-              className="send-button material-icons"
+              className="material-icons attach-button"
+              title="Attach File"
               disabled={groupStreaming}
-              onClick={() => {
-                const el = document.getElementById('group-chat-input');
-                if (!el) return;
-                const val = el.value.trim();
-                if (!val || groupStreaming) return;
-                el.value = '';
-                runGroupRound(val);
-              }}
-              style={{ position: 'absolute', bottom: '12px', right: '12px', background: 'transparent', border: 'none', color: 'var(--primary-color)', cursor: 'pointer', fontSize: '24px' }}
+              onClick={() => document.getElementById('group-chat-file-upload').click()}
             >
-              send
+              add
             </button>
+
+            {/* Textarea + send */}
+            <div style={{ position: 'relative', flex: 1 }}>
+              <textarea
+                id="group-chat-input"
+                disabled={groupStreaming}
+                placeholder={groupStreaming ? 'Conversation in progress...' : 'Message the group...'}
+                rows={3}
+                style={{ width: '100%', background: 'rgba(10,10,10,0.8)', border: '1px dashed var(--accent-purple)', borderRadius: '8px', padding: '12px 50px 12px 16px', color: 'var(--text-color)', fontFamily: 'var(--font-inter)', fontSize: '14px', resize: 'none', outline: 'none', opacity: groupStreaming ? 0.5 : 1, boxSizing: 'border-box' }}
+              />
+              <button
+                className="send-button material-icons"
+                disabled={groupStreaming}
+                onClick={() => {
+                  const el = document.getElementById('group-chat-input');
+                  if (!el) return;
+                  const val = el.value.trim();
+                  if (!val && groupAttachments.length === 0) return;
+                  if (groupStreaming) return;
+
+                  let groupUserMessage;
+                  if (groupAttachments.length === 0) {
+                    groupUserMessage = val;
+                  } else {
+                    groupUserMessage = [];
+                    if (val.trim()) groupUserMessage.push({ type: 'text', text: val });
+                    groupUserMessage = [...groupUserMessage, ...groupAttachments];
+                  }
+
+                  const displayContent = val || '[Multimodal Attachment]';
+                  el.value = '';
+                  setGroupAttachments([]);
+                  runGroupRound(groupUserMessage, displayContent);
+                }}
+                style={{ position: 'absolute', bottom: '12px', right: '12px', background: 'transparent', border: 'none', color: 'var(--primary-color)', cursor: 'pointer', fontSize: '24px' }}
+              >
+                send
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -784,6 +878,7 @@ function App() {
       customAuthHeaderName: advancedOptions.customAuthHeaderName,
       customAuthPrefix: advancedOptions.customAuthPrefix,
       bypass_firewall: advancedOptions.bypassFirewall,
+      maxToolOutput: advancedOptions.maxToolOutput,
       apiKeys: {
         universal: apiKeys.universal
       },
@@ -1355,37 +1450,64 @@ function App() {
           </button>
         </div>
 
-        <div className="persona-list">
-          {Object.entries(personas).map(([key, p]) => (
-            <div
-              key={key}
-              className={`persona-item ${activePersona === key ? 'active' : ''}`}
-              onClick={() => {
-                if (currentView === 'group') return; // don't steal clicks in group chat
-                setActivePersona(key);
-                setCurrentView("chat");
-                // Also update the workshop form so it stays synced
-                setNewPersona({
-                  originalKey: key,
-                  key: key,
-                  name: p.name,
-                  avatar: p.avatar,
-                  tagline: p.tagline,
-                  system_prompt: p.system_prompt || '',
-                  on_demand_files: p.on_demand_files || [],
-                  access_code: p.access_code || '',
-                  om_enabled: p.om_enabled !== false,
-                  om_turn_threshold: p.om_turn_threshold !== undefined ? p.om_turn_threshold : 5,
-                  deep_memory_enabled: !!p.deep_memory_enabled
-                });
-              }}
-            >
-              <div className="persona-avatar">{p.avatar}</div>
-              <div className="persona-info">
-                <span className="persona-name">{p.name}</span>
-              </div>
+        <div style={{ padding: '12px 0 4px 0' }}>
+          <div style={{ fontSize: '10px', fontWeight: '700', letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text-dim)', fontFamily: 'var(--font-inter)', marginBottom: '8px', opacity: 0.7 }}>
+            Active Persona
+          </div>
+          <select
+            id="persona-selector"
+            value={activePersona || ''}
+            onChange={(e) => {
+              const key = e.target.value;
+              if (!key) return;
+              const p = personas[key];
+              setActivePersona(key);
+              setCurrentView('chat');
+              setNewPersona({
+                originalKey: key,
+                key: key,
+                name: p.name,
+                avatar: p.avatar,
+                tagline: p.tagline,
+                system_prompt: p.system_prompt || '',
+                on_demand_files: p.on_demand_files || [],
+                access_code: p.access_code || '',
+                om_enabled: p.om_enabled !== false,
+                om_turn_threshold: p.om_turn_threshold !== undefined ? p.om_turn_threshold : 5,
+                deep_memory_enabled: !!p.deep_memory_enabled
+              });
+            }}
+            style={{
+              width: '100%',
+              background: 'rgba(0,0,0,0.4)',
+              border: '1px solid rgba(255,0,127,0.25)',
+              borderRadius: '6px',
+              color: 'var(--text-primary)',
+              fontFamily: 'var(--font-marker)',
+              fontSize: '14px',
+              letterSpacing: '1px',
+              padding: '8px 10px',
+              cursor: 'pointer',
+              outline: 'none',
+              appearance: 'none',
+              WebkitAppearance: 'none',
+              backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='%23ff007f'%3E%3Cpath d='M7 10l5 5 5-5z'/%3E%3C/svg%3E")`,
+              backgroundRepeat: 'no-repeat',
+              backgroundPosition: 'right 10px center',
+              paddingRight: '28px'
+            }}
+          >
+            {Object.entries(personas).map(([key, p]) => (
+              <option key={key} value={key} style={{ background: '#0a0a0a', color: 'var(--text-primary)', fontFamily: 'sans-serif' }}>
+                {p.avatar} {p.name}
+              </option>
+            ))}
+          </select>
+          {activePersona && personas[activePersona] && (
+            <div style={{ marginTop: '6px', fontSize: '11px', color: 'var(--text-dim)', fontFamily: 'var(--font-inter)', opacity: 0.6, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {personas[activePersona].tagline}
             </div>
-          ))}
+          )}
         </div>
       </div>
 
@@ -1882,7 +2004,7 @@ function App() {
                       setPersonas(updated);
                       // Do not reset if it was an update, to keep the form populated
                       if (!newPersona.originalKey) {
-                        setNewPersona({ originalKey: "", key: "", name: "", avatar: "🤖", tagline: "", system_prompt: "", on_demand_files: [], access_code: "", om_enabled: true, om_turn_threshold: 5, deep_memory_enabled: false });
+                        setNewPersona({ originalKey: "", key: "", name: "", avatar: "🤖", tagline: "", system_prompt: "", on_demand_files: [], access_code: "", om_enabled: true, om_turn_threshold: 5, deep_memory_enabled: false, direct_wire: false });
                       } else {
                         // Update the originalKey with the potentially new key
                         setNewPersona(prev => ({ ...prev, originalKey: finalKey, key: finalKey }));
@@ -1923,10 +2045,11 @@ function App() {
                             system_prompt: p.system_prompt || '',
                             on_demand_files: p.on_demand_files || [],
                             access_code: p.access_code || '',
-                            om_enabled: p.om_enabled !== false,
-                            om_turn_threshold: p.om_turn_threshold !== undefined ? p.om_turn_threshold : 5,
-                            deep_memory_enabled: !!p.deep_memory_enabled
-                          });
+                             om_enabled: p.om_enabled !== false,
+                             om_turn_threshold: p.om_turn_threshold !== undefined ? p.om_turn_threshold : 5,
+                             deep_memory_enabled: !!p.deep_memory_enabled,
+                             direct_wire: !!p.direct_wire
+                           });
                         }}
                       >
                         <div style={{ fontSize: '24px' }}>{p.avatar}</div>
@@ -2166,6 +2289,7 @@ function App() {
                 ['Top P', 'topP', 0, 1, 0.05],
                 ['Top K', 'topK', 0, 100, 1],
                 ['Max Tokens', 'maxTokens', 1, 8192, 1],
+                ['Max Tool Output', 'maxToolOutput', 1024, 32768, 1024],
                 ['Presence Penalty', 'presencePenalty', -2, 2, 0.1],
                 ['Frequency Penalty', 'frequencyPenalty', -2, 2, 0.1],
               ].map(([name, key, min, max, step]) => (

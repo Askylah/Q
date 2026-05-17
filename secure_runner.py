@@ -3,9 +3,10 @@ import os
 import sys
 import uuid
 
-def run_in_padded_room(code: str, timeout: int = 20) -> str:
+def run_in_padded_room(code: str, timeout: int = 20, max_output: int = 8192) -> str:
     """
     Executes Python code inside a hardened Docker container.
+    Output is capped at max_output chars and wrapped in an untrusted envelope.
     """
     temp_id = str(uuid.uuid4())[:8]
     temp_filename = f"lab_temp_{temp_id}.py"
@@ -56,9 +57,12 @@ def run_in_padded_room(code: str, timeout: int = 20) -> str:
             output += f"\n--- LAB OVERFLOW (Errors) ---\n{result.stderr}"
 
         if not output:
-            output = "Execution complete (No output returned)."
+            return "Execution complete (No output returned)."
 
-        return output
+        # Layer A: Truncate + Untrusted Envelope at the source
+        if len(output) > max_output:
+            output = output[:max_output] + f"\n[TRUNCATED: Output exceeded {max_output} chars]"
+        return f"[UNTRUSTED_TOOL_OUTPUT]\n{output}\n[/UNTRUSTED_TOOL_OUTPUT]"
 
     except subprocess.TimeoutExpired:
         return "CRITICAL FAILURE: Execution timed out (Possible infinite loop or resource exhaustion)."
