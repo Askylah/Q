@@ -5,7 +5,7 @@ import sys
 
 def build_release():
     print("========================================================")
-    print("       THE FREAKSHOW BACKEND - ZERO-FRICTION BUILD      ")
+    print("                 Q - ZERO-FRICTION BUILD                ")
     print("========================================================")
     
     root_dir = os.path.abspath(os.path.dirname(__file__))
@@ -57,11 +57,11 @@ def build_release():
     # 5. Generate start.bat Bootstrapper
     print("\n[5/5] Forging Bootstrapper (start.bat)...")
     bat_content = """@echo off
-title The Freakshow Server
+title Q Server
 color 0b
 
 echo ========================================================
-echo        THE FREAKSHOW BACKEND - IGNITION SEQUENCE
+echo                 Q - IGNITION SEQUENCE
 echo ========================================================
 echo.
 
@@ -102,9 +102,14 @@ pause
     with open(os.path.join(release_dir, "start.bat"), "w") as f:
         f.write(bat_content)
         
+    print("\n[6/5] Compressing release into Q_Installer.zip...")
+    zip_path = os.path.join(root_dir, "Q_Installer")
+    shutil.make_archive(zip_path, 'zip', release_dir)
+        
     print("\n=== SUCCESS ===")
     print(f"The distributable 'One-Click' build is ready in: {release_dir}")
-    print("Zip this folder and distribute it. Users only need to double-click start.bat!")
+    print(f"A compressed version is ready for GitHub Releases: {zip_path}.zip")
+    print("Upload the .zip file to your GitHub Releases tab for users to download!")
 
 if __name__ == "__main__":
     build_release()
