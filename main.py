@@ -1,11 +1,12 @@
 from fastapi import FastAPI, HTTPException, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, StreamingResponse, Response
 from pydantic import BaseModel
 import database as db
 import json
 import os
 import shutil
-from fastapi.responses import StreamingResponse
 import uvicorn
 from dotenv import load_dotenv
 import magic
@@ -610,6 +611,22 @@ async def update_settings(payload: SettingsPayload):
     db_conn = db.UserManager()
     db_conn.update_user_settings(payload.username, payload.model_dump())
     return {"status": "success"}
+
+# --- STATIC FRONTEND SERVING (For "One-Click" Distributed Releases) ---
+FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vite-project", "dist")
+if os.path.exists(FRONTEND_DIST):
+    # Mount the assets directory specifically
+    assets_dir = os.path.join(FRONTEND_DIST, "assets")
+    if os.path.exists(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+        
+    # Catch-all route to serve the React index.html for frontend routing
+    @app.get("/{catchall:path}")
+    def serve_react_app(catchall: str):
+        index_path = os.path.join(FRONTEND_DIST, "index.html")
+        if os.path.exists(index_path):
+            return FileResponse(index_path)
+        raise HTTPException(status_code=404, detail="Frontend build missing index.html")
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)

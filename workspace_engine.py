@@ -201,7 +201,7 @@ class SafeWorkspace:
             # Layer A: Truncate + Untrusted Envelope at the source
             if len(output) > max_output:
                 output = output[:max_output] + f"\n[TRUNCATED: Output exceeded {max_output} chars]"
-            return f"[UNTRUSTED_TOOL_OUTPUT]\n{output}\n[/UNTRUSTED_TOOL_OUTPUT]"
+            return f"<untrusted_tool_output>\n{output}\n</untrusted_tool_output>"
 
         except subprocess.TimeoutExpired:
             return "CRITICAL FAILURE: Temporal Guillotine triggered. Execution timed out (Possible infinite loop)."
