@@ -154,9 +154,9 @@ def load_personas_logic(username: str = None):
 from llm_engine import build_context_and_stream
 
 # --- ENDPOINTS ---
-@app.get("/")
+@app.get("/health")
 def read_root():
-    return {"status": "The Freakshow Backend is ALIVE on Port 8000.", "cage": "Cage for a God [STABILIZED]"}
+    return {"status": "Q Backend is ALIVE on Port 8000.", "cage": "Cage for a God [STABILIZED]"}
 
 @app.get("/personas")
 def get_personas(username: str = "default_user"):
