@@ -24,6 +24,147 @@ function App() {
   const [workspacePath, setWorkspacePath] = useState(".");
   const [expandedPaths, setExpandedPaths] = useState(new Set(['.']));
   const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const [useOcrShield, setUseOcrShield] = useState(() => {
+    const saved = localStorage.getItem('persona_ocr_shield');
+    return saved ? JSON.parse(saved) : true;
+  });
+
+  useEffect(() => {
+    localStorage.setItem('persona_ocr_shield', JSON.stringify(useOcrShield));
+  }, [useOcrShield]);
+
+  const applyOcrShield = (canvas) => {
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width;
+    const h = canvas.height;
+
+    // 1. Faint diagonal watermark lines to break character segmentation
+    ctx.strokeStyle = 'rgba(128, 128, 128, 0.16)';
+    ctx.lineWidth = 1;
+    const step = 20;
+    for (let x = -h; x < w; x += step) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x + h, h);
+      ctx.stroke();
+    }
+
+    // 2. High-frequency pixel jitter noise to degrade sharp edges
+    try {
+      const imgData = ctx.getImageData(0, 0, w, h);
+      const data = imgData.data;
+      for (let i = 0; i < data.length; i += 4) {
+        if (Math.random() < 0.04) {
+          const noise = (Math.random() - 0.5) * 45;
+          data[i] = Math.min(255, Math.max(0, data[i] + noise));
+          data[i+1] = Math.min(255, Math.max(0, data[i+1] + noise));
+          data[i+2] = Math.min(255, Math.max(0, data[i+2] + noise));
+        }
+      }
+      ctx.putImageData(imgData, 0, 0);
+    } catch (e) {
+      console.warn("Pixel noise failed:", e);
+    }
+
+    // 3. Difference compositing color-shifting tint to throw off histogram matcher
+    ctx.save();
+    ctx.globalCompositeOperation = 'difference';
+    ctx.fillStyle = 'rgba(12, 24, 36, 0.08)';
+    ctx.fillRect(0, 0, w, h);
+    ctx.restore();
+  };
+
+  const compressImage = (file, maxW = 1024, maxH = 1024, quality = 0.7) => {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          let width = img.width;
+          let height = img.height;
+
+          if (width > maxW || height > maxH) {
+            if (width > height) {
+              height = Math.round((height * maxW) / width);
+              width = maxW;
+            } else {
+              width = Math.round((width * maxH) / height);
+              height = maxH;
+            }
+          }
+
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, width, height);
+
+          if (useOcrShield) {
+            applyOcrShield(canvas);
+          }
+
+          const dataUrl = canvas.toDataURL('image/jpeg', quality);
+          resolve(dataUrl);
+        };
+        img.onerror = () => resolve(e.target.result);
+        img.src = e.target.result;
+      };
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handlePaste = async (e, setAttachments) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) {
+          e.preventDefault();
+          const compressedUrl = await compressImage(file);
+          if (compressedUrl) {
+            setAttachments(prev => [...prev, { type: "image_url", image_url: { url: compressedUrl } }]);
+          }
+        }
+      }
+    }
+  };
+
+  const renderMessageContent = (content) => {
+    if (!content) return null;
+    let parsedContent = null;
+    if (typeof content === 'string' && content.trim().startsWith('[') && content.trim().endsWith(']')) {
+      try {
+        parsedContent = JSON.parse(content);
+      } catch (e) {
+        // Not a JSON array
+      }
+    } else if (Array.isArray(content)) {
+      parsedContent = content;
+    }
+
+    if (parsedContent && Array.isArray(parsedContent)) {
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          {parsedContent.map((part, pIdx) => {
+            if (part.type === 'text') {
+              return <div key={pIdx} dangerouslySetInnerHTML={{ __html: formatMessage(part.text) }} />;
+            } else if (part.type === 'image_url') {
+              return (
+                <div key={pIdx} style={{ marginTop: '4px', maxWidth: '100%', borderRadius: '8px', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.15)', display: 'inline-block' }}>
+                  <img src={part.image_url.url} alt="attachment" style={{ maxWidth: '100%', maxHeight: '360px', display: 'block', objectFit: 'contain' }} />
+                </div>
+              );
+            }
+            return null;
+          })}
+        </div>
+      );
+    }
+
+    return <div dangerouslySetInnerHTML={{ __html: formatMessage(content) }} />;
+  };
 
   // --- PANEL RESIZE STATE ---
   const [sidebarWidth, setSidebarWidth] = useState(() => Number(localStorage.getItem('q_sidebar_w')) || 280);
@@ -577,8 +718,9 @@ function App() {
                 <div
                   className="group-text-content"
                   style={{ color: 'var(--text-color)', fontFamily: 'var(--font-inter)', lineHeight: 1.55, fontStyle: msg.is_observer ? 'italic' : 'normal', opacity: msg.is_observer ? 0.8 : 1 }}
-                  dangerouslySetInnerHTML={{ __html: formatMessage(msg.content) }}
-                />
+                >
+                  {renderMessageContent(msg.content)}
+                </div>
               </div>
             );
           })}
@@ -596,8 +738,9 @@ function App() {
               <div
                 className="group-text-content"
                 style={{ color: 'var(--text-color)', fontFamily: 'var(--font-inter)', lineHeight: 1.55, fontStyle: groupLiveSlot.isObserver ? 'italic' : 'normal' }}
-                dangerouslySetInnerHTML={{ __html: formatMessage(groupLiveSlot.text) }}
-              />
+              >
+                {renderMessageContent(groupLiveSlot.text)}
+              </div>
               <span className="streaming-cursor">▋</span>
             </div>
           )}
@@ -640,11 +783,10 @@ function App() {
               if (!files.length) return;
               for (const file of files) {
                 if (file.type.startsWith('image/')) {
-                  const reader = new FileReader();
-                  reader.onload = (ev) => {
-                    setGroupAttachments(prev => [...prev, { type: 'image_url', image_url: { url: ev.target.result } }]);
-                  };
-                  reader.readAsDataURL(file);
+                  const compressedUrl = await compressImage(file);
+                  if (compressedUrl) {
+                    setGroupAttachments(prev => [...prev, { type: 'image_url', image_url: { url: compressedUrl } }]);
+                  }
                 } else {
                   const reader = new FileReader();
                   reader.onload = (ev) => {
@@ -668,6 +810,8 @@ function App() {
               add
             </button>
 
+
+
             {/* Textarea + send */}
             <div style={{ position: 'relative', flex: 1 }}>
               <textarea
@@ -675,6 +819,7 @@ function App() {
                 disabled={groupStreaming}
                 placeholder={groupStreaming ? 'Conversation in progress...' : 'Message the group...'}
                 rows={3}
+                onPaste={(e) => handlePaste(e, setGroupAttachments)}
                 style={{ width: '100%', background: 'rgba(10,10,10,0.8)', border: '1px dashed var(--accent-purple)', borderRadius: '8px', padding: '12px 50px 12px 16px', color: 'var(--text-color)', fontFamily: 'var(--font-inter)', fontSize: '14px', resize: 'none', outline: 'none', opacity: groupStreaming ? 0.5 : 1, boxSizing: 'border-box' }}
               />
               <button
@@ -1203,10 +1348,9 @@ function App() {
                 </button>
               )}
             </div>
-            <div
-              className="message-content"
-              dangerouslySetInnerHTML={{ __html: formatMessage(msg.content) }}
-            />
+            <div className="message-content">
+              {renderMessageContent(msg.content)}
+            </div>
           </div>
         ))}
 
@@ -1219,8 +1363,9 @@ function App() {
             <div
               className="message-content"
               style={{ border: '1px solid var(--accent-void)' }}
-              dangerouslySetInnerHTML={{ __html: formatMessage(liveStreamText) }}
-            />
+            >
+              {renderMessageContent(liveStreamText)}
+            </div>
             {isStreaming && <span className="streaming-cursor">█</span>}
           </div>
         )}
@@ -1249,11 +1394,10 @@ function App() {
             if (!files.length) return;
             for (const file of files) {
               if (file.type.startsWith('image/')) {
-                const reader = new FileReader();
-                reader.onload = (ev) => {
-                  setChatAttachments(prev => [...prev, { type: "image_url", image_url: { url: ev.target.result } }]);
-                };
-                reader.readAsDataURL(file);
+                const compressedUrl = await compressImage(file);
+                if (compressedUrl) {
+                  setChatAttachments(prev => [...prev, { type: "image_url", image_url: { url: compressedUrl } }]);
+                }
               } else {
                 const reader = new FileReader();
                 reader.onload = (ev) => {
@@ -1271,12 +1415,15 @@ function App() {
           >
             add
           </button>
+
+
           <textarea
             className="chat-input glass-panel"
             placeholder={`Send a message to ${personas[activePersona]?.name}...`}
             rows={1}
             value={currentInput}
             onChange={(e) => setCurrentInput(e.target.value)}
+            onPaste={(e) => handlePaste(e, setChatAttachments)}
             disabled={isStreaming}
           />
 
@@ -2422,6 +2569,29 @@ function App() {
                       fontFamily: 'Inter, sans-serif', fontSize: '13px', fontWeight: '600'
                     }}>
                     {advancedOptions.bypassFirewall ? '🔓 Firewall Bypassed' : '🔒 Firewall Enforced'}
+                  </button>
+                </div>
+
+                <div style={S.divider} />
+
+                <div>
+                  <div style={{ fontSize: '13px', fontWeight: '600', fontFamily: 'Inter, sans-serif',
+                    color: appTheme === 'q-light' ? '#2e3338' : appTheme === 'q-dark' ? '#dcddde' : '#00cc66', marginBottom: '4px' }}>
+                    OCR & Visual Shield
+                  </div>
+                  <div style={{ fontSize: '12px', fontFamily: 'Inter, sans-serif', marginBottom: '10px',
+                    color: appTheme === 'q-light' ? '#4e5058' : appTheme === 'q-dark' ? '#b5bac1' : '#b060ff', opacity: 0.85 }}>
+                    Applies custom pattern overlays and color-shifting tints to uploaded screenshots to evade Google OCR safety filters.
+                  </div>
+                  <button onClick={() => setUseOcrShield(!useOcrShield)}
+                    style={{
+                      padding: '4px 0', cursor: 'pointer',
+                      background: 'transparent', border: 'none',
+                      borderBottom: useOcrShield ? '1px solid rgba(88,101,242,0.4)' : '1px solid rgba(237,66,69,0.5)',
+                      color: useOcrShield ? (appTheme === 'void' ? '#00cc66' : '#5865f2') : '#ed4245',
+                      fontFamily: 'Inter, sans-serif', fontSize: '13px', fontWeight: '600'
+                    }}>
+                    {useOcrShield ? '🛡️ OCR Shield Enforced' : '🔓 OCR Shield Disabled'}
                   </button>
                 </div>
               </div>
