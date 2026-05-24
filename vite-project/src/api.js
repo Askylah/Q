@@ -2,8 +2,22 @@
 // Handles all communication with the FastAPI backend on port 8000 using Universal API Client principles
 
 class PersonaAPI {
-    constructor(baseUrl = 'http://127.0.0.1:8000') {
-        this.baseUrl = baseUrl;
+    constructor(baseUrl) {
+        if (!baseUrl) {
+            if (typeof window !== 'undefined') {
+                const origin = window.location.origin;
+                // If in dev mode on port 5173, point to backend on port 8000
+                if (origin.includes(':5173')) {
+                    this.baseUrl = 'http://127.0.0.1:8000';
+                } else {
+                    this.baseUrl = origin;
+                }
+            } else {
+                this.baseUrl = 'http://127.0.0.1:8000';
+            }
+        } else {
+            this.baseUrl = baseUrl;
+        }
     }
 
     /**
