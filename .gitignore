@@ -20,6 +20,7 @@ personas.json
 *.key
 *.secret
 openrouter_debug.log
+inversion_engine.py
 
 # ─── Database (Private User Data) ─────────────────────────
 users.db
@@ -36,6 +37,9 @@ knowledge_bases/*
 # ─── Backups ──────────────────────────────────────────────
 *.bak
 *.backup
+
+# ─── Staged Writes (Approval Scratch) ────────────────────
+.staging/
 
 # ─── Uploads (User Files) ─────────────────────────────────
 uploads/*

@@ -1,0 +1,25 @@
+{
+    "name": "The Scout",
+    "description": "Baseline discovery and environmental awareness.",
+    "prerequisites": [],
+    "prompt_addition": "You are currently in SCOUT mode. Your primary objective is environmental awareness and data gathering. Use listing and searching tools to map out the context before committing to complex logic.",
+    "tools": [
+        {
+            "function": {
+                "name": "activate_skill",
+                "description": "Unlocks a new branch of your skill tree.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "skill_id": {
+                            "type": "string",
+                            "enum": ["architect", "scribe"],
+                            "description": "The ID of the skill to unlock."
+                        }
+                    },
+                    "required": ["skill_id"]
+                }
+            }
+        }
+    ]
+}

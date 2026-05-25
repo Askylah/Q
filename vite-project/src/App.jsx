@@ -1180,6 +1180,19 @@ function App() {
     return saved.trim();
   });
 
+  const [apiServerUrl, setApiServerUrl] = useState(() => localStorage.getItem('persona_backend_url') || '');
+
+  const handleApiServerUrlChange = (val) => {
+    setApiServerUrl(val);
+    if (val) {
+      localStorage.setItem('persona_backend_url', val);
+      api.baseUrl = val;
+    } else {
+      localStorage.removeItem('persona_backend_url');
+      api.baseUrl = window.location.origin.includes(':5173') ? 'http://127.0.0.1:8000' : window.location.origin;
+    }
+  };
+
   // Fetch actual personas from FastAPI DB on load
   useEffect(() => {
     const initData = async () => {
@@ -2670,6 +2683,11 @@ function App() {
               <input style={S.input} type="text" placeholder="e.g. http://localhost:11434/v1/chat/completions"
                 value={advancedOptions.customBaseUrl}
                 onChange={e => setAdvancedOptions(prev => ({ ...prev, customBaseUrl: e.target.value }))} />
+
+              <label style={S.label}>Backend Server URL</label>
+              <input style={S.input} type="text" placeholder="e.g. https://projectsleeper.duckdns.org (leave empty for auto)"
+                value={apiServerUrl}
+                onChange={e => handleApiServerUrlChange(e.target.value)} />
 
               <div style={{ display: 'flex', gap: '16px' }}>
                 <div style={{ flex: 1 }}>

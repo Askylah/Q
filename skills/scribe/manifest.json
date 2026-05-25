@@ -1,0 +1,23 @@
+{
+    "name": "The Scribe",
+    "description": "Rigorous documentation and knowledge graph linking.",
+    "prerequisites": ["scout"],
+    "prompt_addition": "SCRIBE MODE ACTIVE. Your objective is knowledge persistence. Ensure every insight is linked to the Zettel Knowledge Graph and documented with technical precision.",
+    "tools": [
+        {
+            "function": {
+                "name": "create_zettel_link",
+                "description": "Creates a semantic link between two knowledge nodes.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "source_id": {"type": "string"},
+                        "target_id": {"type": "string"},
+                        "relationship": {"type": "string"}
+                    },
+                    "required": ["source_id", "target_id", "relationship"]
+                }
+            }
+        }
+    ]
+}

@@ -5,12 +5,18 @@ class PersonaAPI {
     constructor(baseUrl) {
         if (!baseUrl) {
             if (typeof window !== 'undefined') {
-                const origin = window.location.origin;
-                // If in dev mode on port 5173, point to backend on port 8000
-                if (origin.includes(':5173')) {
-                    this.baseUrl = 'http://127.0.0.1:8000';
+                const savedUrl = localStorage.getItem('persona_backend_url');
+                if (savedUrl) {
+                    this.baseUrl = savedUrl;
                 } else {
-                    this.baseUrl = origin;
+                    const origin = window.location.origin;
+                    if (origin.startsWith('capacitor://')) {
+                        this.baseUrl = 'https://projectsleeper.duckdns.org';
+                    } else if (origin.includes(':5173') || origin.includes('localhost')) {
+                        this.baseUrl = 'http://127.0.0.1:8000';
+                    } else {
+                        this.baseUrl = origin;
+                    }
                 }
             } else {
                 this.baseUrl = 'http://127.0.0.1:8000';

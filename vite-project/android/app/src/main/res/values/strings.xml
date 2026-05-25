@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Q Mobile</string>
+    <string name="title_activity_main">Q Mobile</string>
+    <string name="package_name">com.qmobile.app</string>
+    <string name="custom_url_scheme">com.qmobile.app</string>
+</resources>

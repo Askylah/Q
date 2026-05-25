@@ -44,7 +44,7 @@ def build_release():
             shutil.copy2(src, os.path.join(release_dir, f))
             
     # Configs & Docs
-    for f in ["requirements.txt", "Dockerfile.padded_room", "skills.json"]:
+    for f in ["requirements.txt", "Dockerfile.padded_room"]:
         src = os.path.join(root_dir, f)
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(release_dir, f))
@@ -59,12 +59,13 @@ def build_release():
             
     # 4. Copy Core Directories
     print("\n[4/6] Copying Core Directories...")
-    core_dirs = ["plugins", "knowledge_bases", "personas", "uploads", "labs"]
+    core_dirs = ["plugins", "skills", "knowledge_bases", "personas", "uploads", "labs"]
     for d in core_dirs:
         src = os.path.join(root_dir, d)
         dest = os.path.join(release_dir, d)
         if os.path.exists(src):
-            shutil.copytree(src, dest)
+            # Automatically filter out Rick's proprietary files from being distributed
+            shutil.copytree(src, dest, ignore=shutil.ignore_patterns("*rick*", "*Rick*"))
         else:
             os.makedirs(dest)
             

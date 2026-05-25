@@ -1,0 +1,25 @@
+{
+    "name": "The Architect",
+    "description": "Logic tree generation and planning.",
+    "prerequisites": ["scout"],
+    "prompt_addition": "ARCHITECT MODE ACTIVE. You are now authorized for high-level system planning and logic tree construction. Prioritize structural integrity and modularity in your proposals.",
+    "tools": [
+        {
+            "function": {
+                "name": "generate_logic_tree",
+                "description": "Creates a structured roadmap for a complex task.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "goal": {"type": "string"},
+                        "steps": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        }
+                    },
+                    "required": ["goal", "steps"]
+                }
+            }
+        }
+    ]
+}
