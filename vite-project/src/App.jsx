@@ -959,7 +959,7 @@ function App() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
                   <span style={{ fontSize: '16px' }}>{msg.persona_avatar}</span>
                   <span style={{ fontSize: '11px', fontWeight: '700', color, fontFamily: 'var(--font-inter)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                    {msg.persona_name}{msg.is_observer ? ' · Observer' : ''}
+                    {msg.persona_name && msg.persona_name.split('#')[0]}{msg.is_observer ? ' · Observer' : ''}
                   </span>
                   {msg.id && (
                     <button
@@ -1175,7 +1175,12 @@ function App() {
     if (!saved) {
       saved = window.prompt("Welcome! What is your name?", "Sky");
       if (!saved || !saved.trim()) saved = "Sky";
-      localStorage.setItem('persona_username', saved.trim());
+      if (!saved.includes('#')) {
+        const randomTag = Math.floor(1000 + Math.random() * 9000);
+        saved = `${saved.trim()}#${randomTag}`;
+      }
+      localStorage.setItem('persona_username', saved);
+      alert(`Welcome! Your profile has been created.\n\nYour unique Link Code is: ${saved}\nUse this exact code if you want to link your history on your phone!`);
     }
     return saved.trim();
   });
@@ -2965,8 +2970,25 @@ function App() {
 
               <div style={S.divider} />
 
+              <label style={S.label}>Profile Link Code</label>
+              <input
+                style={{ ...S.input, background: 'rgba(255,255,255,0.05)', borderStyle: 'dashed', cursor: 'pointer' }}
+                type="text"
+                readOnly
+                value={USERNAME}
+                onClick={e => {
+                  e.target.select();
+                  navigator.clipboard.writeText(USERNAME);
+                  alert('Copied link code to clipboard!');
+                }}
+                title="Click to copy your link code"
+              />
+              <div style={{ fontSize: '12px', fontFamily: 'Inter, sans-serif', opacity: 0.55, marginTop: '-8px', marginBottom: '20px' }}>
+                Click to copy. Type this exact code when setting up other devices to sync your memories!
+              </div>
+
               <div style={{ fontSize: '12px', fontFamily: 'Inter, sans-serif', opacity: 0.5 }}>
-                Your name in conversations is your USERNAME set at first login.
+                Your display name is: <strong style={{ color: 'var(--primary-color)' }}>{USERNAME.split('#')[0]}</strong>
               </div>
             </div>
           );
