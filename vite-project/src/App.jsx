@@ -2639,7 +2639,7 @@ function App() {
                       }
                       alert(newPersona.originalKey ? `${newPersona.name} updated!` : `${newPersona.name} forged!`);
                     } catch (err) {
-                      alert("Error saving persona: " + err.message);
+                      alert("Error saving persona: " + err.message + "\n\nDebug Info:\n- Target URL: " + api.baseUrl + "/personas\n- App Origin: " + (typeof window !== 'undefined' ? window.location.origin : 'unknown'));
                     }
                   }}>
                     {newPersona.originalKey ? '💾 UPDATE PERSONA' : '🔨 FORGE PERSONA'}
