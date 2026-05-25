@@ -11,8 +11,14 @@ class PersonaAPI {
                 } else {
                     const origin = window.location.origin;
                     console.log("[PersonaAPI] Origin detected:", origin);
-                    // Match capacitor:// or any localhost origin except the Vite dev server port (:5173)
-                    if (origin.startsWith('capacitor://') || (origin.startsWith('http://localhost') && !origin.includes(':5173'))) {
+                    
+                    // Match capacitor:// or localhost (http/https) when not running on Vite port (:5173) or local backend port (:8000)
+                    const isMobile = origin.startsWith('capacitor://') || 
+                                     ((origin.includes('//localhost') || origin.includes('//127.0.0.1')) && 
+                                      !origin.includes(':5173') && 
+                                      !origin.includes(':8000'));
+                    
+                    if (isMobile) {
                         this.baseUrl = 'https://projectsleeper.duckdns.org';
                     } else if (origin.includes(':5173') || origin.includes('127.0.0.1:5173')) {
                         this.baseUrl = 'http://127.0.0.1:8000';
