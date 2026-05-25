@@ -3,6 +3,248 @@ import './App.css'
 import { api } from './api'
 import Editor from '@monaco-editor/react'
 
+function ModelSelector({ value, onChange, placeholder, style, openRouterModels, appTheme }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    setSearchQuery(value || "");
+  }, [value]);
+
+  useEffect(() => {
+    const handleOutsideClick = (e) => {
+      if (containerRef.current && !containerRef.current.contains(e.target)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => document.removeEventListener("mousedown", handleOutsideClick);
+  }, []);
+
+  const directGoogle = [
+    { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro (Direct)" },
+    { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash (Direct)" },
+    { id: "gemini-1.5-pro", name: "Gemini 1.5 Pro (Direct)" },
+    { id: "gemini-1.5-flash", name: "Gemini 1.5 Flash (Direct)" }
+  ];
+
+  const directAnthropic = [
+    { id: "claude-3-5-sonnet-latest", name: "Claude 3.5 Sonnet (Direct)" },
+    { id: "claude-3-5-haiku-latest", name: "Claude 3.5 Haiku (Direct)" },
+    { id: "claude-3-opus-latest", name: "Claude 3 Opus (Direct)" }
+  ];
+
+  const directGrok = [
+    { id: "grok-2-latest", name: "Grok 2 (Direct)" },
+    { id: "grok-beta", name: "Grok Beta (Direct)" }
+  ];
+
+  const openRouterPresets = [
+    { id: "google/gemini-3.1-pro-preview", name: "Gemini 3.1 Pro (OpenRouter)" },
+    { id: "google/gemini-3-flash-preview", name: "Gemini 3 Flash (OpenRouter)" },
+    { id: "anthropic/claude-3.5-sonnet", name: "Claude 3.5 Sonnet (OpenRouter)" },
+    { id: "deepseek/deepseek-r1", name: "DeepSeek R1 (OpenRouter)" },
+    { id: "deepseek/deepseek-chat", name: "DeepSeek V3 (OpenRouter)" },
+    { id: "openai/gpt-4o", name: "GPT-4o (OpenRouter)" }
+  ];
+
+  const allLocalPresets = [...directGoogle, ...directAnthropic, ...directGrok, ...openRouterPresets];
+
+  const query = searchQuery.toLowerCase();
+  
+  const filteredGoogle = directGoogle.filter(m => m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query));
+  const filteredAnthropic = directAnthropic.filter(m => m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query));
+  const filteredGrok = directGrok.filter(m => m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query));
+  const filteredORPresets = openRouterPresets.filter(m => m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query));
+
+  const filteredORList = (openRouterModels || []).filter(m => 
+    !allLocalPresets.some(p => p.id === m.id) &&
+    (m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query))
+  );
+
+  const totalMatches = filteredGoogle.length + filteredAnthropic.length + filteredGrok.length + filteredORPresets.length + filteredORList.length;
+
+  const handleSelect = (id) => {
+    onChange(id);
+    setSearchQuery(id);
+    setIsOpen(false);
+  };
+
+  const handleInputChange = (e) => {
+    const val = e.target.value;
+    setSearchQuery(val);
+    onChange(val);
+    setIsOpen(true);
+  };
+
+  const isDark = appTheme !== 'q-light';
+  const dropdownBg = isDark ? '#1e1f22' : '#ffffff';
+  const borderCol = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.12)';
+  const hoverBg = isDark ? 'rgba(176,96,255,0.2)' : 'rgba(176,96,255,0.1)';
+  const textColor = isDark ? '#f2f3f5' : '#313338';
+  const textMuted = isDark ? '#949ba4' : '#5c5e66';
+
+  return (
+    <div ref={containerRef} style={{ position: 'relative', width: '100%' }}>
+      <div style={{ display: 'flex', position: 'relative', alignItems: 'center', width: '100%' }}>
+        <input
+          type="text"
+          style={style}
+          placeholder={placeholder}
+          value={searchQuery}
+          onChange={handleInputChange}
+          onFocus={() => setIsOpen(true)}
+        />
+        <button
+          type="button"
+          onClick={() => setIsOpen(!isOpen)}
+          style={{
+            position: 'absolute',
+            right: '8px',
+            background: 'transparent',
+            border: 'none',
+            color: textMuted,
+            cursor: 'pointer',
+            fontSize: '10px',
+            padding: '4px',
+            zIndex: 2
+          }}
+        >
+          {isOpen ? '▲' : '▼'}
+        </button>
+      </div>
+
+      {isOpen && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 4px)',
+            left: 0,
+            right: 0,
+            background: dropdownBg,
+            border: `1px solid ${borderCol}`,
+            borderRadius: '6px',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+            maxHeight: '220px',
+            overflowY: 'auto',
+            zIndex: 99999,
+            padding: '4px 0'
+          }}
+        >
+          {totalMatches === 0 ? (
+            <div style={{ padding: '8px 12px', fontSize: '12px', color: textMuted, fontStyle: 'italic' }}>
+              No matching models. Type to use custom ID.
+            </div>
+          ) : (
+            <>
+              {filteredGoogle.length > 0 && (
+                <>
+                  <div style={{ padding: '6px 12px 2px 12px', fontSize: '9px', color: '#b060ff', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                    Google Direct (Native)
+                  </div>
+                  {filteredGoogle.map(m => (
+                    <div
+                      key={m.id}
+                      onClick={() => handleSelect(m.id)}
+                      style={{ padding: '6px 12px', fontSize: '12px', color: textColor, cursor: 'pointer' }}
+                      onMouseEnter={e => e.currentTarget.style.background = hoverBg}
+                      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                    >
+                      <div style={{ fontWeight: '500' }}>{m.name}</div>
+                      <div style={{ fontSize: '10px', color: textMuted }}>{m.id}</div>
+                    </div>
+                  ))}
+                </>
+              )}
+
+              {filteredAnthropic.length > 0 && (
+                <>
+                  <div style={{ padding: '8px 12px 2px 12px', fontSize: '9px', color: '#b060ff', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.05em', borderTop: `1px solid ${borderCol}`, marginTop: '4px' }}>
+                    Anthropic Direct (Native)
+                  </div>
+                  {filteredAnthropic.map(m => (
+                    <div
+                      key={m.id}
+                      onClick={() => handleSelect(m.id)}
+                      style={{ padding: '6px 12px', fontSize: '12px', color: textColor, cursor: 'pointer' }}
+                      onMouseEnter={e => e.currentTarget.style.background = hoverBg}
+                      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                    >
+                      <div style={{ fontWeight: '500' }}>{m.name}</div>
+                      <div style={{ fontSize: '10px', color: textMuted }}>{m.id}</div>
+                    </div>
+                  ))}
+                </>
+              )}
+
+              {filteredGrok.length > 0 && (
+                <>
+                  <div style={{ padding: '8px 12px 2px 12px', fontSize: '9px', color: '#b060ff', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.05em', borderTop: `1px solid ${borderCol}`, marginTop: '4px' }}>
+                    Grok Direct (Native)
+                  </div>
+                  {filteredGrok.map(m => (
+                    <div
+                      key={m.id}
+                      onClick={() => handleSelect(m.id)}
+                      style={{ padding: '6px 12px', fontSize: '12px', color: textColor, cursor: 'pointer' }}
+                      onMouseEnter={e => e.currentTarget.style.background = hoverBg}
+                      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                    >
+                      <div style={{ fontWeight: '500' }}>{m.name}</div>
+                      <div style={{ fontSize: '10px', color: textMuted }}>{m.id}</div>
+                    </div>
+                  ))}
+                </>
+              )}
+
+              {filteredORPresets.length > 0 && (
+                <>
+                  <div style={{ padding: '8px 12px 2px 12px', fontSize: '9px', color: '#b060ff', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.05em', borderTop: `1px solid ${borderCol}`, marginTop: '4px' }}>
+                    OpenRouter Presets
+                  </div>
+                  {filteredORPresets.map(m => (
+                    <div
+                      key={m.id}
+                      onClick={() => handleSelect(m.id)}
+                      style={{ padding: '6px 12px', fontSize: '12px', color: textColor, cursor: 'pointer' }}
+                      onMouseEnter={e => e.currentTarget.style.background = hoverBg}
+                      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                    >
+                      <div style={{ fontWeight: '500' }}>{m.name}</div>
+                      <div style={{ fontSize: '10px', color: textMuted }}>{m.id}</div>
+                    </div>
+                  ))}
+                </>
+              )}
+
+              {filteredORList.length > 0 && (
+                <>
+                  <div style={{ padding: '8px 12px 2px 12px', fontSize: '9px', color: '#b060ff', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.05em', borderTop: `1px solid ${borderCol}`, marginTop: '4px' }}>
+                    OpenRouter Catalog
+                  </div>
+                  {filteredORList.map(m => (
+                    <div
+                      key={m.id}
+                      onClick={() => handleSelect(m.id)}
+                      style={{ padding: '6px 12px', fontSize: '12px', color: textColor, cursor: 'pointer' }}
+                      onMouseEnter={e => e.currentTarget.style.background = hoverBg}
+                      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                    >
+                      <div style={{ fontWeight: '500' }}>{m.name}</div>
+                      <div style={{ fontSize: '10px', color: textMuted }}>{m.id}</div>
+                    </div>
+                  ))}
+                </>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const [personas, setPersonas] = useState({});
   const [activePersona, setActivePersona] = useState(null);
@@ -28,6 +270,34 @@ function App() {
     const saved = localStorage.getItem('persona_ocr_shield');
     return saved ? JSON.parse(saved) : true;
   });
+
+  const [openRouterModels, setOpenRouterModels] = useState([]);
+  const [isFetchingModels, setIsFetchingModels] = useState(false);
+
+  useEffect(() => {
+    const loadModels = async () => {
+      setIsFetchingModels(true);
+      try {
+        const res = await fetch('https://openrouter.ai/api/v1/models');
+        if (res.ok) {
+          const json = await res.json();
+          if (json && json.data) {
+            setOpenRouterModels(json.data.map(m => ({
+              id: m.id,
+              name: m.name || m.id,
+              context: m.context_length,
+              price: m.pricing
+            })));
+          }
+        }
+      } catch (e) {
+        console.warn("Could not load OpenRouter models:", e);
+      } finally {
+        setIsFetchingModels(false);
+      }
+    };
+    loadModels();
+  }, []);
 
   useEffect(() => {
     localStorage.setItem('persona_ocr_shield', JSON.stringify(useOcrShield));
@@ -529,11 +799,10 @@ function App() {
                         title="Remove from session"
                       >✕</button>
                     </div>
-                    <input
-                      type="text"
-                      placeholder={advancedOptions.baseModelId || 'e.g. anthropic/claude-opus-4.5'}
+                    <ModelSelector
                       value={groupMemberModels[key] || ''}
-                      onChange={e => setGroupMemberModels(prev => ({ ...prev, [key]: e.target.value }))}
+                      onChange={val => setGroupMemberModels(prev => ({ ...prev, [key]: val }))}
+                      placeholder={advancedOptions.baseModelId || 'e.g. anthropic/claude-opus-4.5'}
                       style={{
                         background: 'transparent', border: 'none',
                         borderBottom: '1px solid rgba(176,96,255,0.25)',
@@ -541,6 +810,8 @@ function App() {
                         fontFamily: 'var(--font-inter)', outline: 'none',
                         padding: '2px 0', width: '100%'
                       }}
+                      openRouterModels={openRouterModels}
+                      appTheme={appTheme}
                     />
                     <div style={{ display: 'flex', justifyContent: 'center' }}>
                       <button
@@ -2369,14 +2640,24 @@ function App() {
               <div style={S.sectionSub}>Model selection, API keys, and custom provider configuration.</div>
 
               <label style={S.label}>Base Model (Flash)</label>
-              <input style={S.input} type="text" placeholder="e.g. google/gemini-3-flash-preview"
+              <ModelSelector
                 value={advancedOptions.baseModelId}
-                onChange={e => setAdvancedOptions(prev => ({ ...prev, baseModelId: e.target.value }))} />
+                onChange={val => setAdvancedOptions(prev => ({ ...prev, baseModelId: val }))}
+                placeholder="e.g. google/gemini-3-flash-preview"
+                style={S.input}
+                openRouterModels={openRouterModels}
+                appTheme={appTheme}
+              />
 
               <label style={S.label}>Expert Model (Pro / Opus)</label>
-              <input style={S.input} type="text" placeholder="e.g. google/gemini-3.1-pro-preview"
+              <ModelSelector
                 value={advancedOptions.expertModelId}
-                onChange={e => setAdvancedOptions(prev => ({ ...prev, expertModelId: e.target.value }))} />
+                onChange={val => setAdvancedOptions(prev => ({ ...prev, expertModelId: val }))}
+                placeholder="e.g. google/gemini-3.1-pro-preview"
+                style={S.input}
+                openRouterModels={openRouterModels}
+                appTheme={appTheme}
+              />
 
               <label style={S.label}>Universal API Key</label>
               <input style={S.input} type="password" placeholder="sk-or-v1-..."
