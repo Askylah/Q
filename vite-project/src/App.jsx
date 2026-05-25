@@ -2733,8 +2733,48 @@ function App() {
           ) : activePersona ? (
             renderChatInterface()
           ) : (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-dim)' }}>
-              Select a persona to begin initialization.
+            <div style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              height: '100%',
+              padding: '20px',
+              textAlign: 'center'
+            }}>
+              <div style={{
+                background: 'rgba(5, 5, 5, 0.85)',
+                border: '2px dashed var(--primary-color)',
+                borderRadius: '12px',
+                padding: isMobile ? '24px 20px' : '30px 40px',
+                maxWidth: '420px',
+                boxShadow: '0 0 20px rgba(255, 0, 127, 0.15)',
+                backdropFilter: 'blur(4px)'
+              }}>
+                <span className="material-icons glow-pulse" style={{ fontSize: '48px', color: 'var(--primary-color)', marginBottom: '16px' }}>
+                  sensors
+                </span>
+                <h3 style={{
+                  color: 'var(--primary-color)',
+                  fontFamily: 'var(--font-marker)',
+                  fontSize: '20px',
+                  letterSpacing: '1px',
+                  margin: '0 0 10px 0',
+                  textTransform: 'uppercase'
+                }}>
+                  Neural Uplink Offline
+                </h3>
+                <p style={{
+                  color: 'var(--text-color)',
+                  fontFamily: 'var(--font-inter)',
+                  fontSize: '13px',
+                  margin: 0,
+                  opacity: 0.85,
+                  lineHeight: '1.5'
+                }}>
+                  Select a persona from the sidebar to establish a synaptic link and begin initialization.
+                </p>
+              </div>
             </div>
           )}
         </div>

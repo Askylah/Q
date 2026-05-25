@@ -900,6 +900,6 @@ html[data-theme="q-light"] ::-webkit-scrollbar-thumb:hover {
     transition: width 0.2s ease, padding 0.2s ease;
   }
   .sidebar-header {
-    padding-left: 20px;
+    padding-left: 65px;
   }
 }
