@@ -859,3 +859,47 @@ html[data-theme="q-light"] ::-webkit-scrollbar-thumb:hover {
   font-family: monospace !important;
   color: #00e5ff !important;
 }
+
+/* Mobile responsive styles */
+@media (max-width: 768px) {
+  .chat-history {
+    padding: 12px;
+    gap: 12px;
+  }
+  .message-box {
+    max-width: 100%;
+    padding-left: 42px;
+    padding-right: 0;
+  }
+  .message-box.assistant .message-avatar {
+    left: 0;
+    top: 0;
+  }
+  .message-box.user {
+    padding-left: 0;
+    padding-right: 42px;
+  }
+  .message-box.user .message-avatar {
+    right: 0;
+    top: 0;
+  }
+  .message-content {
+    font-size: 0.95rem !important;
+    padding: 10px 12px !important;
+  }
+  .chat-input-container {
+    padding: 10px;
+  }
+  .chat-input {
+    min-height: 50px;
+    padding: 10px 48px 10px 40px;
+    font-size: 14px;
+    border-radius: 8px;
+  }
+  .sidebar {
+    transition: width 0.2s ease, padding 0.2s ease;
+  }
+  .sidebar-header {
+    padding-left: 20px;
+  }
+}

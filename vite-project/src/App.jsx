@@ -747,7 +747,7 @@ function App() {
 
     if (isSetup) {
       return (
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: '30px', paddingLeft: !isSidebarOpen ? '70px' : '30px', overflowY: 'auto', transition: 'padding-left 0.2s' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: isMobile ? '12px' : '30px', paddingLeft: isMobile ? '12px' : (!isSidebarOpen ? '70px' : '30px'), overflowY: 'auto', transition: 'padding-left 0.2s' }}>
           <h2 style={{ color: 'var(--primary-color)', fontFamily: 'var(--font-marker)', marginBottom: '6px', fontSize: '22px' }}>GROUP CHAT</h2>
           <p style={{ color: 'var(--text-dim)', fontSize: '13px', marginBottom: '24px', fontFamily: 'var(--font-inter)' }}>Click personas to add them (2–10). Configure models and optionally set one as Observer below.</p>
 
@@ -772,13 +772,13 @@ function App() {
               <div style={{ fontSize: '10px', fontWeight: '700', letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text-dim)', fontFamily: 'var(--font-inter)', marginBottom: '12px', opacity: 0.7 }}>
                 Session Config
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '32px 130px 1fr 60px', gap: '0 16px', alignItems: 'center', marginBottom: '8px', paddingBottom: '6px', borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '24px 80px 1fr 40px' : '32px 130px 1fr 60px', gap: '0 8px', alignItems: 'center', marginBottom: '8px', paddingBottom: '6px', borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
                 <div />
                 <div style={{ fontSize: '10px', color: 'var(--text-dim)', fontFamily: 'var(--font-inter)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Persona</div>
                 <div style={{ fontSize: '10px', color: 'var(--text-dim)', fontFamily: 'var(--font-inter)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
-                  Model ID <span style={{ opacity: 0.45, textTransform: 'none', letterSpacing: 0 }}>(blank = global default)</span>
+                  Model ID <span style={{ opacity: 0.45, textTransform: 'none', letterSpacing: 0 }}>(blank = default)</span>
                 </div>
-                <div style={{ fontSize: '10px', color: '#b060ff', fontFamily: 'var(--font-inter)', textTransform: 'uppercase', letterSpacing: '0.1em', textAlign: 'center' }}>Observer</div>
+                <div style={{ fontSize: '10px', color: '#b060ff', fontFamily: 'var(--font-inter)', textTransform: 'uppercase', letterSpacing: '0.1em', textAlign: 'center' }}>Obs</div>
               </div>
 
               {groupMembers.map(key => {
@@ -786,7 +786,7 @@ function App() {
                 if (!p) return null;
                 const isObs = groupObserver === key;
                 return (
-                  <div key={key} style={{ display: 'grid', gridTemplateColumns: '32px 130px 1fr 60px', gap: '0 16px', alignItems: 'center', padding: '9px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                  <div key={key} style={{ display: 'grid', gridTemplateColumns: isMobile ? '24px 80px 1fr 40px' : '32px 130px 1fr 60px', gap: '0 8px', alignItems: 'center', padding: '9px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
                     <div style={{ fontSize: '20px' }}>{p.avatar}</div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <span style={{ fontSize: '13px', fontFamily: 'var(--font-inter)', color: isObs ? '#b060ff' : 'var(--text-color)', fontWeight: isObs ? '600' : '400' }}>
@@ -1172,18 +1172,15 @@ function App() {
 
   const [USERNAME, setUSERNAME] = useState(() => {
     let saved = localStorage.getItem('persona_username');
-    if (!saved) {
-      saved = window.prompt("Welcome! What is your name?", "Sky");
-      if (!saved || !saved.trim()) saved = "Sky";
-      if (!saved.includes('#')) {
-        const randomTag = Math.floor(1000 + Math.random() * 9000);
-        saved = `${saved.trim()}#${randomTag}`;
-      }
-      localStorage.setItem('persona_username', saved);
-      alert(`Welcome! Your profile has been created.\n\nYour unique Link Code is: ${saved}\nUse this exact code if you want to link your history on your phone!`);
-    }
-    return saved.trim();
+    return saved ? saved.trim() : "";
   });
+
+  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+  useEffect(() => {
+    const handleResize = () => setIsMobile(window.innerWidth < 768);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   const [apiServerUrl, setApiServerUrl] = useState(() => localStorage.getItem('persona_backend_url') || '');
 
@@ -1200,6 +1197,7 @@ function App() {
 
   // Fetch actual personas from FastAPI DB on load
   useEffect(() => {
+    if (!USERNAME) return;
     const initData = async () => {
       const data = await api.fetchPersonas(USERNAME);
       if (data) {
@@ -1215,7 +1213,7 @@ function App() {
       if (settings) setUserSettings(settings);
     };
     initData();
-  }, []);
+  }, [USERNAME]);
 
   // When persona changes in workshop, load its lore entries
   useEffect(() => {
@@ -1232,7 +1230,7 @@ function App() {
     loadLore();
     setLoreForm({ title: '', content: '' });
     setLoreEditId(null);
-  }, [newPersona.originalKey]);
+  }, [newPersona.originalKey, USERNAME]);
 
   // Polling for Lore Sync (Zettel Hyperscaling visibility)
   useEffect(() => {
@@ -1244,7 +1242,7 @@ function App() {
       }, 5000);
       return () => clearTimeout(t);
     }
-  }, [loreEntries, currentView, newPersona.originalKey]);
+  }, [loreEntries, currentView, newPersona.originalKey, USERNAME]);
 
   // When persona changes, load their chat history
   useEffect(() => {
@@ -1259,7 +1257,7 @@ function App() {
     };
 
     loadHistory();
-  }, [activePersona, personas]);
+  }, [activePersona, personas, USERNAME]);
 
   // Auto-scroll to bottom of chat
   useEffect(() => {
@@ -1786,6 +1784,162 @@ function App() {
     return 'trenches-void';
   };
 
+  if (!USERNAME) {
+    return (
+      <div className="welcome-nexus-overlay" style={{
+        position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+        backgroundColor: '#050505',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        zIndex: 99999,
+        fontFamily: 'Inter, sans-serif',
+        color: '#fff',
+        backgroundImage: 'radial-gradient(circle at center, #240a3e 0%, #050508 80%)',
+        padding: '20px'
+      }}>
+        <div style={{
+          width: '100%', maxWidth: '420px',
+          background: 'rgba(10, 5, 20, 0.85)',
+          border: '2px solid #b060ff',
+          borderRadius: '12px',
+          padding: '30px',
+          boxShadow: '0 0 30px rgba(176, 96, 255, 0.3)',
+          textAlign: 'center',
+          backdropFilter: 'blur(10px)'
+        }}>
+          <div style={{ fontSize: '36px', marginBottom: '10px' }}>🔮</div>
+          <h2 style={{ margin: '0 0 8px 0', fontSize: '22px', letterSpacing: '0.05em', color: '#af52ff', textTransform: 'uppercase' }}>
+            NEXUS PROTOCOL
+          </h2>
+          <p style={{ margin: '0 0 24px 0', fontSize: '13px', color: 'rgba(255,255,255,0.7)', lineHeight: '1.4' }}>
+            Establish a connection key to synchronize your personas and memories.
+          </p>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            {/* OPTION A: CREATE NEW */}
+            <div style={{
+              background: 'rgba(255,255,255,0.02)',
+              border: '1px solid rgba(176, 96, 255, 0.2)',
+              borderRadius: '8px',
+              padding: '16px',
+              textAlign: 'left'
+            }}>
+              <div style={{ fontSize: '12px', fontWeight: 'bold', textTransform: 'uppercase', color: '#b060ff', marginBottom: '8px' }}>
+                Option A: Inscribe New Soul
+              </div>
+              <input
+                id="welcome-new-name"
+                type="text"
+                placeholder="Enter display name (e.g. Sky)"
+                style={{
+                  width: '100%',
+                  background: 'rgba(0,0,0,0.5)',
+                  border: '1px solid rgba(255,255,255,0.15)',
+                  borderRadius: '4px',
+                  padding: '8px 12px',
+                  color: '#fff',
+                  fontSize: '14px',
+                  outline: 'none',
+                  boxSizing: 'border-box'
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    const btn = document.getElementById('welcome-new-btn');
+                    if (btn) btn.click();
+                  }
+                }}
+              />
+              <button
+                id="welcome-new-btn"
+                style={{
+                  width: '100%',
+                  marginTop: '10px',
+                  background: '#b060ff',
+                  border: 'none',
+                  borderRadius: '4px',
+                  color: '#fff',
+                  padding: '10px',
+                  fontWeight: 'bold',
+                  cursor: 'pointer',
+                  fontSize: '13px'
+                }}
+                onClick={() => {
+                  const input = document.getElementById('welcome-new-name');
+                  let val = input ? input.value.trim() : '';
+                  if (!val) return alert('Please enter a name.');
+                  const randomTag = Math.floor(1000 + Math.random() * 9000);
+                  const tagged = `${val}#${randomTag}`;
+                  localStorage.setItem('persona_username', tagged);
+                  setUSERNAME(tagged);
+                }}
+              >
+                BIND NEW PROFILE
+              </button>
+            </div>
+
+            {/* OPTION B: LINK EXISTING */}
+            <div style={{
+              background: 'rgba(255,255,255,0.02)',
+              border: '1px solid rgba(0, 204, 102, 0.2)',
+              borderRadius: '8px',
+              padding: '16px',
+              textAlign: 'left'
+            }}>
+              <div style={{ fontSize: '12px', fontWeight: 'bold', textTransform: 'uppercase', color: '#00cc66', marginBottom: '8px' }}>
+                Option B: Attune to Existent Node
+              </div>
+              <input
+                id="welcome-link-code"
+                type="text"
+                placeholder="Paste Profile Link Code"
+                style={{
+                  width: '100%',
+                  background: 'rgba(0,0,0,0.5)',
+                  border: '1px solid rgba(255,255,255,0.15)',
+                  borderRadius: '4px',
+                  padding: '8px 12px',
+                  color: '#fff',
+                  fontSize: '14px',
+                  outline: 'none',
+                  boxSizing: 'border-box'
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    const btn = document.getElementById('welcome-link-btn');
+                    if (btn) btn.click();
+                  }
+                }}
+              />
+              <button
+                id="welcome-link-btn"
+                style={{
+                  width: '100%',
+                  marginTop: '10px',
+                  background: '#00cc66',
+                  border: 'none',
+                  borderRadius: '4px',
+                  color: '#fff',
+                  padding: '10px',
+                  fontWeight: 'bold',
+                  cursor: 'pointer',
+                  fontSize: '13px'
+                }}
+                onClick={() => {
+                  const input = document.getElementById('welcome-link-code');
+                  let val = input ? input.value.trim() : '';
+                  if (!val) return alert('Please paste your Link Code.');
+                  localStorage.setItem('persona_username', val);
+                  setUSERNAME(val);
+                }}
+              >
+                HARMONIZE CONSCIOUSNESS
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={`app-container ${!isSidebarOpen ? 'sidebar-collapsed' : ''}`}>
       <button
@@ -1796,16 +1950,38 @@ function App() {
         <span className="material-icons">menu</span>
       </button>
 
+      {/* MOBILE BACKDROP */}
+      {isMobile && isSidebarOpen && (
+        <div
+          style={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+            backgroundColor: 'rgba(0,0,0,0.6)', zIndex: 9998
+          }}
+          onClick={() => setIsSidebarOpen(false)}
+        />
+      )}
+
       {/* SIDEBAR */}
       <div
         className={`sidebar animate-fade-in glass-panel ${!isSidebarOpen ? 'collapsed' : ''}`}
-        style={isSidebarOpen ? { width: sidebarWidth, flexShrink: 0 } : undefined}
+        style={
+          isMobile
+            ? {
+                position: 'fixed',
+                top: 0,
+                left: 0,
+                height: '100%',
+                width: isSidebarOpen ? '280px' : '0px',
+                zIndex: 9999,
+                boxShadow: isSidebarOpen ? '0 0 20px rgba(0,0,0,0.8)' : 'none',
+                transition: 'width 0.2s ease, padding 0.2s ease'
+              }
+            : (isSidebarOpen ? { width: sidebarWidth, flexShrink: 0 } : undefined)
+        }
       >
         <div className="sidebar-header">
           <div style={{ fontSize: '28px', color: '#b060ff' }} className="material-icons">local_fire_department</div>
         </div>
-
-
 
         {/* VIEW TOGGLE */}
         <div style={{ padding: '0 20px', marginBottom: '20px', paddingBottom: '10px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
@@ -1831,27 +2007,29 @@ function App() {
             <span style={{ fontFamily: 'var(--font-marker)' }}>{currentView === 'chat' ? 'THE WORKSHOP' : 'RETURN TO CHAT'}</span>
           </button>
 
-          <button
-            style={{
-              width: '100%',
-              background: 'transparent',
-              border: 'none',
-              color: globalMode === 'workspace' ? 'var(--primary-color)' : 'var(--text-color)',
-              cursor: 'pointer',
-              fontSize: '18px',
-              textAlign: 'left',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '12px',
-              transition: 'var(--transition-fast)'
-            }}
-            onMouseEnter={(e) => e.currentTarget.style.color = 'var(--primary-color)'}
-            onMouseLeave={(e) => e.currentTarget.style.color = globalMode === 'workspace' ? 'var(--primary-color)' : 'var(--text-color)'}
-            onClick={() => setGlobalMode(globalMode === 'workspace' ? 'roleplay' : 'workspace')}
-          >
-            <span style={{ fontSize: '22px' }}>💻</span>
-            <span style={{ fontFamily: 'var(--font-marker)' }}>{globalMode === 'workspace' ? 'EXIT WORKSPACE' : 'WORKSPACE UI'}</span>
-          </button>
+          {!isMobile && (
+            <button
+              style={{
+                width: '100%',
+                background: 'transparent',
+                border: 'none',
+                color: globalMode === 'workspace' ? 'var(--primary-color)' : 'var(--text-color)',
+                cursor: 'pointer',
+                fontSize: '18px',
+                textAlign: 'left',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px',
+                transition: 'var(--transition-fast)'
+              }}
+              onMouseEnter={(e) => e.currentTarget.style.color = 'var(--primary-color)'}
+              onMouseLeave={(e) => e.currentTarget.style.color = globalMode === 'workspace' ? 'var(--primary-color)' : 'var(--text-color)'}
+              onClick={() => setGlobalMode(globalMode === 'workspace' ? 'roleplay' : 'workspace')}
+            >
+              <span style={{ fontSize: '22px' }}>💻</span>
+              <span style={{ fontFamily: 'var(--font-marker)' }}>{globalMode === 'workspace' ? 'EXIT WORKSPACE' : 'WORKSPACE UI'}</span>
+            </button>
+          )}
 
           <button
             style={{
@@ -1948,7 +2126,7 @@ function App() {
       </div>
 
         {/* SIDEBAR RESIZE HANDLE */}
-        {isSidebarOpen && (
+        {isSidebarOpen && !isMobile && (
           <div
             onMouseDown={(e) => startResize(e, 'sidebar')}
             style={{
@@ -2116,7 +2294,7 @@ function App() {
           {currentView === 'group' ? (
             renderGroupChat()
           ) : currentView === 'studio' ? (
-            <div className="studio-view glass-panel animate-fade-in" style={{ height: '100%', display: 'flex', flexDirection: 'column', padding: '40px', overflowY: 'auto' }}>
+            <div className="studio-view glass-panel animate-fade-in" style={{ height: '100%', display: 'flex', flexDirection: 'column', padding: isMobile ? '16px' : '40px', overflowY: 'auto' }}>
               <h1 style={{ color: 'var(--work-green)', marginBottom: '10px' }}>THE WORKSHOP</h1>
               <p style={{ opacity: 0.8, marginBottom: '30px' }}>Refine your AI companions and their collective intelligence.</p>
 
@@ -2558,23 +2736,32 @@ function App() {
             display: 'flex', alignItems: 'center', justifyContent: 'center'
           },
           shell: {
-            width: '860px', height: '580px',
+            width: isMobile ? '95%' : '860px',
+            height: isMobile ? '90%' : '580px',
             background: appTheme === 'q-light' ? '#fff' : appTheme === 'q-dark' ? '#111113' : '#0a0a0a',
             border: appTheme === 'void' ? '1px solid #1a0a2a' : `1px solid ${appTheme === 'q-dark' ? '#1f1f24' : '#d1d3d6'}`,
             borderRadius: '8px',
             display: 'flex',
+            flexDirection: isMobile ? 'column' : 'row',
             overflow: 'hidden',
-            boxShadow: '0 8px 32px rgba(0,0,0,0.4)'
+            boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+            position: 'relative'
           },
           nav: {
-            width: '200px',
+            width: isMobile ? '100%' : '200px',
+            height: isMobile ? 'auto' : '100%',
             background: appTheme === 'q-light' ? '#f2f3f5' : appTheme === 'q-dark' ? '#080809' : '#050505',
-            borderRight: appTheme === 'void' ? '1px solid #1a0a2a' : `1px solid ${appTheme === 'q-dark' ? '#1f1f24' : '#e3e5e8'}`,
-            display: 'flex', flexDirection: 'column',
-            padding: '20px 0',
+            borderRight: isMobile ? 'none' : (appTheme === 'void' ? '1px solid #1a0a2a' : `1px solid ${appTheme === 'q-dark' ? '#1f1f24' : '#e3e5e8'}`),
+            borderBottom: isMobile ? (appTheme === 'void' ? '1px solid #1a0a2a' : `1px solid ${appTheme === 'q-dark' ? '#1f1f24' : '#e3e5e8'}`) : 'none',
+            display: 'flex',
+            flexDirection: isMobile ? 'row' : 'column',
+            overflowX: isMobile ? 'auto' : 'visible',
+            whiteSpace: isMobile ? 'nowrap' : 'normal',
+            padding: isMobile ? '8px' : '20px 0',
             flexShrink: 0
           },
           categoryLabel: {
+            display: isMobile ? 'none' : 'block',
             fontSize: '11px', fontWeight: '700',
             letterSpacing: '0.08em', textTransform: 'uppercase',
             color: appTheme === 'q-light' ? '#6d6f78' : appTheme === 'q-dark' ? '#72767d' : 'rgba(0,204,102,0.5)',
@@ -2582,12 +2769,13 @@ function App() {
             fontFamily: 'Inter, sans-serif'
           },
           navItem: (id) => ({
-            padding: '8px 16px',
+            padding: isMobile ? '6px 12px' : '8px 16px',
             cursor: 'pointer',
-            fontSize: '14px',
+            fontSize: isMobile ? '12px' : '14px',
             fontFamily: 'Inter, sans-serif',
             borderRadius: '4px',
-            margin: '1px 8px',
+            margin: isMobile ? '0 4px' : '1px 8px',
+            display: isMobile ? 'inline-block' : 'block',
             transition: 'background 0.1s ease',
             background: settingsSection === id
               ? (appTheme === 'void' ? 'rgba(255,0,127,0.12)' : 'rgba(88,101,242,0.2)')
@@ -2598,7 +2786,7 @@ function App() {
             fontWeight: settingsSection === id ? '600' : '400'
           }),
           content: {
-            flex: 1, overflowY: 'auto', padding: '28px 32px',
+            flex: 1, overflowY: 'auto', padding: isMobile ? '20px 16px' : '28px 32px',
             display: 'flex', flexDirection: 'column', gap: '0'
           },
           sectionTitle: {
@@ -2971,24 +3159,42 @@ function App() {
               <div style={S.divider} />
 
               <label style={S.label}>Profile Link Code</label>
-              <input
-                style={{ ...S.input, background: 'rgba(255,255,255,0.05)', borderStyle: 'dashed', cursor: 'pointer' }}
-                type="text"
-                readOnly
-                value={USERNAME}
-                onClick={e => {
-                  e.target.select();
-                  navigator.clipboard.writeText(USERNAME);
-                  alert('Copied link code to clipboard!');
-                }}
-                title="Click to copy your link code"
-              />
-              <div style={{ fontSize: '12px', fontFamily: 'Inter, sans-serif', opacity: 0.55, marginTop: '-8px', marginBottom: '20px' }}>
-                Click to copy. Type this exact code when setting up other devices to sync your memories!
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <input
+                  style={{ ...S.input, background: 'rgba(255,255,255,0.05)', flex: 1 }}
+                  type="text"
+                  value={USERNAME}
+                  onChange={e => {
+                    const val = e.target.value;
+                    setUSERNAME(val);
+                    localStorage.setItem('persona_username', val);
+                  }}
+                  title="Profile Link Code (device sync)"
+                />
+                <button
+                  style={{
+                    background: 'rgba(176, 96, 255, 0.15)',
+                    border: '1px solid #b060ff',
+                    borderRadius: '4px',
+                    color: '#fff',
+                    padding: '0 12px',
+                    cursor: 'pointer',
+                    fontSize: '12px'
+                  }}
+                  onClick={() => {
+                    navigator.clipboard.writeText(USERNAME);
+                    alert('Copied link code to clipboard!');
+                  }}
+                >
+                  Copy
+                </button>
+              </div>
+              <div style={{ fontSize: '12px', fontFamily: 'Inter, sans-serif', opacity: 0.55, marginTop: '4px', marginBottom: '20px' }}>
+                Type, paste, or edit your Link Code to synchronize with another device.
               </div>
 
               <div style={{ fontSize: '12px', fontFamily: 'Inter, sans-serif', opacity: 0.5 }}>
-                Your display name is: <strong style={{ color: 'var(--primary-color)' }}>{USERNAME.split('#')[0]}</strong>
+                Your display name is: <strong style={{ color: 'var(--primary-color)' }}>{USERNAME ? USERNAME.split('#')[0] : "None"}</strong>
               </div>
             </div>
           );
@@ -2997,6 +3203,32 @@ function App() {
         return (
           <div style={S.overlay} onClick={e => { if (e.target === e.currentTarget) setShowSettings(false); }}>
             <div style={S.shell}>
+              {/* FLOATING CLOSE BUTTON FOR MOBILE */}
+              {isMobile && (
+                <button
+                  onClick={() => setShowSettings(false)}
+                  style={{
+                    position: 'absolute',
+                    top: '12px',
+                    right: '12px',
+                    background: 'rgba(0,0,0,0.5)',
+                    border: 'none',
+                    color: '#fff',
+                    borderRadius: '50%',
+                    width: '32px',
+                    height: '32px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    cursor: 'pointer',
+                    zIndex: 1000
+                  }}
+                  title="Close Settings"
+                >
+                  <span className="material-icons" style={{ fontSize: '18px', color: '#fff' }}>close</span>
+                </button>
+              )}
+
               {/* LEFT NAV */}
               <div style={S.nav}>
                 <div style={S.categoryLabel}>General</div>
@@ -3009,19 +3241,21 @@ function App() {
                 {navSection('maintenance', 'Maintenance')}
                 {navSection('governance', 'Governance')}
 
-                {/* Close at bottom of nav */}
-                <div style={{ marginTop: 'auto', padding: '16px 8px 4px 8px' }}>
-                  <button onClick={() => setShowSettings(false)} style={{
-                    width: '100%', padding: '8px', borderRadius: '4px', cursor: 'pointer',
-                    background: 'transparent', border: 'none',
-                  color: appTheme === 'q-light' ? '#6d6f78' : appTheme === 'q-dark' ? '#72767d' : 'rgba(0,204,102,0.4)',
-                    fontSize: '13px', fontFamily: 'Inter, sans-serif',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px'
-                  }}>
-                    <span className="material-icons" style={{ fontSize: '16px', color: 'inherit' }}>close</span>
-                    Close
-                  </button>
-                </div>
+                {/* Close at bottom of nav (hidden on mobile) */}
+                {!isMobile && (
+                  <div style={{ marginTop: 'auto', padding: '16px 8px 4px 8px' }}>
+                    <button onClick={() => setShowSettings(false)} style={{
+                      width: '100%', padding: '8px', borderRadius: '4px', cursor: 'pointer',
+                      background: 'transparent', border: 'none',
+                    color: appTheme === 'q-light' ? '#6d6f78' : appTheme === 'q-dark' ? '#72767d' : 'rgba(0,204,102,0.4)',
+                      fontSize: '13px', fontFamily: 'Inter, sans-serif',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px'
+                    }}>
+                      <span className="material-icons" style={{ fontSize: '16px', color: 'inherit' }}>close</span>
+                      Close
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* RIGHT CONTENT */}
