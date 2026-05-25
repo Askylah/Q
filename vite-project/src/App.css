@@ -37,7 +37,7 @@
   position: absolute;
   top: 15px;
   left: 20px;
-  z-index: 1000;
+  z-index: 10000;
   /* Absolute priority over the grid */
   background: transparent;
   border: none;

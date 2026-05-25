@@ -747,9 +747,21 @@ function App() {
 
     if (isSetup) {
       return (
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: isMobile ? '12px' : '30px', paddingLeft: isMobile ? '12px' : (!isSidebarOpen ? '70px' : '30px'), overflowY: 'auto', transition: 'padding-left 0.2s' }}>
-          <h2 style={{ color: 'var(--primary-color)', fontFamily: 'var(--font-marker)', marginBottom: '6px', fontSize: '22px' }}>GROUP CHAT</h2>
-          <p style={{ color: 'var(--text-dim)', fontSize: '13px', marginBottom: '24px', fontFamily: 'var(--font-inter)' }}>Click personas to add them (2–10). Configure models and optionally set one as Observer below.</p>
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+          <div style={{
+            height: '64px', padding: '0 20px',
+            paddingLeft: !isSidebarOpen ? '70px' : '20px',
+            borderBottom: 'var(--border-dashed)',
+            display: 'flex', alignItems: 'center',
+            backgroundColor: 'var(--secondary-bg-color)',
+            zIndex: 5, flexShrink: 0,
+            transition: 'padding-left 0.2s'
+          }}>
+            <h2 style={{ color: 'var(--primary-color)', fontFamily: 'var(--font-marker)', margin: 0, fontSize: '22px' }}>GROUP CHAT</h2>
+          </div>
+
+          <div style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '16px' : '30px' }}>
+            <p style={{ color: 'var(--text-dim)', fontSize: '13px', marginBottom: '24px', fontFamily: 'var(--font-inter)' }}>Click personas to add them (2–10). Configure models and optionally set one as Observer below.</p>
 
           {/* ── PHASE 1: PERSONA PICKER ── */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(110px, 1fr))', gap: '10px', marginBottom: '28px', maxWidth: '600px' }}>
@@ -903,6 +915,7 @@ function App() {
           >
             START SESSION ({groupMembers.length} selected)
           </button>
+          </div>
         </div>
       );
     }
@@ -910,7 +923,7 @@ function App() {
     // CHAT VIEW
     return (
       <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-        <div style={{ padding: '12px 20px', paddingLeft: !isSidebarOpen ? '70px' : '20px', borderBottom: 'var(--border-dashed)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, transition: 'padding-left 0.2s' }}>
+        <div style={{ padding: '12px 20px', paddingLeft: !isSidebarOpen ? '70px' : '20px', borderBottom: 'var(--border-dashed)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, transition: 'padding-left 0.2s', backgroundColor: 'var(--secondary-bg-color)', zIndex: 5 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             {groupMembers.map(k => (
               <span key={k} style={{ fontSize: '20px' }} title={personas[k]?.name}>{personas[k]?.avatar}</span>
