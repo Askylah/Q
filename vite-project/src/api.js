@@ -10,13 +10,16 @@ class PersonaAPI {
                     this.baseUrl = savedUrl;
                 } else {
                     const origin = window.location.origin;
-                    if (origin.startsWith('capacitor://') || origin === 'http://localhost' || origin.startsWith('http://localhost:8080')) {
+                    console.log("[PersonaAPI] Origin detected:", origin);
+                    // Match capacitor:// or any localhost origin except the Vite dev server port (:5173)
+                    if (origin.startsWith('capacitor://') || (origin.startsWith('http://localhost') && !origin.includes(':5173'))) {
                         this.baseUrl = 'https://projectsleeper.duckdns.org';
                     } else if (origin.includes(':5173') || origin.includes('127.0.0.1:5173')) {
                         this.baseUrl = 'http://127.0.0.1:8000';
                     } else {
                         this.baseUrl = origin;
                     }
+                    console.log("[PersonaAPI] Base URL set to:", this.baseUrl);
                 }
             } else {
                 this.baseUrl = 'http://127.0.0.1:8000';
