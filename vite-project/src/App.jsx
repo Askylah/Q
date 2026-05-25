@@ -2101,7 +2101,8 @@ function App() {
                 access_code: p.access_code || '',
                 om_enabled: p.om_enabled !== false,
                 om_turn_threshold: p.om_turn_threshold !== undefined ? p.om_turn_threshold : 5,
-                deep_memory_enabled: !!p.deep_memory_enabled
+                deep_memory_enabled: !!p.deep_memory_enabled,
+                direct_wire: !!p.direct_wire
               });
             }}
             style={{
@@ -2318,7 +2319,7 @@ function App() {
                     <button
                       className="header-button"
                       style={{ fontSize: '12px', padding: '4px 12px' }}
-                      onClick={() => setNewPersona({ originalKey: "", key: "", name: "", avatar: "🤖", tagline: "", system_prompt: "", on_demand_files: [], access_code: "", om_enabled: true, om_turn_threshold: 5, deep_memory_enabled: false })}
+                      onClick={() => setNewPersona({ originalKey: "", key: "", name: "", avatar: "🤖", tagline: "", system_prompt: "", on_demand_files: [], access_code: "", om_enabled: true, om_turn_threshold: 5, deep_memory_enabled: false, direct_wire: false })}
                     >
                       ➕ NEW PERSONA
                     </button>

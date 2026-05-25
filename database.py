@@ -615,6 +615,7 @@ class UserManager:
                     "om_enabled": bool(r[10]) if len(r) > 10 else True,
                     "om_turn_threshold": r[11] if len(r) > 11 else 5,
                     "deep_memory_enabled": bool(r[12]) if len(r) > 12 else False,
+                    "direct_wire": bool(r[13]) if len(r) > 13 else False,
                     "is_custom": True
                 }
             return personas

@@ -10,9 +10,9 @@ class PersonaAPI {
                     this.baseUrl = savedUrl;
                 } else {
                     const origin = window.location.origin;
-                    if (origin.startsWith('capacitor://')) {
+                    if (origin.startsWith('capacitor://') || origin === 'http://localhost' || origin.startsWith('http://localhost:8080')) {
                         this.baseUrl = 'https://projectsleeper.duckdns.org';
-                    } else if (origin.includes(':5173') || origin.includes('localhost')) {
+                    } else if (origin.includes(':5173') || origin.includes('127.0.0.1:5173')) {
                         this.baseUrl = 'http://127.0.0.1:8000';
                     } else {
                         this.baseUrl = origin;
