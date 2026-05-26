@@ -1,3 +1,7 @@
+:root {
+  --chat-fade-color: #000000;
+}
+
 /* App specific utility classes for The Trenches */
 
 .sidebar {
@@ -197,12 +201,17 @@
   overflow-y: auto;
   overflow-x: hidden;
   /* Force horizontal lock */
-  padding: 24px;
+  padding: 24px 24px 120px 24px;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 20px;
   background: transparent;
+}
+
+.group-chat-history {
+  padding: 20px 20px 120px 20px !important;
+  gap: 14px !important;
 }
 
 /* Legibility Overrides */
@@ -270,8 +279,14 @@
 
 
 .chat-input-container {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
   padding: 24px;
-  background: transparent;
+  background: linear-gradient(to top, var(--chat-fade-color) 60%, transparent) !important;
+  z-index: 10;
+  pointer-events: none;
 }
 
 .chat-input-wrapper {
@@ -287,6 +302,7 @@
   background: rgba(10, 10, 10, 0.98);
   border: 3px dashed var(--accent-purple);
   transition: var(--transition-fast);
+  pointer-events: auto;
 }
 
 .chat-input-wrapper:focus-within {
@@ -321,11 +337,18 @@
   font-family: var(--font-marker) !important;
   font-size: 16px;
   resize: none;
-  min-height: unset !important;
+  min-height: 38px;
   height: 38px;
+  max-height: 160px;
   padding: 8px 0 !important;
   outline: none;
-  overflow: hidden;
+  overflow-y: auto;
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+
+.chat-message-input::-webkit-scrollbar {
+  display: none !important;
 }
 
 .attach-button {
@@ -506,6 +529,10 @@
    ========================================================== */
 
 /* ── Q DARK (Midnight) ───────────────────────────────────── */
+html[data-theme="q-dark"] {
+  --chat-fade-color: #080809 !important;
+}
+
 html[data-theme="q-dark"] body {
   background-color: #080809 !important;
   background-image: none !important;
@@ -673,6 +700,10 @@ html[data-theme="q-dark"] ::-webkit-scrollbar-thumb:hover {
 }
 
 /* ── Q LIGHT ─────────────────────────────────────────────── */
+html[data-theme="q-light"] {
+  --chat-fade-color: #f2f3f5 !important;
+}
+
 html[data-theme="q-light"] body {
   background-color: #f2f3f5 !important;
   background-image: none !important;
@@ -851,6 +882,10 @@ html[data-theme="q-light"] ::-webkit-scrollbar-thumb:hover {
   border-radius: 8px;
   padding: 12px 16px;
   transition: background 0.15s;
+  width: 100%;
+  max-width: 700px;
+  margin: 0 auto;
+  box-sizing: border-box;
 }
 
 .group-message:hover {
@@ -955,15 +990,19 @@ html[data-theme="q-light"] ::-webkit-scrollbar-thumb:hover {
   .message-content {
     font-size: 0.95rem !important;
     padding: 10px 14px !important;
-    max-width: 85%;
+    max-width: 100% !important;
+    flex: 1 !important;
   }
   .chat-input-container {
-    padding: 10px;
+    padding: 12px 16px 20px 16px !important;
+    display: flex !important;
+    justify-content: center !important;
   }
   .chat-input-wrapper {
-    padding: 4px 4px 4px 12px !important;
+    max-width: 85% !important;
+    padding: 10px 10px 10px 16px !important;
     gap: 8px !important;
-    border-radius: 24px !important;
+    border-radius: 28px !important;
   }
   .chat-input {
     font-size: 14px !important;
@@ -973,8 +1012,10 @@ html[data-theme="q-light"] ::-webkit-scrollbar-thumb:hover {
   }
   .chat-message-input {
     font-size: 14px !important;
-    height: 34px !important;
-    padding: 6px 0 !important;
+    height: 24px !important;
+    padding: 2px 0 !important;
+    resize: none !important;
+    overflow: hidden !important;
   }
   .attach-button, .send-button {
     width: 32px !important;

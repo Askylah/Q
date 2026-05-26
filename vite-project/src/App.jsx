@@ -564,6 +564,8 @@ function App() {
 
   const chatEndRef = useRef(null);
   const abortControllerRef = useRef(null);
+  const chatInputRef = useRef(null);
+  const groupInputRef = useRef(null);
 
   // Auto-scroll group chat to bottom
   useEffect(() => {
@@ -922,7 +924,7 @@ function App() {
 
     // CHAT VIEW
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
         <div style={{ padding: '12px 20px', paddingLeft: !isSidebarOpen ? '70px' : '20px', borderBottom: 'var(--border-dashed)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, transition: 'padding-left 0.2s', backgroundColor: 'var(--secondary-bg-color)', zIndex: 5 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             {groupMembers.map(k => (
@@ -963,7 +965,7 @@ function App() {
           </div>
         </div>
 
-        <div style={{ flex: 1, overflowY: 'auto', padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+        <div className="chat-history group-chat-history">
           {groupHistory.map((msg, i) => {
             const isUser = msg.role === 'user';
             const color = isUser ? 'var(--text-dim)' : msg.is_observer ? '#b060ff' : getPersonaColor(msg.persona_key);
@@ -1032,7 +1034,7 @@ function App() {
           <div ref={groupEndRef} />
         </div>
 
-        <div style={{ padding: '16px 20px', borderTop: 'var(--border-dashed)', flexShrink: 0 }}>
+        <div className="chat-input-container">
 
           {/* Attachment preview strip */}
           {groupAttachments.length > 0 && (
@@ -1083,7 +1085,7 @@ function App() {
             }}
           />
 
-          <div style={{ display: 'flex', alignItems: 'flex-end', gap: '6px' }}>
+          <div className="chat-input-wrapper">
             {/* Attach button */}
             <button
               className="material-icons attach-button"
@@ -1094,18 +1096,34 @@ function App() {
               add
             </button>
 
-
-
             {/* Textarea + send */}
-            <div style={{ position: 'relative', flex: 1 }}>
-              <textarea
-                id="group-chat-input"
-                disabled={groupStreaming}
-                placeholder={groupStreaming ? 'Conversation in progress...' : 'Message the group...'}
-                rows={3}
-                onPaste={(e) => handlePaste(e, setGroupAttachments)}
-                style={{ width: '100%', background: 'rgba(10,10,10,0.8)', border: '1px dashed var(--accent-purple)', borderRadius: '8px', padding: '12px 50px 12px 16px', color: 'var(--text-color)', fontFamily: 'var(--font-inter)', fontSize: '14px', resize: 'none', outline: 'none', opacity: groupStreaming ? 0.5 : 1, boxSizing: 'border-box' }}
-              />
+            <textarea
+              ref={groupInputRef}
+              id="group-chat-input"
+              className="chat-message-input"
+              disabled={groupStreaming}
+              placeholder={groupStreaming ? 'Conversation in progress...' : 'Message the group...'}
+              rows={1}
+              onChange={(e) => {
+                e.target.style.height = 'auto';
+                e.target.style.height = `${e.target.scrollHeight}px`;
+              }}
+              onPaste={(e) => handlePaste(e, setGroupAttachments)}
+            />
+            {groupStreaming ? (
+              <button
+                className="send-button material-icons"
+                style={{ color: '#ff4444' }}
+                onClick={() => {
+                  groupAbortRef.current?.abort();
+                  setGroupStreaming(false);
+                  setGroupLiveSlot(null);
+                }}
+                title="Stop Generation"
+              >
+                stop
+              </button>
+            ) : (
               <button
                 className="send-button material-icons"
                 disabled={groupStreaming}
@@ -1127,14 +1145,14 @@ function App() {
 
                   const displayContent = val || '[Multimodal Attachment]';
                   el.value = '';
+                  el.style.height = '38px';
                   setGroupAttachments([]);
                   runGroupRound(groupUserMessage, displayContent);
                 }}
-                style={{ position: 'absolute', bottom: '12px', right: '12px', background: 'transparent', border: 'none', color: 'var(--primary-color)', cursor: 'pointer', fontSize: '24px' }}
               >
                 send
               </button>
-            </div>
+            )}
           </div>
         </div>
       </div>
@@ -1328,6 +1346,9 @@ function App() {
 
     const displayMessage = currentInput || "[Multimodal Attachment]";
     setCurrentInput(""); // Clear box instantly
+    if (chatInputRef.current) {
+      chatInputRef.current.style.height = '38px';
+    }
     setChatAttachments([]);
 
     // Update local UI immediately
@@ -1752,11 +1773,16 @@ function App() {
 
 
           <textarea
+            ref={chatInputRef}
             className="chat-message-input"
-            placeholder={`Send a message to ${personas[activePersona]?.name}...`}
+            placeholder={`Message ${personas[activePersona]?.name}...`}
             rows={1}
             value={currentInput}
-            onChange={(e) => setCurrentInput(e.target.value)}
+            onChange={(e) => {
+              setCurrentInput(e.target.value);
+              e.target.style.height = 'auto';
+              e.target.style.height = `${e.target.scrollHeight}px`;
+            }}
             onPaste={(e) => handlePaste(e, setChatAttachments)}
             disabled={isStreaming}
           />
@@ -2503,7 +2529,7 @@ function App() {
             title="Drag to resize"
           />
 
-          <div className="workspace-pane" style={{ width: chatPanelWidth, flexShrink: 0, borderRight: 'none', padding: 0, overflow: 'hidden' }}>
+          <div className="workspace-pane" style={{ width: chatPanelWidth, flexShrink: 0, borderRight: 'none', padding: 0, overflow: 'hidden', position: 'relative' }}>
             {activePersona ? renderChatInterface() : (
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-dim)' }}>
                 Select a persona to mount Neural Uplink.

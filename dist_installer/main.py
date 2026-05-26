@@ -63,9 +63,11 @@ async def get_current_user(
     if not x_profile_username or not x_profile_key:
         raise HTTPException(status_code=401, detail="Authentication credentials missing.")
     db_conn = db.UserManager()
-    if not db_conn.verify_profile(x_profile_username, x_profile_key):
+    clean_username = x_profile_username.strip()
+    clean_key = x_profile_key.strip()
+    if not db_conn.verify_profile(clean_username, clean_key):
         raise HTTPException(status_code=401, detail="Invalid profile key or username.")
-    return x_profile_username
+    return clean_username
 
 # --- MODELS (Hardened) ---
 class MessagePayload(BaseModel):
@@ -186,7 +188,7 @@ def read_root():
 def register_profile(payload: RegisterPayload):
     """Registers a profile on the server using a SHA-256 hashed secret key."""
     db_conn = db.UserManager()
-    success, message = db_conn.register_profile(payload.username, payload.secret_key)
+    success, message = db_conn.register_profile(payload.username.strip(), payload.secret_key.strip())
     if not success:
          raise HTTPException(status_code=400, detail=message)
     return {"status": "success", "message": message}
@@ -195,7 +197,7 @@ def register_profile(payload: RegisterPayload):
 def verify_profile(payload: VerifyPayload):
     """Verifies that a secret key matches the username's hashed key."""
     db_conn = db.UserManager()
-    valid = db_conn.verify_profile(payload.username, payload.secret_key)
+    valid = db_conn.verify_profile(payload.username.strip(), payload.secret_key.strip())
     if not valid:
          raise HTTPException(status_code=401, detail="Invalid username or secret key.")
     return {"status": "success", "message": "Attuned successfully."}
