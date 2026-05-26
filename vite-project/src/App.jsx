@@ -1188,6 +1188,10 @@ function App() {
     return saved ? saved.trim() : "";
   });
 
+  const [generatedLinkCode, setGeneratedLinkCode] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   useEffect(() => {
     const handleResize = () => setIsMobile(window.innerWidth < 768);
@@ -1207,6 +1211,36 @@ function App() {
       api.baseUrl = window.location.origin.includes(':5173') ? 'http://127.0.0.1:8000' : window.location.origin;
     }
   };
+
+  // Verify stored credentials on startup, clearing them if invalid or missing
+  useEffect(() => {
+    const checkAuth = async () => {
+      const username = localStorage.getItem('persona_username');
+      const secretKey = localStorage.getItem('persona_secret_key');
+      if (username) {
+        if (!secretKey) {
+          localStorage.removeItem('persona_username');
+          setUSERNAME('');
+          return;
+        }
+        try {
+          const res = await api.verifyProfile(username, secretKey);
+          if (!res || res.status !== 'success') {
+            localStorage.removeItem('persona_username');
+            localStorage.removeItem('persona_secret_key');
+            setUSERNAME('');
+          }
+        } catch (e) {
+          if (e.message && (e.message.includes('401') || e.message.includes('403'))) {
+            localStorage.removeItem('persona_username');
+            localStorage.removeItem('persona_secret_key');
+            setUSERNAME('');
+          }
+        }
+      }
+    };
+    checkAuth();
+  }, []);
 
   // Fetch actual personas from FastAPI DB on load
   useEffect(() => {
@@ -1718,7 +1752,7 @@ function App() {
 
 
           <textarea
-            className="chat-input glass-panel"
+            className="chat-message-input"
             placeholder={`Send a message to ${personas[activePersona]?.name}...`}
             rows={1}
             value={currentInput}
@@ -1798,6 +1832,122 @@ function App() {
   };
 
   if (!USERNAME) {
+    if (generatedLinkCode) {
+      return (
+        <div className="welcome-nexus-overlay" style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: '#050505',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 99999,
+          fontFamily: 'Inter, sans-serif',
+          color: '#fff',
+          backgroundImage: 'radial-gradient(circle at center, #240a3e 0%, #050508 80%)',
+          padding: '20px'
+        }}>
+          <div style={{
+            width: '100%', maxWidth: '420px',
+            background: 'rgba(10, 5, 20, 0.85)',
+            border: '2px solid #b060ff',
+            borderRadius: '12px',
+            padding: '30px',
+            boxShadow: '0 0 30px rgba(176, 96, 255, 0.3)',
+            textAlign: 'center',
+            backdropFilter: 'blur(10px)'
+          }}>
+            <div style={{ fontSize: '36px', marginBottom: '10px' }}>🔐</div>
+            <h2 style={{ margin: '0 0 8px 0', fontSize: '22px', letterSpacing: '0.05em', color: '#af52ff', textTransform: 'uppercase' }}>
+              Soul Inscribed
+            </h2>
+            <p style={{ margin: '0 0 24px 0', fontSize: '13px', color: 'rgba(255,255,255,0.7)', lineHeight: '1.4' }}>
+              Your Profile Link Code is ready. Copy and store this code in a secure location. You will need it to connect other devices.
+            </p>
+            
+            <textarea
+              readOnly
+              value={generatedLinkCode}
+              style={{
+                width: '100%',
+                height: '80px',
+                background: 'rgba(0,0,0,0.6)',
+                border: '1px solid #b060ff',
+                borderRadius: '6px',
+                padding: '10px',
+                color: '#b060ff',
+                fontFamily: 'monospace',
+                fontSize: '12px',
+                resize: 'none',
+                boxSizing: 'border-box',
+                textAlign: 'center',
+                marginBottom: '15px'
+              }}
+            />
+
+            <button
+              style={{
+                width: '100%',
+                background: 'rgba(176, 96, 255, 0.1)',
+                border: '1px solid #b060ff',
+                borderRadius: '4px',
+                color: '#b060ff',
+                padding: '8px',
+                cursor: 'pointer',
+                fontSize: '13px',
+                fontWeight: 'bold',
+                marginBottom: '15px'
+              }}
+              onClick={() => {
+                const fallbackCopy = (text) => {
+                  const t = document.createElement('textarea');
+                  t.value = text;
+                  t.style.position = 'fixed';
+                  t.style.opacity = '0';
+                  document.body.appendChild(t);
+                  t.select();
+                  try {
+                    document.execCommand('copy');
+                    alert('Copied to clipboard!');
+                  } catch (err) {
+                    alert('Failed to copy. Please highlight and copy manually.');
+                  }
+                  document.body.removeChild(t);
+                };
+
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                  navigator.clipboard.writeText(generatedLinkCode)
+                    .then(() => alert('Copied to clipboard!'))
+                    .catch(() => fallbackCopy(generatedLinkCode));
+                } else {
+                  fallbackCopy(generatedLinkCode);
+                }
+              }}
+            >
+              Copy to Clipboard
+            </button>
+
+            <button
+              style={{
+                width: '100%',
+                background: '#b060ff',
+                border: 'none',
+                borderRadius: '4px',
+                color: '#fff',
+                padding: '12px',
+                fontWeight: 'bold',
+                cursor: 'pointer',
+                fontSize: '14px'
+              }}
+              onClick={() => {
+                const parts = generatedLinkCode.split(':');
+                setUSERNAME(parts[0]);
+              }}
+            >
+              ENTER NEXUS
+            </button>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="welcome-nexus-overlay" style={{
         position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
@@ -1827,6 +1977,17 @@ function App() {
             Establish a connection key to synchronize your personas and memories.
           </p>
 
+          {authLoading && (
+            <div style={{ color: '#b060ff', fontSize: '13px', marginBottom: '15px', fontWeight: 'bold' }}>
+              Invoking connection...
+            </div>
+          )}
+          {authError && (
+            <div style={{ color: '#ff4d4d', fontSize: '13px', marginBottom: '15px', border: '1px solid rgba(255,77,77,0.3)', padding: '8px', borderRadius: '4px', background: 'rgba(255,77,77,0.05)' }}>
+              {authError}
+            </div>
+          )}
+
           <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
             {/* OPTION A: CREATE NEW */}
             <div style={{
@@ -1843,6 +2004,7 @@ function App() {
                 id="welcome-new-name"
                 type="text"
                 placeholder="Enter display name (e.g. Sky)"
+                disabled={authLoading}
                 style={{
                   width: '100%',
                   background: 'rgba(0,0,0,0.5)',
@@ -1852,7 +2014,8 @@ function App() {
                   color: '#fff',
                   fontSize: '14px',
                   outline: 'none',
-                  boxSizing: 'border-box'
+                  boxSizing: 'border-box',
+                  opacity: authLoading ? 0.6 : 1
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
@@ -1863,6 +2026,7 @@ function App() {
               />
               <button
                 id="welcome-new-btn"
+                disabled={authLoading}
                 style={{
                   width: '100%',
                   marginTop: '10px',
@@ -1872,17 +2036,35 @@ function App() {
                   color: '#fff',
                   padding: '10px',
                   fontWeight: 'bold',
-                  cursor: 'pointer',
-                  fontSize: '13px'
+                  cursor: authLoading ? 'not-allowed' : 'pointer',
+                  fontSize: '13px',
+                  opacity: authLoading ? 0.6 : 1
                 }}
-                onClick={() => {
+                onClick={async () => {
                   const input = document.getElementById('welcome-new-name');
                   let val = input ? input.value.trim() : '';
                   if (!val) return alert('Please enter a name.');
-                  const randomTag = Math.floor(1000 + Math.random() * 9000);
-                  const tagged = `${val}#${randomTag}`;
-                  localStorage.setItem('persona_username', tagged);
-                  setUSERNAME(tagged);
+                  
+                  setAuthLoading(true);
+                  setAuthError('');
+                  try {
+                    const array = new Uint8Array(16);
+                    window.crypto.getRandomValues(array);
+                    const secretKey = Array.from(array, byte => byte.toString(16).padStart(2, '0')).join('');
+                    
+                    const res = await api.registerProfile(val, secretKey);
+                    if (res && res.status === 'success') {
+                      localStorage.setItem('persona_username', val);
+                      localStorage.setItem('persona_secret_key', secretKey);
+                      setGeneratedLinkCode(`${val}:${secretKey}`);
+                    } else {
+                      setAuthError('Failed to register profile. Please try again.');
+                    }
+                  } catch (err) {
+                    setAuthError(err.message || 'Error occurred during registration.');
+                  } finally {
+                    setAuthLoading(false);
+                  }
                 }}
               >
                 BIND NEW PROFILE
@@ -1904,6 +2086,7 @@ function App() {
                 id="welcome-link-code"
                 type="text"
                 placeholder="Paste Profile Link Code"
+                disabled={authLoading}
                 style={{
                   width: '100%',
                   background: 'rgba(0,0,0,0.5)',
@@ -1913,7 +2096,8 @@ function App() {
                   color: '#fff',
                   fontSize: '14px',
                   outline: 'none',
-                  boxSizing: 'border-box'
+                  boxSizing: 'border-box',
+                  opacity: authLoading ? 0.6 : 1
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
@@ -1924,6 +2108,7 @@ function App() {
               />
               <button
                 id="welcome-link-btn"
+                disabled={authLoading}
                 style={{
                   width: '100%',
                   marginTop: '10px',
@@ -1933,15 +2118,37 @@ function App() {
                   color: '#fff',
                   padding: '10px',
                   fontWeight: 'bold',
-                  cursor: 'pointer',
-                  fontSize: '13px'
+                  cursor: authLoading ? 'not-allowed' : 'pointer',
+                  fontSize: '13px',
+                  opacity: authLoading ? 0.6 : 1
                 }}
-                onClick={() => {
+                onClick={async () => {
                   const input = document.getElementById('welcome-link-code');
                   let val = input ? input.value.trim() : '';
                   if (!val) return alert('Please paste your Link Code.');
-                  localStorage.setItem('persona_username', val);
-                  setUSERNAME(val);
+                  
+                  const parts = val.split(':');
+                  if (parts.length !== 2) {
+                    return alert('Invalid Link Code format. Code must be in the format: username:secret_key');
+                  }
+                  
+                  const [username, secretKey] = parts;
+                  setAuthLoading(true);
+                  setAuthError('');
+                  try {
+                    const res = await api.verifyProfile(username, secretKey);
+                    if (res && res.status === 'success') {
+                      localStorage.setItem('persona_username', username);
+                      localStorage.setItem('persona_secret_key', secretKey);
+                      setUSERNAME(username);
+                    } else {
+                      setAuthError('Authentication failed. Please verify your Link Code.');
+                    }
+                  } catch (err) {
+                    setAuthError(err.message || 'Error occurred during attunement.');
+                  } finally {
+                    setAuthLoading(false);
+                  }
                 }}
               >
                 HARMONIZE CONSCIOUSNESS
@@ -2107,19 +2314,19 @@ function App() {
             }}
             style={{
               width: '100%',
-              background: 'rgba(0,0,0,0.4)',
-              border: '1px solid rgba(255,0,127,0.25)',
+              backgroundColor: appTheme === 'q-light' ? '#ffffff' : appTheme === 'q-dark' ? '#17171a' : 'rgba(0,0,0,0.4)',
+              border: appTheme === 'q-light' ? '1px solid #d1d3d6' : appTheme === 'q-dark' ? '1px solid #1f1f24' : '1px solid rgba(255,0,127,0.25)',
               borderRadius: '6px',
               color: 'var(--text-primary)',
-              fontFamily: 'var(--font-marker)',
+              fontFamily: appTheme === 'void' ? 'var(--font-marker)' : 'var(--font-inter)',
               fontSize: '14px',
-              letterSpacing: '1px',
+              letterSpacing: appTheme === 'void' ? '1px' : 'normal',
               padding: '8px 10px',
               cursor: 'pointer',
               outline: 'none',
               appearance: 'none',
               WebkitAppearance: 'none',
-              backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='%23ff007f'%3E%3Cpath d='M7 10l5 5 5-5z'/%3E%3C/svg%3E")`,
+              backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='${appTheme === 'q-light' ? '%234e5058' : appTheme === 'q-dark' ? '%23949ba4' : '%23ff007f'}'%3E%3Cpath d='M7 10l5 5 5-5z'/%3E%3C/svg%3E")`,
               backgroundRepeat: 'no-repeat',
               backgroundPosition: 'right 10px center',
               paddingRight: '28px'
@@ -2229,11 +2436,11 @@ function App() {
             onMouseDown={(e) => startResize(e, 'fileTree')}
             style={{
               width: '4px', flexShrink: 0, cursor: 'col-resize',
-              background: 'var(--border-dashed-color, rgba(255,0,127,0.15))',
+              background: appTheme === 'q-light' ? '#d1d3d6' : appTheme === 'q-dark' ? '#3f4147' : 'rgba(255,0,127,0.15)',
               transition: 'background 0.15s'
             }}
             onMouseEnter={e => e.currentTarget.style.background = 'var(--work-green)'}
-            onMouseLeave={e => e.currentTarget.style.background = 'var(--border-dashed-color, rgba(255,0,127,0.15))'}
+            onMouseLeave={e => e.currentTarget.style.background = appTheme === 'q-light' ? '#d1d3d6' : appTheme === 'q-dark' ? '#3f4147' : 'rgba(255,0,127,0.15)'}
             title="Drag to resize"
           />
 
@@ -2287,11 +2494,11 @@ function App() {
             onMouseDown={(e) => startResize(e, 'chat')}
             style={{
               width: '4px', flexShrink: 0, cursor: 'col-resize',
-              background: 'var(--border-dashed-color, rgba(255,0,127,0.15))',
+              background: appTheme === 'q-light' ? '#d1d3d6' : appTheme === 'q-dark' ? '#3f4147' : 'rgba(255,0,127,0.15)',
               transition: 'background 0.15s'
             }}
             onMouseEnter={e => e.currentTarget.style.background = 'var(--primary-color)'}
-            onMouseLeave={e => e.currentTarget.style.background = 'var(--border-dashed-color, rgba(255,0,127,0.15))'}
+            onMouseLeave={e => e.currentTarget.style.background = appTheme === 'q-light' ? '#d1d3d6' : appTheme === 'q-dark' ? '#3f4147' : 'rgba(255,0,127,0.15)'}
             title="Drag to resize"
           />
 
