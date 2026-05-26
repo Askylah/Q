@@ -8,6 +8,16 @@ from datetime import datetime, date
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "users.db")
 
+# Automatically inject timeout=30.0 for all database connections to prevent lock crashes
+_original_connect = sqlite3.connect
+def _custom_connect(*args, **kwargs):
+    if len(args) > 0 and args[0] == DB_PATH:
+        kwargs.setdefault('timeout', 30.0)
+    elif 'database' in kwargs and kwargs['database'] == DB_PATH:
+        kwargs.setdefault('timeout', 30.0)
+    return _original_connect(*args, **kwargs)
+sqlite3.connect = _custom_connect
+
 class UserManager:
     def __init__(self):
         self._init_db()
@@ -16,6 +26,9 @@ class UserManager:
         create = not os.path.exists(DB_PATH)
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
+        # Enable Write-Ahead Logging (WAL) and synchronous mode normal for high concurrency
+        c.execute("PRAGMA journal_mode=WAL;")
+        c.execute("PRAGMA synchronous=NORMAL;")
         
         # Users table
         c.execute('''

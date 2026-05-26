@@ -20,10 +20,66 @@ import json
 import uuid
 import re
 import os
+import threading
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from rag_engine import get_shared_model
 import database as db
+
+# Contiguous matrix cache per (username, persona) to prevent loading binary vectors from SQLite on every turn.
+# Thread-safe global lock to protect memory reads/writes.
+_EMBEDDING_CACHE = {}
+_CACHE_LOCK = threading.Lock()
+
+def evict_other_personas_from_cache(username: str, active_persona: str):
+    """Evicts any cached persona data for this user other than the currently active persona. Assumes caller holds _CACHE_LOCK."""
+    other_keys = [k for k in _EMBEDDING_CACHE.keys() if k[0] == username and k[1] != active_persona]
+    for k in other_keys:
+        del _EMBEDDING_CACHE[k]
+        print(f"[ZETTEL CACHE] Evicted persona '{k[1]}' cache for user '{username}' on persona switch.")
+
+def load_zettel_cache(username: str, persona: str, all_nodes: list) -> dict:
+    """Loads all nodes for the given persona into _EMBEDDING_CACHE under thread lock."""
+    cache_key = (username, persona)
+    
+    nodes_with_embeddings = [n for n in all_nodes if n.get("embedding")]
+    if not nodes_with_embeddings:
+        return None
+        
+    node_ids = [n["id"] for n in nodes_with_embeddings]
+    node_tags = [n["node_id"] for n in nodes_with_embeddings]
+    
+    embeddings = np.array([
+        np.frombuffer(n["embedding"], dtype=np.float32)
+        for n in nodes_with_embeddings
+    ], dtype=np.float32)
+    
+    with _CACHE_LOCK:
+        evict_other_personas_from_cache(username, persona)
+        _EMBEDDING_CACHE[cache_key] = {
+            "node_ids": node_ids,
+            "node_tags": node_tags,
+            "embeddings": embeddings
+        }
+        return _EMBEDDING_CACHE[cache_key]
+
+def bulk_append_to_zettel_cache(username: str, persona: str, new_nodes: list):
+    """Appends multiple new nodes to the cache in a single contiguous allocation pass."""
+    if not new_nodes:
+        return
+        
+    cache_key = (username, persona)
+    with _CACHE_LOCK:
+        if cache_key in _EMBEDDING_CACHE:
+            cache = _EMBEDDING_CACHE[cache_key]
+            
+            new_ids = [n["id"] for n in new_nodes]
+            new_tags = [n["tag"] for n in new_nodes]
+            new_vecs = np.array([n["embedding"] for n in new_nodes], dtype=np.float32)
+            
+            cache["node_ids"].extend(new_ids)
+            cache["node_tags"].extend(new_tags)
+            cache["embeddings"] = np.vstack([cache["embeddings"], new_vecs])
 
 # ═══════════════════════════════════════════════════════════
 # CONSTANTS
@@ -33,8 +89,8 @@ import database as db
 MAX_CHUNK_TOKENS = 256
 MAX_CHUNK_CHARS = MAX_CHUNK_TOKENS * 4  # ~1024
 
-# Minimum similarity for auto-linking new nodes to existing graph
-AUTO_LINK_SIMILARITY_THRESHOLD = 0.50
+# Minimum similarity for auto-linking new nodes to existing graph (raised from 0.50 to prevent hairballs)
+AUTO_LINK_SIMILARITY_THRESHOLD = 0.75
 
 # Valid entity categories for the LLM flash pass
 VALID_CATEGORIES = frozenset([
@@ -289,6 +345,7 @@ def process_entry(username: str, persona: str, entry_id: str, api_keys: dict, mo
     existing_node_ids = {n["node_id"] for n in existing_nodes}
     
     created_node_ids = []  # Maps chunk_index → db primary key
+    new_cache_nodes = []   # Buffers nodes for bulk cache append
     
     for i, chunk in enumerate(chunks):
         pk = str(uuid.uuid4())
@@ -322,8 +379,19 @@ def process_entry(username: str, persona: str, entry_id: str, api_keys: dict, mo
             source_entry_id=entry_id
         )
         
+        # Buffer for bulk append to in-memory cache directly
+        if model and i < len(embeddings):
+            new_cache_nodes.append({
+                "id": pk,
+                "tag": node_id_tag,
+                "embedding": embeddings[i]
+            })
+            
         created_node_ids.append(pk)
         print(f"[ZETTEL]   Node: {node_id_tag} → {title}")
+        
+    # Bulk load into the cache in one contiguous memory allocation
+    bulk_append_to_zettel_cache(username, persona, new_cache_nodes)
     
     # 6a. Store intra-entry relationships from LLM
     if llm_data and "relationships" in llm_data:
@@ -421,25 +489,33 @@ def query_knowledge_graph(username: str, persona: str, query_text: str, top_k: i
     if not all_nodes:
         return ""
     
+    # Ensure cache is active for this persona, reading under lock
+    cache_key = (username, persona)
+    with _CACHE_LOCK:
+        cache = _EMBEDDING_CACHE.get(cache_key)
+        
+    if cache is None:
+        # load_zettel_cache internally handles the lock, eviction, and loading
+        cache = load_zettel_cache(username, persona, all_nodes)
+    
     # ── VECTOR PATH ──
     vector_ranked = []
-    if model:
-        query_vec = model.encode([query_text], convert_to_numpy=True)
-        nodes_with_embeddings = [n for n in all_nodes if n.get("embedding")]
+    if model and cache:
+        query_vec = model.encode([query_text], convert_to_numpy=True).reshape(1, -1)
         
-        if nodes_with_embeddings:
-            node_vecs = np.array([
-                np.frombuffer(n["embedding"], dtype=np.float32)
-                for n in nodes_with_embeddings
-            ])
-            
+        # Lock during vector array reading to avoid background thread mutations
+        with _CACHE_LOCK:
+            node_vecs = cache["embeddings"]
+            node_ids = list(cache["node_ids"])
             sims = cosine_similarity(query_vec, node_vecs).flatten()
-            ranked_indices = np.argsort(sims)[::-1]
             
-            for idx in ranked_indices:
-                if sims[idx] > 0.15:  # Minimum relevance threshold
-                    vector_ranked.append((nodes_with_embeddings[idx]["id"], float(sims[idx])))
-        print(f"[ZETTEL] Vector hits (sim>0.15): {len(vector_ranked)}")
+        ranked_indices = np.argsort(sims)[::-1]
+        
+        # Raised query relevance threshold from 0.15 to 0.40 to prevent hairballs
+        for idx in ranked_indices:
+            if sims[idx] > 0.40:
+                vector_ranked.append((node_ids[idx], float(sims[idx])))
+        print(f"[ZETTEL] Vector hits (sim>0.40): {len(vector_ranked)}")
     
     # ── KEYWORD PATH (FTS5) ──
     keyword_ranked = []
@@ -473,7 +549,8 @@ def query_knowledge_graph(username: str, persona: str, query_text: str, top_k: i
     for node_id in top_node_ids:
         linked = db_conn.get_linked_nodes(node_id, depth=1)
         for ln in linked:
-            if ln["id"] not in expanded_ids:
+            # Prevent context explosion: only expand links with strength >= 0.70
+            if ln["id"] not in expanded_ids and ln.get("strength", 0.5) >= 0.70:
                 expanded_ids.add(ln["id"])
                 linked_nodes_data.append(ln)
     

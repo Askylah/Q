@@ -977,8 +977,12 @@ html[data-theme="q-light"] ::-webkit-scrollbar-thumb:hover {
 /* Mobile responsive styles */
 @media (max-width: 768px) {
   .chat-history {
-    padding: 12px;
+    padding: 12px 12px 120px 12px;
     gap: 12px;
+  }
+  .group-chat-history {
+    padding: 12px 12px 120px 12px !important;
+    gap: 12px !important;
   }
   .message-box {
     max-width: 100%;
