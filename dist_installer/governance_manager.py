@@ -18,6 +18,8 @@ class GovernanceManager:
             "read_file": DangerLevel.INFO,
             "list_dir": DangerLevel.INFO,
             "web_search": DangerLevel.INFO,
+            "search_web": DangerLevel.INFO,
+            "deep_lore_query": DangerLevel.INFO,
             
             # Skill Tree Tools
             "activate_skill": DangerLevel.INFO,
