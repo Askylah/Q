@@ -2132,7 +2132,8 @@ function App() {
                     return alert('Invalid Link Code format. Code must be in the format: username:secret_key');
                   }
                   
-                  const [username, secretKey] = parts;
+                  const username = parts[0].trim();
+                  const secretKey = parts[1].trim();
                   setAuthLoading(true);
                   setAuthError('');
                   try {

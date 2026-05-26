@@ -320,6 +320,19 @@ class UserManager:
             print(f"DB ERROR (delete_message): {e}")
             return False
 
+    def get_message_username(self, message_id):
+        """Get the username associated with a single message by ID."""
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT username FROM conversations WHERE id=?", (message_id,))
+            row = c.fetchone()
+            conn.close()
+            return row[0] if row else None
+        except Exception as e:
+            print(f"DB ERROR (get_message_username): {e}")
+            return None
+
     def delete_group_message(self, message_id):
         """Delete a single group message by ID."""
         try:
@@ -332,6 +345,19 @@ class UserManager:
         except Exception as e:
             print(f"DB ERROR (delete_group_message): {e}")
             return False
+
+    def get_group_message_username(self, message_id):
+        """Get the username associated with a group message by ID."""
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT username FROM group_conversations WHERE id=?", (message_id,))
+            row = c.fetchone()
+            conn.close()
+            return row[0] if row else None
+        except Exception as e:
+            print(f"DB ERROR (get_group_message_username): {e}")
+            return None
 
     # --- GROUP CHAT HISTORY METHODS ---
     def save_group_message(self, session_id, username, persona_key, persona_name, persona_avatar, role, content, is_observer=False):
@@ -407,9 +433,38 @@ class UserManager:
             return [r[0] for r in rows]
         except Exception as e:
             print(f"DB ERROR (get_user_group_sessions): {e}")
-            return []
+    def register_profile(self, username, secret_key):
+        """Register a profile using SHA-256 hashing of the secret_key."""
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            key_hash = hashlib.sha256(secret_key.encode('utf-8')).hexdigest()
+            c.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
+                      (username, key_hash, str(datetime.now())))
+            conn.commit()
+            return True, "Profile registered successfully."
+        except sqlite3.IntegrityError:
+            return False, "Username already exists."
+        except Exception as e:
+            return False, f"Error: {e}"
+        finally:
+            conn.close()
 
-    
+    def verify_profile(self, username, secret_key):
+        """Verify profile credentials by hashing secret_key with SHA-256 and checking database."""
+        if not username or not secret_key:
+            return False
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT password_hash FROM users WHERE username=?", (username,))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            stored_hash = row[0]
+            key_hash = hashlib.sha256(secret_key.encode('utf-8')).hexdigest()
+            return key_hash == stored_hash
+        return False
+
     def hash_password(self, password):
         """Hash a password using bcrypt with salt."""
         # Generate salt and hash
@@ -615,6 +670,7 @@ class UserManager:
                     "om_enabled": bool(r[10]) if len(r) > 10 else True,
                     "om_turn_threshold": r[11] if len(r) > 11 else 5,
                     "deep_memory_enabled": bool(r[12]) if len(r) > 12 else False,
+                    "direct_wire": bool(r[13]) if len(r) > 13 else False,
                     "is_custom": True
                 }
             return personas

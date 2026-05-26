@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, File, UploadFile
+from fastapi import FastAPI, HTTPException, File, UploadFile, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse, Response
@@ -37,11 +37,35 @@ async def validation_exception_handler(request, exc):
 # --- WALL NUMBER TWO: THE CORS DIVORCE ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- CRYPTOGRAPHIC PROFILE AUTHENTICATION ---
+import hashlib
+
+class RegisterPayload(BaseModel):
+    model_config = {"extra": "forbid"}
+    username: str
+    secret_key: str
+
+class VerifyPayload(BaseModel):
+    model_config = {"extra": "forbid"}
+    username: str
+    secret_key: str
+
+async def get_current_user(
+    x_profile_username: Optional[str] = Header(None, alias="X-Profile-Username"),
+    x_profile_key: Optional[str] = Header(None, alias="X-Profile-Key")
+):
+    if not x_profile_username or not x_profile_key:
+        raise HTTPException(status_code=401, detail="Authentication credentials missing.")
+    db_conn = db.UserManager()
+    if not db_conn.verify_profile(x_profile_username, x_profile_key):
+        raise HTTPException(status_code=401, detail="Invalid profile key or username.")
+    return x_profile_username
 
 # --- MODELS (Hardened) ---
 class MessagePayload(BaseModel):
@@ -158,14 +182,36 @@ from llm_engine import build_context_and_stream
 def read_root():
     return {"status": "Q Backend is ALIVE on Port 8000.", "cage": "Cage for a God [STABILIZED]"}
 
+@app.post("/auth/register")
+def register_profile(payload: RegisterPayload):
+    """Registers a profile on the server using a SHA-256 hashed secret key."""
+    db_conn = db.UserManager()
+    success, message = db_conn.register_profile(payload.username, payload.secret_key)
+    if not success:
+         raise HTTPException(status_code=400, detail=message)
+    return {"status": "success", "message": message}
+
+@app.post("/auth/verify")
+def verify_profile(payload: VerifyPayload):
+    """Verifies that a secret key matches the username's hashed key."""
+    db_conn = db.UserManager()
+    valid = db_conn.verify_profile(payload.username, payload.secret_key)
+    if not valid:
+         raise HTTPException(status_code=401, detail="Invalid username or secret key.")
+    return {"status": "success", "message": "Attuned successfully."}
+
 @app.get("/personas")
-def get_personas(username: str = "default_user"):
+def get_personas(username: str = "default_user", current_user: str = Depends(get_current_user)):
     """Retrieve all global and custom personas for a user."""
+    if username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
     return load_personas_logic(username)
 
 @app.post("/personas")
-def create_persona(payload: PersonaCreatePayload):
+def create_persona(payload: PersonaCreatePayload, current_user: str = Depends(get_current_user)):
     """Creates a new custom persona in the SQLite database."""
+    if payload.username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
     db_conn = db.UserManager()
     
     # If editing an existing persona (original_key provided), we use that to anchor the UPDATE.
@@ -192,8 +238,10 @@ def create_persona(payload: PersonaCreatePayload):
     return {"status": "success", "message": "Persona created/updated"}
 
 @app.delete("/personas/{persona_key}")
-async def delete_persona(persona_key: str, username: str = "default_user"):
+async def delete_persona(persona_key: str, username: str = "default_user", current_user: str = Depends(get_current_user)):
     """Deletes a custom persona from the database."""
+    if username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
     user_manager = db.UserManager()
     success = user_manager.delete_custom_persona(username, persona_key)
     if not success:
@@ -205,7 +253,7 @@ UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...), current_user: str = Depends(get_current_user)):
     """Accepts a file from the frontend UI safely via streamed chunks and verifies MIME type."""
     file_path = os.path.join(UPLOAD_DIR, file.filename)
     
@@ -232,15 +280,19 @@ async def upload_file(file: UploadFile = File(...)):
     return {"path": file_path}
 
 @app.get("/chat/{persona_key}")
-def get_chat_history(persona_key: str, username: str = "default_user", limit: int = 50):
+def get_chat_history(persona_key: str, username: str = "default_user", limit: int = 50, current_user: str = Depends(get_current_user)):
     """Retrieve chat history for a specific persona."""
+    if username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
     db_conn = db.UserManager()
     history = db_conn.get_chat_history(username, persona_key, limit)
     return {"history": history}
 
 @app.post("/chat/{persona_key}")
-def save_chat_message(persona_key: str, msg: MessagePayload):
+def save_chat_message(persona_key: str, msg: MessagePayload, current_user: str = Depends(get_current_user)):
     """Save a simulated user or assistant message to the database."""
+    if msg.username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
     db_conn = db.UserManager()
     
     content_str = json.dumps(msg.content) if isinstance(msg.content, list) else msg.content
@@ -251,30 +303,39 @@ def save_chat_message(persona_key: str, msg: MessagePayload):
     return {"status": "success", "message": "Message committed to SQLite."}
 
 @app.post("/chat/{persona_key}/clear")
-def clear_chat(persona_key: str, username: str = "default_user"):
+def clear_chat(persona_key: str, username: str = "default_user", current_user: str = Depends(get_current_user)):
+    if username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
     db_conn = db.UserManager()
     db_conn.clear_chat_history(username, persona_key)
     return {"status": "success", "message": "Chat history cleared."}
 
 @app.delete("/chat/message/{message_id}")
-def delete_chat_message(message_id: int):
+def delete_chat_message(message_id: int, current_user: str = Depends(get_current_user)):
     """Delete a specific message from a chat."""
     db_conn = db.UserManager()
+    owner = db_conn.get_message_username(message_id)
+    if owner and owner != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
     success = db_conn.delete_message(message_id)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to delete message.")
     return {"status": "success"}
 
 @app.get("/groupchats/sessions/{username}")
-def get_user_group_sessions(username: str):
+def get_user_group_sessions(username: str, current_user: str = Depends(get_current_user)):
     """Retrieve all unique group session IDs for a specific user."""
+    if username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
     db_conn = db.UserManager()
     sessions = db_conn.get_user_group_sessions(username)
     return {"sessions": sessions}
 
 @app.post("/groupchat/{session_id}")
-def save_group_chat_message(session_id: str, msg: GroupMessagePayload):
+def save_group_chat_message(session_id: str, msg: GroupMessagePayload, current_user: str = Depends(get_current_user)):
     """Save a message to the group conversation history."""
+    if msg.username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
     db_conn = db.UserManager()
     success = db_conn.save_group_message(
         session_id, msg.username, msg.persona_key, msg.persona_name, 
@@ -285,24 +346,31 @@ def save_group_chat_message(session_id: str, msg: GroupMessagePayload):
     return {"status": "success"}
 
 @app.get("/groupchat/{session_id}")
-def get_group_chat_history(session_id: str, username: str = "default_user", limit: int = 100):
+def get_group_chat_history(session_id: str, username: str = "default_user", limit: int = 100, current_user: str = Depends(get_current_user)):
     """Retrieve group chat history."""
+    if username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
     db_conn = db.UserManager()
     history = db_conn.get_group_history(session_id, username, limit)
     return {"history": history}
 
 @app.delete("/groupchat/message/{message_id}")
-def delete_group_chat_message(message_id: int):
+def delete_group_chat_message(message_id: int, current_user: str = Depends(get_current_user)):
     """Delete a specific message from a group chat."""
     db_conn = db.UserManager()
+    owner = db_conn.get_group_message_username(message_id)
+    if owner and owner != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
     success = db_conn.delete_group_message(message_id)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to delete group message.")
     return {"status": "success"}
 
 @app.post("/groupchat/{session_id}/clear")
-def clear_group_chat_history(session_id: str, username: str = "default_user"):
+def clear_group_chat_history(session_id: str, username: str = "default_user", current_user: str = Depends(get_current_user)):
     """Clear group chat history."""
+    if username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
     db_conn = db.UserManager()
     success = db_conn.clear_group_history(session_id, username)
     if not success:
@@ -310,8 +378,10 @@ def clear_group_chat_history(session_id: str, username: str = "default_user"):
     return {"status": "success", "message": "Group chat history cleared."}
 
 @app.post("/personas/{persona_key}/wipe")
-def wipe_memory(persona_key: str, username: str = "default_user"):
+def wipe_memory(persona_key: str, username: str = "default_user", current_user: str = Depends(get_current_user)):
     """Wipe all semantic memories, summaries, observations, and Zettel data."""
+    if username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
     db_conn = db.UserManager()
     
     # 1. Clear SQLite tables (Memories, Summaries, Observations, Zettel Graph)
@@ -331,8 +401,10 @@ def wipe_memory(persona_key: str, username: str = "default_user"):
     raise HTTPException(status_code=500, detail="Failed to wipe memories.")
 
 @app.post("/chat/{persona_key}/stream")
-def stream_chat(persona_key: str, req: StreamRequest):
+def stream_chat(persona_key: str, req: StreamRequest, current_user: str = Depends(get_current_user)):
     """Generates a streaming response for the given persona and saves the transaction."""
+    if req.username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
     personas = load_personas_logic(req.username)
     
     if persona_key not in personas:
@@ -411,8 +483,10 @@ def stream_chat(persona_key: str, req: StreamRequest):
 from zettel_engine import process_entry as zettel_process_entry
 
 @app.post("/personas/{persona_key}/lore")
-def create_lore_entry(persona_key: str, payload: LoreEntryPayload):
+def create_lore_entry(persona_key: str, payload: LoreEntryPayload, current_user: str = Depends(get_current_user)):
     """Create a lore entry for a persona. Triggers async background processing."""
+    if payload.username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
     db_conn = db.UserManager()
     entry_id = db_conn.add_zettel_entry(
         username=payload.username,
@@ -447,15 +521,19 @@ def create_lore_entry(persona_key: str, payload: LoreEntryPayload):
     return {"status": "success", "entry_id": entry_id, "message": "Lore entry created. Processing in background."}
 
 @app.get("/personas/{persona_key}/lore")
-def get_lore_entries(persona_key: str, username: str = "default_user"):
+def get_lore_entries(persona_key: str, username: str = "default_user", current_user: str = Depends(get_current_user)):
     """List all lore entries for a persona."""
+    if username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
     db_conn = db.UserManager()
     entries = db_conn.get_zettel_entries(username, persona_key)
     return {"entries": entries}
 
 @app.put("/personas/{persona_key}/lore/{entry_id}")
-def update_lore_entry(persona_key: str, entry_id: str, payload: LoreEntryPayload):
+def update_lore_entry(persona_key: str, entry_id: str, payload: LoreEntryPayload, current_user: str = Depends(get_current_user)):
     """Update a lore entry and re-trigger processing."""
+    if payload.username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
     db_conn = db.UserManager()
     success = db_conn.update_zettel_entry(
         username=payload.username,
@@ -489,8 +567,10 @@ def update_lore_entry(persona_key: str, entry_id: str, payload: LoreEntryPayload
     return {"status": "success", "message": "Lore entry updated. Re-processing in background."}
 
 @app.delete("/personas/{persona_key}/lore/{entry_id}")
-def delete_lore_entry(persona_key: str, entry_id: str, username: str = "default_user"):
+def delete_lore_entry(persona_key: str, entry_id: str, username: str = "default_user", current_user: str = Depends(get_current_user)):
     """Delete a lore entry and cascade-remove its nodes + links."""
+    if username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
     db_conn = db.UserManager()
     success = db_conn.delete_zettel_entry(username, persona_key, entry_id)
     if not success:
@@ -505,7 +585,7 @@ def delete_lore_entry(persona_key: str, entry_id: str, username: str = "default_
 _APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 @app.get("/workspace/tree")
-def get_workspace_tree(path: str = "."):
+def get_workspace_tree(path: str = ".", current_user: str = Depends(get_current_user)):
     """Fetches the recursive file tree. Root jail is the requested path itself."""
     # Resolve the target path (absolute or relative to app root)
     if os.path.isabs(path):
@@ -524,7 +604,7 @@ def get_workspace_tree(path: str = "."):
         raise HTTPException(status_code=403, detail=f"Security Violation: {str(e)}")
 
 @app.get("/workspace/file")
-def get_workspace_file(path: str):
+def get_workspace_file(path: str, current_user: str = Depends(get_current_user)):
     """Fetches the raw content of a specific file."""
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="File not found")
@@ -543,7 +623,7 @@ class WorkspaceSave(BaseModel):
     content: str
 
 @app.post("/workspace/save")
-def save_workspace_file(data: WorkspaceSave):
+def save_workspace_file(data: WorkspaceSave, current_user: str = Depends(get_current_user)):
     """Stages a file write for approval. Returns a diff and staging_id — does NOT write yet."""
     root = os.path.dirname(os.path.abspath(data.path))
     try:
@@ -557,7 +637,7 @@ class WorkspaceCreate(BaseModel):
     item_type: str = "file"
 
 @app.post("/workspace/create")
-def create_workspace_item(data: WorkspaceCreate):
+def create_workspace_item(data: WorkspaceCreate, current_user: str = Depends(get_current_user)):
     # Root is the parent of the item being created
     parent = os.path.dirname(os.path.abspath(data.path))
     try:
@@ -567,7 +647,7 @@ def create_workspace_item(data: WorkspaceCreate):
         raise HTTPException(status_code=403, detail=f"Security Violation: {str(e)}")
 
 @app.delete("/workspace/delete")
-def delete_workspace_item(path: str):
+def delete_workspace_item(path: str, current_user: str = Depends(get_current_user)):
     parent = os.path.dirname(os.path.abspath(path))
     try:
         ws = SafeWorkspace(parent)
@@ -578,7 +658,7 @@ def delete_workspace_item(path: str):
 # --- Staged Write Approval Endpoints ---
 
 @app.post("/workspace/stage/{staging_id}/commit")
-def commit_staged_write(staging_id: str):
+def commit_staged_write(staging_id: str, current_user: str = Depends(get_current_user)):
     """Approves a staged write. Backs up the current file (.bak) then commits the change."""
     ws = SafeWorkspace(_APP_ROOT)
     result = ws.commit_staged_write(staging_id)
@@ -587,7 +667,7 @@ def commit_staged_write(staging_id: str):
     return result
 
 @app.delete("/workspace/stage/{staging_id}")
-def discard_staged_write(staging_id: str):
+def discard_staged_write(staging_id: str, current_user: str = Depends(get_current_user)):
     """Discards a pending staged write without modifying any real files."""
     ws = SafeWorkspace(_APP_ROOT)
     result = ws.discard_staged_write(staging_id)
@@ -596,18 +676,22 @@ def discard_staged_write(staging_id: str):
     return result
 
 @app.get("/workspace/staged")
-def list_staged_writes():
+def list_staged_writes(current_user: str = Depends(get_current_user)):
     """Lists all pending staged writes awaiting approval."""
     ws = SafeWorkspace(_APP_ROOT)
     return {"staged": ws.list_staged_writes()}
 
 @app.get("/settings/{username}")
-async def get_settings(username: str):
+async def get_settings(username: str, current_user: str = Depends(get_current_user)):
+    if username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
     db_conn = db.UserManager()
     return db_conn.get_user_settings(username)
 
 @app.post("/settings")
-async def update_settings(payload: SettingsPayload):
+async def update_settings(payload: SettingsPayload, current_user: str = Depends(get_current_user)):
+    if payload.username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
     db_conn = db.UserManager()
     db_conn.update_user_settings(payload.username, payload.model_dump())
     return {"status": "success"}

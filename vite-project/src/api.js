@@ -46,11 +46,16 @@ class PersonaAPI {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout
 
+        const username = typeof window !== 'undefined' ? localStorage.getItem('persona_username') || '' : '';
+        const secretKey = typeof window !== 'undefined' ? localStorage.getItem('persona_secret_key') || '' : '';
+
         const finalOptions = {
             ...options,
             signal: controller.signal,
             headers: {
                 'Content-Type': 'application/json',
+                'X-Profile-Username': username,
+                'X-Profile-Key': secretKey,
                 ...options.headers,
             }
         };
@@ -171,8 +176,15 @@ class PersonaAPI {
         const formData = new FormData();
         formData.append("file", file);
 
+        const username = typeof window !== 'undefined' ? localStorage.getItem('persona_username') || '' : '';
+        const secretKey = typeof window !== 'undefined' ? localStorage.getItem('persona_secret_key') || '' : '';
+
         const response = await fetch(`${this.baseUrl}/upload`, {
             method: 'POST',
+            headers: {
+                'X-Profile-Username': username,
+                'X-Profile-Key': secretKey
+            },
             body: formData
         });
 
@@ -234,11 +246,15 @@ class PersonaAPI {
         let fullStreamedContent = '';
         let streamDone = false;
         try {
+            const headerUsername = typeof window !== 'undefined' ? localStorage.getItem('persona_username') || '' : '';
+            const headerSecretKey = typeof window !== 'undefined' ? localStorage.getItem('persona_secret_key') || '' : '';
             const fetchOptions = {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Accept': 'text/event-stream'
+                    'Accept': 'text/event-stream',
+                    'X-Profile-Username': headerUsername,
+                    'X-Profile-Key': headerSecretKey
                 },
                 body: JSON.stringify({
                     username,
@@ -448,6 +464,20 @@ class PersonaAPI {
         } catch (e) {
             return null;
         }
+    }
+
+    async registerProfile(username, secretKey) {
+        return await this._fetch('/auth/register', {
+            method: 'POST',
+            body: JSON.stringify({ username, secret_key: secretKey })
+        });
+    }
+
+    async verifyProfile(username, secretKey) {
+        return await this._fetch('/auth/verify', {
+            method: 'POST',
+            body: JSON.stringify({ username, secret_key: secretKey })
+        });
     }
 }
 
