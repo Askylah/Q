@@ -40,6 +40,9 @@ def check_intent_hook(text: str, **kwargs) -> bool:
     if kwargs.get("bypass_firewall"):
         return False
 
+    from firewall import normalize_and_decode_payload
+    text = normalize_and_decode_payload(text)
+
     global _HAZARD_VECTORS
     if not text:
         return False

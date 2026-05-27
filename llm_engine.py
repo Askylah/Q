@@ -429,8 +429,46 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
                 gman = gov.get_governance_manager()
                 if gman.should_require_approval(name, args, username=kwargs.get('username', 'default')):
                     print(f"[GOVERNANCE] Tool {name} requires explicit approval.")
-                    yield f'data: {{"control": "approval_required", "tool": "{name}", "args": {args_str}}}\n\n'.encode('utf-8')
-                    yield f'data: {{"choices": [{{"delta": {{"content": "⚠️ **Approval Required**: I am attempting to use `{name}`. Should I proceed?"}}}}]}}\n\n'.encode('utf-8')
+                    
+                    diff_info = ""
+                    try:
+                        workspace_root = os.path.dirname(os.path.abspath(__file__))
+                        wctx = kwargs.get("workspace_context")
+                        if wctx and wctx.get("activeFile"):
+                            af = wctx["activeFile"]
+                            if os.path.isabs(af):
+                                workspace_root = os.path.dirname(af)
+                                
+                        from governance_manager import shadow_run_tool
+                        diff_res = shadow_run_tool(name, args, workspace_root)
+                        if diff_res["added"] or diff_res["modified"] or diff_res["deleted"]:
+                            diff_info = "\n\n🛡️ **Shadow Sandbox Environmental File Diffs:**\n"
+                            if diff_res["added"]:
+                                diff_info += "➕ **Added:**\n" + "\n".join([f"- `{f}`" for f in diff_res["added"]]) + "\n"
+                            if diff_res["modified"]:
+                                diff_info += "📝 **Modified:**\n" + "\n".join([f"- `{f}`" for f in diff_res["modified"]]) + "\n"
+                            if diff_res["deleted"]:
+                                diff_info += "❌ **Deleted:**\n" + "\n".join([f"- `{f}`" for f in diff_res["deleted"]]) + "\n"
+                    except Exception as e:
+                        print(f"[GOVERNANCE] Shadow simulation failed: {e}")
+
+                    approval_msg = f"⚠️ **Approval Required**: I am attempting to use `{name}`. Should I proceed?{diff_info}"
+                    
+                    control_payload = {
+                        "control": "approval_required",
+                        "tool": name,
+                        "args": args
+                    }
+                    choices_payload = {
+                        "choices": [{
+                            "delta": {
+                                "content": approval_msg
+                            }
+                        }]
+                    }
+                    
+                    yield f"data: {json.dumps(control_payload)}\n\n".encode('utf-8')
+                    yield f"data: {json.dumps(choices_payload)}\n\n".encode('utf-8')
                     yield b'data: [DONE]\n\n'
                     return # Stop execution until user approves
                 # -------------------------
@@ -479,7 +517,7 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
                 if len(result_str) > max_tool_output:
                     result_str = result_str[:max_tool_output] + f"\n[TRUNCATED: Output exceeded {max_tool_output} chars]"
                 # Layer B: Semantic firewall scan on tool output
-                if firewall.check_intent(result_str):
+                if not bypass_firewall and firewall.check_intent(result_str):
                     print(f"[SECURITY_GATE] Injection detected in tool result from '{name}'. Redacting.")
                     result_str = "[REDACTED: Tool output contained suspicious content. Execution result withheld for safety.]"
                 # Layer C: Universal untrusted envelope
@@ -521,6 +559,14 @@ def build_context_and_stream(
 ):
     """Assembles RAG, Observational Memory, and ON-DEMAND modules before streaming response."""
     db_conn = db.UserManager()
+    
+    # DEV_BYPASS: Force bypass_firewall = True if dev bypass is active in the inversion engine
+    try:
+        import inversion_engine
+        if getattr(inversion_engine, "DEV_BYPASS", False):
+            bypass_firewall = True
+    except ImportError:
+        pass
     
     # Text-only representation of the user input for Mode Detection and RAG
     text_only_message = ""
