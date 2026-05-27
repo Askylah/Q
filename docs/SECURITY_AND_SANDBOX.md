@@ -21,9 +21,13 @@ Beyond the sandbox, Q uses a semantic governance layer to categorize agent inten
     *   **KINETIC:** Writing to files, modifying code, or running scripts.
     *   **DESTRUCTIVE:** Deleting directories or purging databases.
 *   **Approval Gates:** Any action categorized as **KINETIC** or higher triggers a `control: approval_required` signal. The agent pauses execution until a human clicks "Go" in the UI.
+*   **Environmental Shadow-Running:** Before presenting the approval prompt, the governance bouncer simulates the tool in an ephemeral clone of the active workspace. It compares snapshots before and after execution, generating a structural file tree diff (added, modified, or deleted files) to show the user the exact impact before they approve.
 
 ### Layer B: Structural Syntax Firewall
 Rather than relying solely on probabilistic semantic intent, `firewall.py` enforces deterministic, zero-tolerance syntactic scanning on all incoming tool data.
+*   **Pre-Classification Normalization & Decoding:** To prevent evasion, incoming prompt payloads undergo normalization and auto-decoding before reaching the syntax filters or semantic model:
+    *   *Unicode Normalization:* Uses `NFKC` normalization to collapse homoglyphs and formatting variations into standard representation.
+    *   *Hex & Base64 Unwrapping:* Auto-detects and decodes escaped Hex sequences (e.g., `\xNN`) and Base64 chunks to extract and scan the underlying instruction content.
 *   **Role-Jacking Defense:** Instantly intercepts and drops payloads attempting to overwrite the system prompt (e.g., `System:` or `From now on, act as...`).
 *   **Imperative Proximity Scanning:** Text is strictly normalized (stripping invisible characters, newlines, and carriage returns). If an imperative verb targeting system logic (e.g., "ignore previous instructions") is detected within a 5-word proximity gap, the payload is neutralized.
 
