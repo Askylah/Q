@@ -37,6 +37,24 @@ knowledge_bases/*
 # ─── Backups ──────────────────────────────────────────────
 *.bak
 *.backup
+*.tmpbak
+
+# ─── Diagnostic & Helper Scripts ─────────────────────────
+check_commit_files.py
+check_environment_keys.py
+check_session_usage.py
+dump_decisions.py
+find_clean_commit.py
+find_firewall_calls.py
+push_changes.py
+push_to_github.py
+restore_and_push_clean.py
+restore_clean_files.py
+safe_history_erase.py
+safe_history_scrub_v2.py
+test_openrouter_ping.py
+test_zettel_scaling.py
+memory_dump.txt
 
 # ─── Staged Writes (Approval Scratch) ────────────────────
 .staging/

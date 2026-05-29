@@ -69,6 +69,7 @@ def call_llm(
     **kwargs
 ) -> any:
     """Universal wrapper for direct LLM API access with fallback to OpenRouter."""
+    global OR_SESSION
     try:
         original_model_id = model_id
 
@@ -124,6 +125,8 @@ def call_llm(
             provider = "openrouter"
             base_url = "https://openrouter.ai/api/v1/chat/completions"
             model_id = original_model_id
+
+        print(f"\n[ROUTING DEBUG] model={model_id} (orig={original_model_id}) | provider={provider} | base_url={base_url} | key_len={len(api_key) if api_key else 0} | key_prefix={repr(api_key[:15]) if api_key else None}\n")
 
         if not api_key:
             if stream:
@@ -249,9 +252,6 @@ def call_llm(
                 "Content-Type": "application/json",
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
-            # Hammer Fix: Clear default session headers that might be clashing or stripping custom ones
-            OR_SESSION.headers.clear()
-            OR_SESSION.headers.update(headers)
         
         def clean_content(c):
             if isinstance(c, str) and c.strip().startswith("[") and c.strip().endswith("]"):
@@ -293,7 +293,20 @@ def call_llm(
         if provider == "openrouter":
             data["provider"] = {"ignore": ["Azure", "Azure AI Foundry"]}
         
-        response = OR_SESSION.post(base_url, headers=headers, data=json.dumps(data), timeout=60, stream=stream)
+        try:
+            response = OR_SESSION.post(base_url, headers=headers, data=json.dumps(data), timeout=60, stream=stream)
+        except Exception as e:
+            err_msg = str(e)
+            if any(kw in err_msg for kw in ["10054", "ConnectionResetError", "Connection aborted", "forcibly closed", "reset by peer"]):
+                print("\n[ROUTING DEBUG] Stale TCP socket detected. Recycling OR_SESSION and retrying request...\n")
+                try:
+                    OR_SESSION.close()
+                except:
+                    pass
+                OR_SESSION = requests.Session()
+                response = OR_SESSION.post(base_url, headers=headers, data=json.dumps(data), timeout=60, stream=stream)
+            else:
+                raise e
         
         if response.status_code == 200:
             if stream: return response
