@@ -1,7 +1,7 @@
-# Q — The Cognitive Sandbox
+# Q
 
 
-**Q** is a high-fidelity, multi-agent sandbox designed for immersive roleplay (LARPing), tabletop RPG orchestration, and adversarial agentic research. It combines a dynamic React interface with a hardened "Strict Physics" backend, allowing you to safely unleash autonomous personas in isolated, stateful environments. *Side note* On PC its basically a model agnostic Antigravity on steroids with some dedicated RP elements and much better security.
+**Q** is a multi-agent sandbox designed for immersive roleplay (LARPing), tabletop RPG orchestration, and adversarial agentic research. It combines a dynamic React interface with a hardened "Strict Physics" backend, allowing you to safely unleash autonomous personas in isolated, stateful environments. *Side note* On PC its basically a model agnostic Antigravity on steroids with some dedicated RP elements and much better security.
 
 =======
 To run the program:
