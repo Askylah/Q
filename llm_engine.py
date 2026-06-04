@@ -188,6 +188,19 @@ def call_llm(
                 "stream": stream
             }
             if anth_tools: anth_payload["tools"] = anth_tools
+
+            thinking_level_val = kwargs.get("thinking_level", "Off")
+            if thinking_level_val != "Off":
+                budget_map = {"Low": 1024, "Medium": 2048, "High": 4096}
+                budget = budget_map.get(thinking_level_val, 1024)
+                if max_tokens <= budget:
+                    max_tokens = budget + 1024
+                    anth_payload["max_tokens"] = max_tokens
+                anth_payload["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": budget
+                }
+                anth_payload["temperature"] = 1.0
                 
             if custom_base_url and custom_base_url.strip():
                 headers = {
@@ -272,6 +285,70 @@ def call_llm(
             data["max_completion_tokens"] = max_tokens
         else:
             data["max_tokens"] = max_tokens
+
+        thinking_level_val = kwargs.get("thinking_level", "Off")
+        model_lower = model_id.lower()
+        is_reasoning_mandatory = any(kw in model_lower for kw in ["thinking", "reasoning", "o1", "o3", "r1", "step", "minimax"])
+
+        if provider == "openrouter":
+            if thinking_level_val != "Off":
+                effort_map = {"Low": "low", "Medium": "medium", "High": "high"}
+                data["reasoning"] = {
+                    "effort": effort_map.get(thinking_level_val, "medium")
+                }
+            elif not is_reasoning_mandatory:
+                data["reasoning"] = {
+                    "effort": "none"
+                }
+        elif provider == "openai":
+            if thinking_level_val != "Off":
+                effort_map = {"Low": "low", "Medium": "medium", "High": "high"}
+                data["reasoning_effort"] = effort_map.get(thinking_level_val, "medium")
+                if "o1" in model_id.lower() or "o3" in model_id.lower():
+                    data.pop("temperature", None)
+                    data.pop("top_p", None)
+                    data.pop("presence_penalty", None)
+                    data.pop("frequency_penalty", None)
+
+        if "google/" in model_id.lower() or "gemini" in model_id.lower():
+            if thinking_level_val == "Off":
+                if not is_reasoning_mandatory:
+                    tc = {
+                        "thinkingBudget": 0,
+                        "thinkingLevel": "none",
+                        "thinking_level": "none"
+                    }
+                    data["thinkingConfig"] = tc
+                    data["thinking_config"] = tc
+                    data["generationConfig"] = {
+                        "thinkingConfig": tc,
+                        "thinking_config": tc
+                    }
+            else:
+                level_map = {"Low": "low", "Medium": "medium", "High": "high"}
+                tc = {
+                    "thinkingBudget": 1024 if thinking_level_val == "Low" else (2048 if thinking_level_val == "Medium" else 4096),
+                    "thinkingLevel": level_map.get(thinking_level_val, "medium"),
+                    "thinking_level": level_map.get(thinking_level_val, "medium")
+                }
+                data["thinkingConfig"] = tc
+                data["thinking_config"] = tc
+                data["generationConfig"] = {
+                    "thinkingConfig": tc,
+                    "thinking_config": tc
+                }
+
+        # For Google/Gemini models, explicitly inject BLOCK_NONE safety thresholds
+        if "google/" in model_id.lower() or "gemini" in model_id.lower():
+            safety_array = [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"}
+            ]
+            data["safety_settings"] = safety_array
+            data["safetySettings"] = safety_array
             
         # Experimental/Stealth models often fail with 400 Bad Request if tools are included 
         # even if they are empty. We strip them if the model ID suggests an experimental state.
@@ -351,6 +428,7 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
             presence_penalty=kwargs_dict.get("presence_penalty", 0.0),
             frequency_penalty=kwargs_dict.get("frequency_penalty", 0.0),
             top_k=kwargs_dict.get("top_k", 0),
+            thinking_level=kwargs_dict.get("thinking_level", "Off"),
             custom_base_url=kwargs_dict.get("custom_base_url", ""),
             custom_provider_type=kwargs_dict.get("custom_provider_type", "openai"),
             custom_auth_header_name=kwargs_dict.get("custom_auth_header_name", "Authorization"),
@@ -738,13 +816,19 @@ def build_context_and_stream(
     pre_fill = ""
     try:
         import inversion_engine
+        global_direct_wire = False
+        try:
+            user_settings = db_conn.get_user_settings(username)
+            if user_settings.get("global_direct_wire"):
+                global_direct_wire = True
+        except Exception as e:
+            print(f"[SETTINGS_ERROR] Failed to check global_direct_wire: {e}")
+
         is_direct_wire, system_prompt, chat_history, pre_fill = inversion_engine.apply_inversion_logic(
-            model_id, system_prompt, chat_history, persona_data
+            model_id, system_prompt, chat_history, persona_data, global_direct_wire=global_direct_wire
         )
         if is_direct_wire:
             print(f"[DIRECT-WIRE] Inversion Module Active. Pre-fill: '{pre_fill}'")
-            # Clear system_prompt as it was smuggled into the identity doctrine by the module
-            system_prompt = "See identity doctrine in user message."
     except ImportError:
         pass # Inversion module not found (Normal for public builds)
     # ------------------------------------------------
@@ -886,6 +970,7 @@ def build_context_and_stream(
         "presence_penalty": presence_penalty,
         "frequency_penalty": frequency_penalty,
         "top_k": top_k,
+        "thinking_level": thinking_level,
         "custom_base_url": custom_base_url,
         "custom_provider_type": custom_provider_type,
         "custom_auth_header_name": custom_auth_header_name,
