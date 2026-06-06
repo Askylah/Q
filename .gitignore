@@ -34,6 +34,10 @@ knowledge_bases/*
 !knowledge_bases/.gitkeep
 *.pkl
 
+# ─── Dynamic Sandbox Tools (Garage) ───────────────────────
+garage/*
+!garage/.gitkeep
+
 # ─── Backups ──────────────────────────────────────────────
 *.bak
 *.backup

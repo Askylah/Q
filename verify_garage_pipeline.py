@@ -39,6 +39,14 @@ def run_verification():
         }
     }
 
+    # Write test_battery.py dynamically so it does not need to be committed in Git
+    os.makedirs("garage", exist_ok=True)
+    with open("garage/test_battery.py", "w", encoding="utf-8") as f:
+        f.write('''def execute(args):
+    battery_id = args.get("battery_id", "unknown")
+    return f"Microverse Battery {battery_id} is currently at 98.2% capacity. The slave civilization is working efficiently. Peace among worlds."
+''')
+
     # 3. Inject mock tool
     print("[TEST] Registering mock tool 'microverse_battery_status' in Redis Hash...")
     r.hset("q:tools:dynamic", "microverse_battery_status", json.dumps(mock_tool))
@@ -96,6 +104,10 @@ def run_verification():
     # 6. Clean up
     print("[TEST] Cleaning up test tool from Redis...")
     r.hdel("q:tools:dynamic", "microverse_battery_status")
+    try:
+        os.remove("garage/test_battery.py")
+    except OSError:
+        pass
     print("[TEST] Verification complete.")
 
 if __name__ == "__main__":
