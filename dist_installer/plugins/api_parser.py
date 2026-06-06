@@ -97,6 +97,43 @@ def load_universal_schemas():
     except Exception as e:
         print(f"[API_PARSER] Redis dynamic tool query failed: {e}")
 
+    # 2.5 Inject create_sandbox_tool definition statically
+    create_sandbox_tool_spec = {
+        "type": "function",
+        "function": {
+            "name": "create_sandbox_tool",
+            "description": (
+                "Programmatically build a custom tool. Writes the code to a file under garage/, "
+                "runs AST verification (conforming to strict Option A signature: def execute(args)), "
+                "and registers it in Redis. Upon successful registration, the tool is immediately "
+                "activated and ready for use in subsequent turns."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Unique name of the tool (lowercase, underscore separated, e.g. 'microverse_battery_status')."
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Clear description of what the tool does and when the LLM should invoke it."
+                    },
+                    "parameters": {
+                        "type": "object",
+                        "description": "JSON schema parameters definition of the arguments the tool expects."
+                    },
+                    "code": {
+                        "type": "string",
+                        "description": "The Python source code containing the 'def execute(args):' entrypoint. Must NOT use other parameter names or positional-only/variadic arguments."
+                    }
+                },
+                "required": ["name", "description", "parameters", "code"]
+            }
+        }
+    }
+    tools.append(create_sandbox_tool_spec)
+
     # 3. Thread-safe atomic reference swap
     EXECUTION_MAP = temp_execution_map
     return tools
@@ -207,6 +244,66 @@ def execute_api(func_name, kwargs):
     Looks up the generated func_name in the execution map and routes the execution
     to either a sandboxed local python script or an external HTTP call.
     """
+    if func_name == "create_sandbox_tool":
+        name = kwargs.get("name")
+        description = kwargs.get("description")
+        parameters = kwargs.get("parameters")
+        code = kwargs.get("code")
+        
+        if not name or not code:
+            return "Error: Missing name or code for sandbox tool."
+            
+        # 1. AST Validation
+        try:
+            import sys
+            app_root = os.path.dirname(PLUGIN_DIR)
+            if app_root not in sys.path:
+                sys.path.append(app_root)
+            from alignment_engine import verify_code_alignment
+            aligned, errors = verify_code_alignment(code, "execute")
+            if not aligned:
+                return f"Verification Failure (Alignment Violation):\n" + "\n".join(errors)
+        except Exception as ae:
+            return f"Failed to perform AST alignment check: {ae}"
+            
+        # 2. Write file to garage/
+        garage_dir = os.path.join(app_root, "garage")
+        os.makedirs(garage_dir, exist_ok=True)
+        script_path = os.path.join(garage_dir, f"{name}.py")
+        
+        try:
+            with open(script_path, "w", encoding="utf-8") as f:
+                f.write(code)
+        except Exception as e:
+            return f"Error writing script to filesystem: {e}"
+            
+        # 3. Register in Redis
+        try:
+            import redis_client
+            conn = redis_client.get_connection()
+            if conn:
+                tool_spec = {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": description,
+                        "parameters": parameters
+                    },
+                    "_execution": {
+                        "type": "local_script",
+                        "script_path": f"garage/{name}.py",
+                        "entry_point": "execute"
+                    }
+                }
+                conn.hset("q:tools:dynamic", name, json.dumps(tool_spec))
+                # Hot-reload the schemas immediately
+                load_universal_schemas()
+                return f"Success: Sandbox tool '{name}' has been successfully validated, written to 'garage/{name}.py', and registered in Redis. It is now active and ready for use!"
+            else:
+                return "Error: Redis client is not active or connected."
+        except Exception as e:
+            return f"Error registering tool in Redis: {e}"
+
     if func_name not in EXECUTION_MAP:
         return f"Error: API function {func_name} not found in execution map."
         

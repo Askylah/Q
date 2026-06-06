@@ -57,6 +57,42 @@ def run_verification():
     print(result)
     print("")
 
+    # 5.5 Test the create_sandbox_tool API
+    print("[TEST] Testing create_sandbox_tool creation and registration...")
+    test_code = """def execute(args):
+    name = args.get("morty_name", "Morty")
+    return f"Hey {name}, you're a little piece of shit. *burp*"
+"""
+    result = execute_api("create_sandbox_tool", {
+        "name": "get_morty_insult",
+        "description": "Returns a customized insult for Morty.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "morty_name": {"type": "string"}
+            }
+        },
+        "code": test_code
+    })
+    print("[TEST] create_sandbox_tool output:", result)
+    
+    # Check that it exists in Redis
+    dynamic_keys = r.hkeys("q:tools:dynamic")
+    print("[TEST] Active dynamic keys in Redis:", [k.decode('utf-8') for k in dynamic_keys])
+    
+    # Run the newly created tool
+    print("[TEST] Running the dynamically created tool 'get_morty_insult'...")
+    insult_result = execute_api("get_morty_insult", {"morty_name": "Jerry"})
+    print("[TEST] dynamic tool result:", insult_result)
+
+    # Clean up the dynamic tool
+    print("[TEST] Cleaning up get_morty_insult...")
+    r.hdel("q:tools:dynamic", "get_morty_insult")
+    try:
+        os.remove("garage/get_morty_insult.py")
+    except OSError:
+        pass
+
     # 6. Clean up
     print("[TEST] Cleaning up test tool from Redis...")
     r.hdel("q:tools:dynamic", "microverse_battery_status")

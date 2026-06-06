@@ -17,7 +17,7 @@ import firewall
 import output_validator
 
 # Initialize and Load Plugins
-PLUGIN_DIR = os.path.join(os.path.dirname(__file__), "skills")
+PLUGIN_DIR = os.path.join(os.path.dirname(__file__), "plugins")
 manager = get_plugin_manager()
 manager.load_plugins(PLUGIN_DIR)
 
