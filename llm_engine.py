@@ -517,9 +517,11 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
         except Exception as e:
             err_msg = str(e)
             if "10054" in err_msg or "ConnectionResetError" in err_msg or "Connection aborted" in err_msg or "forcibly closed" in err_msg:
-                yield f"data: {json.dumps({'choices': [{'delta': {'content': '\\n\\n⚠️ *[Connection reset by remote host. Your message has been committed to context. You can continue speaking.]*'}}]})\n\n".encode('utf-8')
+                reset_content = "\n\n⚠️ *[Connection reset by remote host. Your message has been committed to context. You can continue speaking.]*"
+                yield f"data: {json.dumps({'choices': [{'delta': {'content': reset_content}}]})}\n\n".encode('utf-8')
             else:
-                yield f"data: {json.dumps({'choices': [{'delta': {'content': f'\\n\\n⚠️ *[System Error during stream: {err_msg}]*'}}]})\n\n".encode('utf-8')
+                err_content = f"\n\n⚠️ *[System Error during stream: {err_msg}]*"
+                yield f"data: {json.dumps({'choices': [{'delta': {'content': err_content}}]})}\n\n".encode('utf-8')
             yield b'data: [DONE]\n\n'
             return
                     
