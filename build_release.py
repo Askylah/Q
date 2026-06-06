@@ -36,7 +36,7 @@ def build_release():
         "memory_engine.py", "observational_memory.py", "zettel_engine.py", 
         "on_demand_loader.py", "plugin_manager.py", "mcp_client.py", 
         "mcp_server.py", "skill_orchestrator.py", "governance_manager.py",
-        "ingest.py", "output_validator.py"
+        "ingest.py", "output_validator.py", "inversion_engine.py", "redis_client.py"
     ]
     for f in core_files:
         src = os.path.join(root_dir, f)

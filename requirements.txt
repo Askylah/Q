@@ -13,3 +13,5 @@ mcp
 bcrypt
 python-magic-bin; sys_platform == 'win32'
 python-magic; sys_platform != 'win32'
+redis>=5.0.0
+

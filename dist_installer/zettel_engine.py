@@ -25,6 +25,8 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from rag_engine import get_shared_model
 import database as db
+import pickle
+import redis_client
 
 # Contiguous matrix cache per (username, persona) to prevent loading binary vectors from SQLite on every turn.
 # Thread-safe global lock to protect memory reads/writes.
@@ -54,13 +56,23 @@ def load_zettel_cache(username: str, persona: str, all_nodes: list) -> dict:
         for n in nodes_with_embeddings
     ], dtype=np.float32)
     
+    cache_data = {
+        "node_ids": node_ids,
+        "node_tags": node_tags,
+        "embeddings": embeddings
+    }
+    
+    if redis_client.is_active():
+        redis_key = f"zettel:cache:{username}:{persona}"
+        try:
+            redis_client.set_val(redis_key, pickle.dumps(cache_data), ex=3600)
+            print(f"[ZETTEL CACHE] Caching nodes to Redis for '{persona}' (Count: {len(node_ids)})")
+        except Exception as e:
+            print(f"[REDIS ERROR] Failed to cache data in Redis: {e}")
+            
     with _CACHE_LOCK:
         evict_other_personas_from_cache(username, persona)
-        _EMBEDDING_CACHE[cache_key] = {
-            "node_ids": node_ids,
-            "node_tags": node_tags,
-            "embeddings": embeddings
-        }
+        _EMBEDDING_CACHE[cache_key] = cache_data
         return _EMBEDDING_CACHE[cache_key]
 
 def bulk_append_to_zettel_cache(username: str, persona: str, new_nodes: list):
@@ -69,10 +81,21 @@ def bulk_append_to_zettel_cache(username: str, persona: str, new_nodes: list):
         return
         
     cache_key = (username, persona)
+    redis_key = f"zettel:cache:{username}:{persona}"
+    
     with _CACHE_LOCK:
+        cache = None
         if cache_key in _EMBEDDING_CACHE:
             cache = _EMBEDDING_CACHE[cache_key]
-            
+        elif redis_client.is_active():
+            redis_data = redis_client.get(redis_key)
+            if redis_data:
+                try:
+                    cache = pickle.loads(redis_data)
+                except Exception as e:
+                    print(f"[REDIS ERROR] Failed to deserialize cache: {e}")
+                    
+        if cache:
             new_ids = [n["id"] for n in new_nodes]
             new_tags = [n["tag"] for n in new_nodes]
             new_vecs = np.array([n["embedding"] for n in new_nodes], dtype=np.float32)
@@ -80,6 +103,14 @@ def bulk_append_to_zettel_cache(username: str, persona: str, new_nodes: list):
             cache["node_ids"].extend(new_ids)
             cache["node_tags"].extend(new_tags)
             cache["embeddings"] = np.vstack([cache["embeddings"], new_vecs])
+            
+            _EMBEDDING_CACHE[cache_key] = cache
+            
+            if redis_client.is_active():
+                try:
+                    redis_client.set_val(redis_key, pickle.dumps(cache), ex=3600)
+                except Exception as e:
+                    print(f"[REDIS ERROR] Failed to write updated cache to Redis: {e}")
 
 # ═══════════════════════════════════════════════════════════
 # CONSTANTS
@@ -491,11 +522,27 @@ def query_knowledge_graph(username: str, persona: str, query_text: str, top_k: i
     
     # Ensure cache is active for this persona, reading under lock
     cache_key = (username, persona)
+    redis_key = f"zettel:cache:{username}:{persona}"
+    cache = None
+    
     with _CACHE_LOCK:
         cache = _EMBEDDING_CACHE.get(cache_key)
         
+    if cache is None and redis_client.is_active():
+        redis_data = redis_client.get(redis_key)
+        if redis_data:
+            try:
+                cache = pickle.loads(redis_data)
+                with _CACHE_LOCK:
+                    evict_other_personas_from_cache(username, persona)
+                    _EMBEDDING_CACHE[cache_key] = cache
+                print(f"[ZETTEL CACHE] Hot cache loaded from Redis for '{persona}'")
+            except Exception as e:
+                print(f"[REDIS ERROR] Failed to load cache from Redis: {e}")
+                cache = None
+                
     if cache is None:
-        # load_zettel_cache internally handles the lock, eviction, and loading
+        # load_zettel_cache internally handles the lock, eviction, loading, and writing to Redis/local cache
         cache = load_zettel_cache(username, persona, all_nodes)
     
     # ── VECTOR PATH ──
