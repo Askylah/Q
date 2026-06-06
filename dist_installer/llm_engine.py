@@ -14,6 +14,7 @@ import threading
 from typing import Union, Optional
 from plugin_manager import get_plugin_manager, HookType
 import firewall
+import output_validator
 
 # Initialize and Load Plugins
 PLUGIN_DIR = os.path.join(os.path.dirname(__file__), "skills")
@@ -442,6 +443,7 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
         
         is_tool_call = False
         tool_call_buffer = {}
+        full_text_response = ""
         
         try:
             for line in response.iter_lines():
@@ -487,19 +489,37 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
                             continue
                             
                         if not is_tool_call:
+                            content = delta.get("content", "")
+                            if content:
+                                full_text_response += content
                             yield line + b"\n\n"
                     except:
                         if not is_tool_call:
                             yield line + b"\n\n"
                 else:
                     if not is_tool_call:
+                        if decoded == "data: [DONE]" and full_text_response:
+                            try:
+                                sanitized = output_validator.sanitize_assistant_output(full_text_response)
+                                if len(sanitized) > len(full_text_response):
+                                    warning_part = sanitized[len(full_text_response):]
+                                    warning_payload = {
+                                        "choices": [{
+                                            "delta": {
+                                                "content": warning_part
+                                            }
+                                        }]
+                                    }
+                                    yield f"data: {json.dumps(warning_payload)}\n\n".encode('utf-8')
+                            except Exception as se:
+                                print(f"[OUTPUT GATE ERROR] Failed to run output validator: {se}")
                         yield line + b"\n\n"
         except Exception as e:
             err_msg = str(e)
             if "10054" in err_msg or "ConnectionResetError" in err_msg or "Connection aborted" in err_msg or "forcibly closed" in err_msg:
-                yield f"data: {json.dumps({'choices': [{'delta': {'content': '\\n\\n⚠️ *[Connection reset by remote host. Your message has been committed to context. You can continue speaking.]*'}}]})}\n\n".encode('utf-8')
+                yield f"data: {json.dumps({'choices': [{'delta': {'content': '\\n\\n⚠️ *[Connection reset by remote host. Your message has been committed to context. You can continue speaking.]*'}}]})\n\n".encode('utf-8')
             else:
-                yield f"data: {json.dumps({'choices': [{'delta': {'content': f'\\n\\n⚠️ *[System Error during stream: {err_msg}]*'}}]})}\n\n".encode('utf-8')
+                yield f"data: {json.dumps({'choices': [{'delta': {'content': f'\\n\\n⚠️ *[System Error during stream: {err_msg}]*'}}]})\n\n".encode('utf-8')
             yield b'data: [DONE]\n\n'
             return
                     
