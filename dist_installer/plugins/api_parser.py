@@ -233,6 +233,18 @@ def execute_api(func_name, kwargs):
                 script_code = f.read()
         except Exception as e:
             return f"Error reading local script: {e}"
+
+        # Run AST alignment verification
+        try:
+            # Add app root to path to load alignment_engine cleanly
+            import sys
+            sys.path.append(app_root)
+            from alignment_engine import verify_code_alignment
+            aligned, errors = verify_code_alignment(script_code, entry_point)
+            if not aligned:
+                return f"Verification Failure (Alignment Violation):\n" + "\n".join(errors)
+        except Exception as ae:
+            print(f"[API_PARSER] Failed to perform AST alignment check: {ae}")
             
         # Append transient execution payload wrapper
         args_json_repr = repr(json.dumps(kwargs))

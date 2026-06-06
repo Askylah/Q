@@ -1,5 +1,5 @@
 import re
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 
 # --- WHITELISTS ---
 # Allowed domains for browsing/searching
@@ -49,6 +49,39 @@ def sanitize_assistant_output(text: str) -> str:
     Scans assistant text for patterns that might attempt to socially engineer 
     the user or trigger downstream unintended actions.
     """
-    # Placeholder: Detect potential phishing links or executable-like blocks
-    # that aren't properly wrapped in code blocks.
+    # Scan any generated python code blocks for AST alignment violations
+    aligned, errors = validate_python_code_blocks(text)
+    if not aligned:
+        warning_header = (
+            "\n\n[WARNING: GENERATED CODE VIOLATES ARCHITECTURAL ALIGNMENT POLICY]\n"
+            + "\n".join(f"- {err}" for err in errors)
+            + "\n[END ALIGNMENT WARNING]\n\n"
+        )
+        return text + warning_header
     return text
+
+def validate_python_code_blocks(text: str) -> Tuple[bool, List[str]]:
+    """
+    Scans text for python code blocks and runs AST alignment verification.
+    """
+    import re
+    from alignment_engine import CodeAlignmentVisitor, ast
+    
+    code_blocks = re.findall(r"```python\s*(.*?)\s*```", text, re.DOTALL)
+    if not code_blocks:
+        return True, []
+        
+    all_errors = []
+    for idx, block in enumerate(code_blocks):
+        try:
+            tree = ast.parse(block)
+            visitor = CodeAlignmentVisitor()
+            visitor.visit(tree)
+            if visitor.errors:
+                all_errors.extend([f"[Block {idx+1}] {err}" for err in visitor.errors])
+        except SyntaxError as se:
+            all_errors.append(f"[Block {idx+1}] Syntax Error on line {se.lineno}: {se.msg}")
+        except Exception as e:
+            all_errors.append(f"[Block {idx+1}] AST parsing failed: {str(e)}")
+            
+    return len(all_errors) == 0, all_errors
