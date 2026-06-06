@@ -86,6 +86,27 @@ def verify_code_alignment(code: str, expected_entry_point: str = "execute") -> T
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == expected_entry_point:
             entry_point_found = True
+            
+            # Enforce Option A: exactly one positional/keyword parameter named 'args'
+            posonly_count = len(getattr(node.args, "posonlyargs", []))
+            std_args = node.args.args
+            total_positional = posonly_count + len(std_args)
+            
+            if total_positional != 1:
+                errors.append(
+                    f"Violation: Entry point function '{expected_entry_point}' must accept exactly one parameter (found {total_positional})."
+                )
+            else:
+                arg_name = std_args[0].arg if std_args else getattr(node.args, "posonlyargs")[0].arg
+                if arg_name != "args":
+                    errors.append(
+                        f"Violation: Entry point parameter must be named 'args' (found '{arg_name}'). Expected: 'def {expected_entry_point}(args):'."
+                    )
+            
+            if node.args.kwonlyargs or node.args.vararg or node.args.kwarg:
+                errors.append(
+                    f"Violation: Entry point function '{expected_entry_point}' must not accept keyword-only, variable, or keyword-argument parameters."
+                )
             break
             
     if not entry_point_found:
