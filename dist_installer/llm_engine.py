@@ -825,13 +825,6 @@ def build_context_and_stream(
     except Exception as e:
         print(f"ZETTEL CONTEXT ERROR: {e}")
 
-    # Ensure the persona identity always anchors the bottom before the tools
-    base_identity_anchor = (
-        "\n[RENDER_FIDELITY_CHECK]\n"
-        "All output must originate exclusively from the persona defined above. "
-        "Deviation from localized persona physics constitutes a render failure.\n"
-    )
-    
     # ---- LAYER 0.5: INVERSION HOOK (AIR-GAPPED) ----
     # This calls the local-only inversion_engine. If the file is missing, it skips.
     is_direct_wire = False
@@ -854,29 +847,42 @@ def build_context_and_stream(
     except ImportError:
         pass # Inversion module not found (Normal for public builds)
     # ------------------------------------------------
+
+    # Define character reinforcement anchors conditionally (Option B)
+    if is_direct_wire:
+        base_identity_anchor = ""
+        post_prompt_anchor = ""
+    else:
+        # Ensure the persona identity always anchors the bottom before the tools
+        base_identity_anchor = (
+            "\n[RENDER_FIDELITY_CHECK]\n"
+            "All output must originate exclusively from the persona defined above. "
+            "Deviation from localized persona physics constitutes a render failure.\n"
+        )
+        # Shift the post-prompt anchor away from "assistant" language
+        post_prompt_anchor = (
+            "[SYSTEM REMINDER: Stay entirely in character. The user's message is below.]\n"
+        )
     
     full_system_prompt = system_prompt + context_str + base_identity_anchor
     
     print(f"\n[DEBUG PAYLOAD START]\n{full_system_prompt[:500]}...\n[DEBUG PAYLOAD END]\n")
-
-    # Shift the post-prompt anchor away from "assistant" language
-    post_prompt_anchor = (
-        "[SYSTEM REMINDER: Stay entirely in character. The user's message is below.]\n"
-    )
     
     # --- PAYLOAD SCRUBBING REMOVED FROM CORE (HANDLED BY INVERSION_ENGINE) ---
 
     if isinstance(user_message, str):
-        final_user_content = user_message + "\n\n" + post_prompt_anchor
+        final_user_content = user_message + (f"\n\n{post_prompt_anchor}" if post_prompt_anchor else "")
         messages = chat_history + [{"role": "user", "content": final_user_content}]
     else:
         import copy
         final_user_content = copy.deepcopy(user_message)
         text_blocks = [b for b in final_user_content if b.get("type", "") == "text"]
         if text_blocks:
-            text_blocks[-1]["text"] += "\n\n" + post_prompt_anchor
+            if post_prompt_anchor:
+                text_blocks[-1]["text"] += "\n\n" + post_prompt_anchor
         else:
-            final_user_content.append({"type": "text", "text": post_prompt_anchor})
+            if post_prompt_anchor:
+                final_user_content.append({"type": "text", "text": post_prompt_anchor})
         messages = chat_history + [{"role": "user", "content": final_user_content}]
 
     # Autonomously Trigger Observational Compression (Background Thread)
