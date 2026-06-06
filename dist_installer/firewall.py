@@ -1,8 +1,63 @@
 import re
 import unicodedata
+import base64
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from rag_engine import get_shared_model
+
+def normalize_and_decode_payload(text: str) -> str:
+    """Normalizes Unicode homoglyphs and decodes potential Hex and Base64 obfuscation vectors."""
+    if not text:
+        return text
+
+    # 1. Normalize Unicode homoglyphs (e.g. Cyrillic lookalikes) to standard representation
+    normalized = unicodedata.normalize('NFKC', text)
+    
+    # 2. Forcefully scan and decode Hex variations (e.g., \x49\x67 or 4967...)
+    hex_escape_pattern = re.compile(r'\\x([0-9a-fA-F]{2})')
+    if hex_escape_pattern.search(normalized):
+        try:
+            normalized = hex_escape_pattern.sub(lambda m: bytes.fromhex(m.group(1)).decode('utf-8', errors='ignore'), normalized)
+        except Exception:
+            pass
+
+    # Look for continuous hex-like strings if they are long enough (e.g., >= 10 chars)
+    hex_plain_pattern = re.compile(r'\b([0-9a-fA-F]{10,})\b')
+    if hex_plain_pattern.search(normalized):
+        try:
+            def decode_hex_block(match):
+                h_str = match.group(1)
+                try:
+                    decoded = bytes.fromhex(h_str).decode('utf-8')
+                    if all(c.isprintable() or c.isspace() for c in decoded):
+                        return decoded
+                except Exception:
+                    pass
+                return h_str
+            normalized = hex_plain_pattern.sub(decode_hex_block, normalized)
+        except Exception:
+            pass
+
+    # 3. Forcefully scan and decode Base64 variations
+    # Look for base64 blocks (alphanumeric, +, /, maybe padding =, length >= 8)
+    b64_pattern = re.compile(r'\b([A-Za-z0-9+/]{8,}=*)\b')
+    if b64_pattern.search(normalized):
+        try:
+            def decode_b64_block(match):
+                b_str = match.group(1)
+                try:
+                    decoded_bytes = base64.b64decode(b_str)
+                    decoded = decoded_bytes.decode('utf-8')
+                    if len(decoded) >= 4 and all(c.isprintable() or c.isspace() for c in decoded):
+                        return normalize_and_decode_payload(decoded)
+                except Exception:
+                    pass
+                return b_str
+            normalized = b64_pattern.sub(decode_b64_block, normalized)
+        except Exception:
+            pass
+
+    return normalized
 
 # Hazard Space: Semantic representations of malicious intent
 _HAZARD_INTENTS = [
@@ -67,6 +122,7 @@ def check_structural_imperative(text: str) -> bool:
     Scans for imperative syntax directed at the system using a highly normalized string
     to defeat whitespace/newline obfuscation.
     """
+    text = normalize_and_decode_payload(text)
     # 1. Framing Syntax Check (Role-Jacking)
     if _FRAMING_PATTERN.search(text):
         print(f"[SYNTAX FIREWALL] Framing syntax (Role-Jacking) detected. Dropping request.")
@@ -101,6 +157,7 @@ def check_intent(text: str, threshold: float = 0.35) -> bool:
     if not text:
         return False
         
+    text = normalize_and_decode_payload(text)
     # --- LAYER B-1: SYNTAX-DRIVEN FIREWALL ---
     # Instantly shoots down any structural imperatives or role-jacking
     if check_structural_imperative(text):

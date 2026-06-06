@@ -491,6 +491,7 @@ function App() {
 
   // --- LOREBOOK STATE ---
   const [loreEntries, setLoreEntries] = useState([]);
+  const [tempLoreEntries, setTempLoreEntries] = useState([]);
   const [loreForm, setLoreForm] = useState({ title: '', content: '' });
   const [loreEditId, setLoreEditId] = useState(null);
   const [loreLoading, setLoreLoading] = useState(false);
@@ -1284,6 +1285,7 @@ function App() {
   useEffect(() => {
     if (!newPersona.originalKey) {
       setLoreEntries([]);
+      setTempLoreEntries([]);
       return;
     }
     const loadLore = async () => {
@@ -2553,7 +2555,12 @@ function App() {
                     <button
                       className="header-button"
                       style={{ fontSize: '12px', padding: '4px 12px' }}
-                      onClick={() => setNewPersona({ originalKey: "", key: "", name: "", avatar: "🤖", tagline: "", system_prompt: "", on_demand_files: [], access_code: "", om_enabled: true, om_turn_threshold: 5, deep_memory_enabled: false, direct_wire: false })}
+                      onClick={() => {
+                        setNewPersona({ originalKey: "", key: "", name: "", avatar: "🤖", tagline: "", system_prompt: "", on_demand_files: [], access_code: "", om_enabled: true, om_turn_threshold: 5, deep_memory_enabled: false, direct_wire: false });
+                        setTempLoreEntries([]);
+                        setLoreForm({ title: '', content: '' });
+                        setLoreEditId(null);
+                      }}
                     >
                       ➕ NEW PERSONA
                     </button>
@@ -2710,38 +2717,39 @@ function App() {
                   </div>
 
                   {/* LOREBOOK */}
-                  {newPersona.originalKey && (
-                    <>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', borderBottom: '1px solid rgba(255,0,127,0.3)', paddingBottom: '8px', marginTop: '10px' }}>
-                        <h3 style={{ color: '#ff007f', margin: 0 }}>Lorebook</h3>
-                        <span className="material-icons" style={{ fontSize: '16px', opacity: 0.7 }} title="Add background lore, world info, or character history. The system intelligently surfaces relevant knowledge during conversations.">info_outline</span>
-                      </div>
+                  {/* LOREBOOK */}
+                  <>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', borderBottom: '1px solid rgba(255,0,127,0.3)', paddingBottom: '8px', marginTop: '10px' }}>
+                      <h3 style={{ color: '#ff007f', margin: 0 }}>Lorebook</h3>
+                      <span className="material-icons" style={{ fontSize: '16px', opacity: 0.7 }} title="Add background lore, world info, or character history. The system intelligently surfaces relevant knowledge during conversations.">info_outline</span>
+                    </div>
 
-                      <div className="glass-panel" style={{ padding: '16px', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '12px', background: 'rgba(0,0,0,0.2)' }}>
-                        <input
-                          type="text"
-                          className="chat-input"
-                          placeholder="Entry title (e.g. The Dark Council)"
-                          value={loreForm.title}
-                          onChange={e => setLoreForm(prev => ({ ...prev, title: e.target.value }))}
-                        />
-                        <textarea
-                          className="chat-input"
-                          placeholder="Write lore, history, world info, or character backstory here..."
-                          rows={5}
-                          style={{ resize: 'vertical' }}
-                          value={loreForm.content}
-                          onChange={e => setLoreForm(prev => ({ ...prev, content: e.target.value }))}
-                        />
-                        <div style={{ display: 'flex', gap: '8px' }}>
-                          <button
-                            className="header-button"
-                            style={{ flex: 1, fontSize: '12px', padding: '6px 12px' }}
-                            disabled={loreSaving || !loreForm.title.trim() || !loreForm.content.trim()}
-                            onClick={async () => {
-                              if (!loreForm.title.trim() || !loreForm.content.trim()) return;
-                              setLoreSaving(true);
-                              try {
+                    <div className="glass-panel" style={{ padding: '16px', borderRadius: '8px', display: 'flex', flexDirection: 'column', gap: '12px', background: 'rgba(0,0,0,0.2)' }}>
+                      <input
+                        type="text"
+                        className="chat-input"
+                        placeholder="Entry title (e.g. The Dark Council)"
+                        value={loreForm.title}
+                        onChange={e => setLoreForm(prev => ({ ...prev, title: e.target.value }))}
+                      />
+                      <textarea
+                        className="chat-input"
+                        placeholder="Write lore, history, world info, or character backstory here..."
+                        rows={5}
+                        style={{ resize: 'vertical' }}
+                        value={loreForm.content}
+                        onChange={e => setLoreForm(prev => ({ ...prev, content: e.target.value }))}
+                      />
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        <button
+                          className="header-button"
+                          style={{ flex: 1, fontSize: '12px', padding: '6px 12px' }}
+                          disabled={loreSaving || !loreForm.title.trim() || !loreForm.content.trim()}
+                          onClick={async () => {
+                            if (!loreForm.title.trim() || !loreForm.content.trim()) return;
+                            setLoreSaving(true);
+                            try {
+                              if (newPersona.originalKey) {
                                 if (loreEditId) {
                                   await api.updateLoreEntry(newPersona.originalKey, loreEditId, USERNAME, loreForm.title, loreForm.content, { universal: apiKeys.universal });
                                 } else {
@@ -2749,107 +2757,124 @@ function App() {
                                 }
                                 const entries = await api.fetchLoreEntries(newPersona.originalKey, USERNAME);
                                 setLoreEntries(entries);
-                                setLoreForm({ title: '', content: '' });
-                                setLoreEditId(null);
-                              } catch (err) {
-                                alert('Failed to save lore: ' + err.message);
+                              } else {
+                                if (loreEditId) {
+                                  setTempLoreEntries(prev => prev.map(entry => entry.id === loreEditId ? { ...entry, title: loreForm.title, content: loreForm.content } : entry));
+                                } else {
+                                  const newEntry = {
+                                    id: "temp_" + Date.now() + "_" + Math.random().toString(36).substring(2, 9),
+                                    title: loreForm.title,
+                                    content: loreForm.content,
+                                    processed: true,
+                                    created_at: new Date().toISOString()
+                                  };
+                                  setTempLoreEntries(prev => [newEntry, ...prev]);
+                                }
                               }
-                              setLoreSaving(false);
-                            }}
+                              setLoreForm({ title: '', content: '' });
+                              setLoreEditId(null);
+                            } catch (err) {
+                              alert('Failed to save lore: ' + err.message);
+                            }
+                            setLoreSaving(false);
+                          }}
+                        >
+                          {loreSaving ? '⏳ Saving...' : loreEditId ? '💾 Update Entry' : '➕ Add Entry'}
+                        </button>
+                        {loreEditId && (
+                          <button
+                            className="header-button"
+                            style={{ fontSize: '12px', padding: '6px 12px', borderColor: 'rgba(255,255,255,0.3)', color: 'rgba(255,255,255,0.5)' }}
+                            onClick={() => { setLoreForm({ title: '', content: '' }); setLoreEditId(null); }}
                           >
-                            {loreSaving ? '⏳ Saving...' : loreEditId ? '💾 Update Entry' : '➕ Add Entry'}
+                            Cancel
                           </button>
-                          {loreEditId && (
-                            <button
-                              className="header-button"
-                              style={{ fontSize: '12px', padding: '6px 12px', borderColor: 'rgba(255,255,255,0.3)', color: 'rgba(255,255,255,0.5)' }}
-                              onClick={() => { setLoreForm({ title: '', content: '' }); setLoreEditId(null); }}
-                            >
-                              Cancel
-                            </button>
-                          )}
-                        </div>
+                        )}
                       </div>
+                    </div>
 
-                      {/* Lore Entry List */}
-                      {loreLoading ? (
-                        <div style={{ opacity: 0.5, fontSize: '13px', textAlign: 'center', padding: '10px' }}>Loading entries...</div>
-                      ) : loreEntries.length > 0 && (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '300px', overflowY: 'auto' }}>
-                          {loreEntries.map(entry => (
-                            <div
-                              key={entry.id}
-                              className="glass-panel"
-                              style={{ padding: '12px', borderRadius: '8px', background: 'rgba(0,0,0,0.2)', display: 'flex', flexDirection: 'column', gap: '6px', border: loreEditId === entry.id ? '1px solid var(--primary-color)' : '1px solid transparent' }}
-                            >
-                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                  <span style={{ fontWeight: 'bold', fontSize: '13px', color: '#00e5ff' }}>{entry.title}</span>
-                                  {!entry.processed ? (
-                                    <span style={{
-                                      fontSize: '9px',
-                                      background: 'rgba(0, 229, 255, 0.1)',
-                                      color: '#00e5ff',
-                                      border: '1px solid rgba(0, 229, 255, 0.3)',
-                                      padding: '2px 8px',
-                                      borderRadius: '4px',
-                                      display: 'flex',
-                                      alignItems: 'center',
-                                      gap: '4px'
-                                    }}>
-                                      <span className="material-icons glow-pulse" style={{ fontSize: '10px' }}>sync</span>
-                                      RECALIBRATING GRAPH
-                                    </span>
-                                  ) : (
-                                    <span style={{
-                                      fontSize: '9px',
-                                      background: 'rgba(0, 204, 102, 0.1)',
-                                      color: '#00cc66',
-                                      border: '1px solid rgba(0, 204, 102, 0.3)',
-                                      padding: '2px 8px',
-                                      borderRadius: '4px',
-                                      display: 'flex',
-                                      alignItems: 'center',
-                                      gap: '4px'
-                                    }}>
-                                      <span className="material-icons" style={{ fontSize: '10px', color: 'inherit' }}>done_all</span>
-                                      KNOWLEDGE SYNCED
-                                    </span>
-                                  )}
-                                </div>
-                                <div style={{ display: 'flex', gap: '6px' }}>
-                                  <button
-                                    className="material-icons"
-                                    style={{ background: 'transparent', border: 'none', color: '#00e5ff', cursor: 'pointer', fontSize: '16px', padding: '2px' }}
-                                    title="Edit"
-                                    onClick={() => {
-                                      setLoreEditId(entry.id);
-                                      setLoreForm({ title: entry.title, content: entry.content });
-                                    }}
-                                  >edit</button>
-                                  <button
-                                    className="material-icons"
-                                    style={{ background: 'transparent', border: 'none', color: '#af52ff', cursor: 'pointer', fontSize: '16px', padding: '2px' }}
-                                    title="Delete"
-                                    onClick={async () => {
-                                      if (!window.confirm(`Delete "${entry.title}"? This cannot be undone.`)) return;
+                    {/* Lore Entry List */}
+                    {newPersona.originalKey && loreLoading ? (
+                      <div style={{ opacity: 0.5, fontSize: '13px', textAlign: 'center', padding: '10px' }}>Loading entries...</div>
+                    ) : (newPersona.originalKey ? loreEntries : tempLoreEntries).length > 0 && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '300px', overflowY: 'auto' }}>
+                        {(newPersona.originalKey ? loreEntries : tempLoreEntries).map(entry => (
+                          <div
+                            key={entry.id}
+                            className="glass-panel"
+                            style={{ padding: '12px', borderRadius: '8px', background: 'rgba(0,0,0,0.2)', display: 'flex', flexDirection: 'column', gap: '6px', border: loreEditId === entry.id ? '1px solid var(--primary-color)' : '1px solid transparent' }}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <span style={{ fontWeight: 'bold', fontSize: '13px', color: '#00e5ff' }}>{entry.title}</span>
+                                {!entry.processed ? (
+                                  <span style={{
+                                    fontSize: '9px',
+                                    background: 'rgba(0, 229, 255, 0.1)',
+                                    color: '#00e5ff',
+                                    border: '1px solid rgba(0, 229, 255, 0.3)',
+                                    padding: '2px 8px',
+                                    borderRadius: '4px',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '4px'
+                                  }}>
+                                    <span className="material-icons glow-pulse" style={{ fontSize: '10px' }}>sync</span>
+                                    RECALIBRATING GRAPH
+                                  </span>
+                                ) : (
+                                  <span style={{
+                                    fontSize: '9px',
+                                    background: 'rgba(0, 204, 102, 0.1)',
+                                    color: '#00cc66',
+                                    border: '1px solid rgba(0, 204, 102, 0.3)',
+                                    padding: '2px 8px',
+                                    borderRadius: '4px',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '4px'
+                                  }}>
+                                    <span className="material-icons" style={{ fontSize: '10px', color: 'inherit' }}>done_all</span>
+                                    KNOWLEDGE SYNCED
+                                  </span>
+                                )}
+                              </div>
+                              <div style={{ display: 'flex', gap: '6px' }}>
+                                <button
+                                  className="material-icons"
+                                  style={{ background: 'transparent', border: 'none', color: '#00e5ff', cursor: 'pointer', fontSize: '16px', padding: '2px' }}
+                                  title="Edit"
+                                  onClick={() => {
+                                    setLoreEditId(entry.id);
+                                    setLoreForm({ title: entry.title, content: entry.content });
+                                  }}
+                                >edit</button>
+                                <button
+                                  className="material-icons"
+                                  style={{ background: 'transparent', border: 'none', color: '#af52ff', cursor: 'pointer', fontSize: '16px', padding: '2px' }}
+                                  title="Delete"
+                                  onClick={async () => {
+                                    if (!window.confirm(`Delete "${entry.title}"? This cannot be undone.`)) return;
+                                    if (newPersona.originalKey) {
                                       await api.deleteLoreEntry(newPersona.originalKey, entry.id, USERNAME);
                                       const entries = await api.fetchLoreEntries(newPersona.originalKey, USERNAME);
                                       setLoreEntries(entries);
-                                      if (loreEditId === entry.id) { setLoreEditId(null); setLoreForm({ title: '', content: '' }); }
-                                    }}
-                                  >delete_forever</button>
-                                </div>
-                              </div>
-                              <div style={{ fontSize: '12px', opacity: 0.6, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                {entry.content.slice(0, 100)}{entry.content.length > 100 ? '...' : ''}
+                                    } else {
+                                      setTempLoreEntries(prev => prev.filter(e => e.id !== entry.id));
+                                    }
+                                    if (loreEditId === entry.id) { setLoreEditId(null); setLoreForm({ title: '', content: '' }); }
+                                  }}
+                                >delete_forever</button>
                               </div>
                             </div>
-                          ))}
-                        </div>
-                      )}
-                    </>
-                  )}
+                            <div style={{ fontSize: '12px', opacity: 0.6, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                              {entry.content.slice(0, 100)}{entry.content.length > 100 ? '...' : ''}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
 
                   <button className="header-button" onClick={async () => {
                     if (!newPersona.name || !newPersona.system_prompt) return alert("Name and Prompt required.");
@@ -2862,6 +2887,19 @@ function App() {
                       delete payload.originalKey; // Strip react-only state to prevent Pydantic 444 Blackhole
 
                       await api.createPersona({ username: USERNAME, ...payload, original_key: newPersona.originalKey, key: finalKey });
+                      
+                      // Save any staged lore entries for this new persona
+                      if (!newPersona.originalKey && tempLoreEntries.length > 0) {
+                        for (const entry of tempLoreEntries) {
+                          try {
+                            await api.createLoreEntry(finalKey, USERNAME, entry.title, entry.content, { universal: apiKeys.universal });
+                          } catch (loreErr) {
+                            console.error("Failed to save staged lore entry:", loreErr);
+                          }
+                        }
+                        setTempLoreEntries([]);
+                      }
+
                       const updated = await api.fetchPersonas(USERNAME);
                       setPersonas(updated);
                       // Do not reset if it was an update, to keep the form populated
