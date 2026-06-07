@@ -58,6 +58,7 @@ safe_history_erase.py
 safe_history_scrub_v2.py
 test_openrouter_ping.py
 test_zettel_scaling.py
+verify_garage_pipeline.py
 memory_dump.txt
 
 # ─── Staged Writes (Approval Scratch) ────────────────────
