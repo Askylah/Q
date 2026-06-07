@@ -5,7 +5,7 @@
 
 =======
 To run the program:
-1. **Backend**: `cd C:\Users\insom\OneDrive\Desktop\Personas\PersonaApp-merged` -> `py main.py` (or whatever you actually named the dirctory)
+1. **Backend**: `cd C:\Users\insertuser\OneDrive\Desktop\Personas\PersonaApp-merged` -> `py main.py` (or whatever you actually named the dirctory)
 2. **Frontend**: `cd vite-project` -> `npm run dev`
 3. **Settings**: API&Routing set your API key here and set your model. Or model switching here. If you don't want model switching just set both models to the same model.
 >>>>>>> 262d508939950660a887e9c2acbc58b6469707a3
