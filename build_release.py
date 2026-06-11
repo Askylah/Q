@@ -37,7 +37,7 @@ def build_release():
         "on_demand_loader.py", "plugin_manager.py", "mcp_client.py", 
         "mcp_server.py", "skill_orchestrator.py", "governance_manager.py",
         "ingest.py", "output_validator.py", "inversion_engine.py", "redis_client.py",
-        "alignment_engine.py"
+        "alignment_engine.py", "redis_pool.py", "vpn_rotator.py", "stream_worker.py"
     ]
     for f in core_files:
         src = os.path.join(root_dir, f)

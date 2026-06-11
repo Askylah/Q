@@ -479,6 +479,50 @@ class PersonaAPI {
             body: JSON.stringify({ username, secret_key: secretKey })
         });
     }
+
+    async fetchTelemetry(username = "default_user") {
+        try {
+            return await this._fetch(`/settings/${encodeURIComponent(username)}/telemetry`);
+        } catch (e) {
+            console.error("Telemetry fetch failed:", e);
+            return null;
+        }
+    }
+
+    async addPoolKey(username, provider, keyValue, keyId = null, proxyUrl = "") {
+        return await this._fetch(`/settings/${encodeURIComponent(username)}/telemetry/keys`, {
+            method: 'POST',
+            body: JSON.stringify({ provider, key_value: keyValue, key_id: keyId, proxy_url: proxyUrl })
+        });
+    }
+
+    async deletePoolKey(username, provider, keyId) {
+        return await this._fetch(`/settings/${encodeURIComponent(username)}/telemetry/keys/${encodeURIComponent(provider)}/${encodeURIComponent(keyId)}`, {
+            method: 'DELETE'
+        });
+    }
+
+    async fetchPoolProxies(username = "default_user") {
+        try {
+            return await this._fetch(`/settings/${encodeURIComponent(username)}/telemetry/proxies`);
+        } catch (e) {
+            console.error("Pool proxies fetch failed:", e);
+            return { proxies: [] };
+        }
+    }
+
+    async addPoolProxy(username, url) {
+        return await this._fetch(`/settings/${encodeURIComponent(username)}/telemetry/proxies`, {
+            method: 'POST',
+            body: JSON.stringify({ url })
+        });
+    }
+
+    async deletePoolProxy(username, proxyId) {
+        return await this._fetch(`/settings/${encodeURIComponent(username)}/telemetry/proxies/${encodeURIComponent(proxyId)}`, {
+            method: 'DELETE'
+        });
+    }
 }
 
 // Export a singleton instance globally for the App to use

@@ -690,6 +690,161 @@ async def get_settings(username: str, current_user: str = Depends(get_current_us
     db_conn = db.UserManager()
     return db_conn.get_user_settings(username)
 
+class KeyPayload(BaseModel):
+    model_config = {"extra": "forbid"}
+    provider: str
+    key_value: str
+    key_id: Optional[str] = None
+    proxy_url: Optional[str] = ""
+
+@app.get("/settings/{username}/telemetry")
+async def get_settings_telemetry(username: str, current_user: str = Depends(get_current_user)):
+    if username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
+    
+    # 1. Redis pool status
+    pool_status = {"active": False, "reason": "Redis module not loaded"}
+    daemon_heartbeat = None
+    try:
+        from redis_pool import pool
+        pool_status = pool.get_pool_status()
+        
+        # Check heartbeat
+        import redis_client
+        if redis_client.is_active():
+            hb = redis_client.get("q:daemon:heartbeat")
+            if hb:
+                daemon_heartbeat = float(hb.decode('utf-8'))
+    except Exception as e:
+        pool_status = {"active": False, "error": str(e)}
+        
+    # 2. Database Stats & Observations (Dissonance log)
+    node_count = 0
+    link_count = 0
+    recent_dissonances = []
+    
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db.DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM zettel_nodes WHERE username=?", (username,))
+        node_count = c.fetchone()[0]
+        
+        c.execute("SELECT COUNT(*) FROM zettel_links WHERE source_node_id IN (SELECT id FROM zettel_nodes WHERE username=?)", (username,))
+        link_count = c.fetchone()[0]
+        
+        # Recent observations (dissonances)
+        c.execute("""
+            SELECT id, persona, event_type, content, reflection_score, timestamp 
+            FROM observations 
+            WHERE username=? 
+            ORDER BY id DESC LIMIT 10
+        """, (username,))
+        rows = c.fetchall()
+        recent_dissonances = [
+            {
+                "id": r[0],
+                "persona": r[1],
+                "event_type": r[2],
+                "content": r[3],
+                "reflection_score": r[4],
+                "timestamp": r[5]
+            }
+            for r in rows
+        ]
+        conn.close()
+    except Exception as e:
+        print(f"Error querying telemetry stats: {e}")
+        
+    return {
+        "redis_pool": pool_status,
+        "daemon_heartbeat": daemon_heartbeat,
+        "zettel_stats": {
+            "node_count": node_count,
+            "link_count": link_count
+        },
+        "recent_dissonances": recent_dissonances
+    }
+
+@app.post("/settings/{username}/telemetry/keys")
+async def add_pool_key(username: str, payload: KeyPayload, current_user: str = Depends(get_current_user)):
+    if username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
+    try:
+        import redis_pool
+        success = redis_pool.pool.add_key(payload.provider, payload.key_value, payload.key_id, payload.proxy_url)
+        return {"success": success}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/settings/{username}/telemetry/keys/{provider}/{key_id}")
+async def delete_pool_key(username: str, provider: str, key_id: str, current_user: str = Depends(get_current_user)):
+    if username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
+    try:
+        import redis_pool
+        if not redis_pool.pool.is_active():
+            raise HTTPException(status_code=400, detail="Redis pool is inactive")
+        redis_key = f"q:pool:key:{provider}:{key_id}"
+        redis_pool.pool.redis.delete(redis_key)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class ProxyPayload(BaseModel):
+    model_config = {"extra": "forbid"}
+    url: str
+
+@app.get("/settings/{username}/telemetry/proxies")
+async def list_pool_proxies(username: str, current_user: str = Depends(get_current_user)):
+    if username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
+    try:
+        import redis_pool
+        if not redis_pool.pool.is_active():
+            return {"proxies": []}
+        keys = redis_pool.pool.redis.keys("q:pool:proxy:*")
+        proxies_list = []
+        for k in keys:
+            data = redis_pool.pool.redis.hgetall(k)
+            fields = {key.decode('utf-8'): val.decode('utf-8') for key, val in data.items()}
+            k_str = k.decode('utf-8')
+            proxy_id = k_str.split(":")[-1]
+            proxies_list.append({
+                "id": proxy_id,
+                "url": fields.get("url", ""),
+                "status": fields.get("status", "HEALTHY"),
+                "failures": int(fields.get("failures", 0))
+            })
+        return {"proxies": proxies_list}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/settings/{username}/telemetry/proxies")
+async def add_pool_proxy_endpoint(username: str, payload: ProxyPayload, current_user: str = Depends(get_current_user)):
+    if username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
+    try:
+        import redis_pool
+        success = redis_pool.pool.add_pool_proxy(payload.url)
+        return {"success": success}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/settings/{username}/telemetry/proxies/{proxy_id}")
+async def delete_pool_proxy_endpoint(username: str, proxy_id: str, current_user: str = Depends(get_current_user)):
+    if username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
+    try:
+        import redis_pool
+        if not redis_pool.pool.is_active():
+            raise HTTPException(status_code=400, detail="Redis pool is inactive")
+        redis_key = f"q:pool:proxy:{proxy_id}"
+        redis_pool.pool.redis.delete(redis_key)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/settings")
 async def update_settings(payload: SettingsPayload, current_user: str = Depends(get_current_user)):
     if payload.username != current_user:

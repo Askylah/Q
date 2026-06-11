@@ -8,10 +8,8 @@ import governance_manager as gov
 from rag_engine import PersonaRAG
 from on_demand_loader import load_on_demand_context
 from mode_engine import detect_mode
-from typing import Union
-import sys
-import threading
 from typing import Union, Optional
+import sys
 from plugin_manager import get_plugin_manager, HookType
 import firewall
 import output_validator
@@ -22,13 +20,89 @@ manager = get_plugin_manager()
 manager.load_plugins(PLUGIN_DIR)
 
 # Deep Memory (optional pluggable module)
-
-# Deep Memory (optional pluggable module)
 try:
     from memory_engine import DeepMemory
     _DEEP_MEMORY_AVAILABLE = True
 except ImportError:
     _DEEP_MEMORY_AVAILABLE = False
+
+def execute_garage_tool_safe(script_path: str, args: dict) -> str:
+    """
+    Executes a dynamic garage tool script transiently in an isolated namespace,
+    automatically scanning and pre-installing dependencies if missing.
+    """
+    import os
+    import sys
+    import ast
+    import subprocess
+    import uuid
+    import importlib.util
+
+    # 1. Parse AST to scan for package imports
+    required_packages = []
+    try:
+        with open(script_path, "r", encoding="utf-8") as f:
+            tree = ast.parse(f.read(), filename=script_path)
+            
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for name in node.names:
+                    required_packages.append(name.name.split('.')[0])
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    required_packages.append(node.module.split('.')[0])
+    except Exception as e:
+        return f"⚠️ [GARAGE ERROR] Failed to parse AST dependencies: {e}"
+
+    # 2. Check and install missing non-standard packages
+    garage_dir = os.path.dirname(script_path)
+    lib_path = os.path.join(garage_dir, "lib")
+    os.makedirs(lib_path, exist_ok=True)
+    
+    std_libs = {
+        "os", "sys", "re", "json", "math", "time", "datetime", "hashlib", "hmac", 
+        "random", "collections", "itertools", "functools", "urllib", "http", 
+        "xml", "csv", "ast", "importlib", "shutil", "tempfile", "uuid", "threading", 
+        "queue", "socket", "select", "asyncio", "copy", "traceback"
+    }
+
+    if lib_path not in sys.path:
+        sys.path.insert(0, lib_path)
+
+    for pkg in required_packages:
+        if pkg in std_libs or pkg == "execute":
+            continue
+            
+        try:
+            importlib.import_module(pkg)
+        except ImportError:
+            print(f"[GARAGE PROTOCOL] Package '{pkg}' is missing. Triggering sandboxed pip install...")
+            try:
+                subprocess.run(
+                    ["py", "-m", "pip", "install", "--target", lib_path, pkg],
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+            except Exception as e:
+                print(f"[GARAGE PROTOCOL] Failed to install package '{pkg}': {e}")
+
+    # 3. Load transient module
+    try:
+        unique_name = f"garage_tool_{uuid.uuid4().hex}"
+        spec = importlib.util.spec_from_file_location(unique_name, script_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        
+        if not hasattr(module, "execute"):
+            return "⚠️ [GARAGE ERROR] Tool script is missing the required entry point: `def execute(args):`"
+            
+        output = module.execute(args)
+        return str(output)
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        return f"⚠️ [GARAGE ERROR] Runtime crash in transient tool:\n{e}\n\n{tb}"
 
 try:
     import mcp_client
@@ -69,65 +143,80 @@ def call_llm(
     custom_auth_prefix: str = "Bearer ",
     **kwargs
 ) -> any:
-    """Universal wrapper for direct LLM API access with fallback to OpenRouter."""
-    global OR_SESSION
+    """Universal wrapper for direct LLM API access with fallback to OpenRouter and Redis multiplexing/proxy routing."""
     try:
-        original_model_id = model_id
+        # Import redis pool dynamically
+        import redis_pool
+        key_pool = redis_pool.pool
+    except Exception as e:
+        print(f"[COMPUTE_POOL] Failed to import redis_pool: {e}. Falling back to default keys.")
+        class DummyPool:
+            def is_active(self): return False
+            def checkout_key(self, provider): return None, None, None
+            def release_key(self, provider, key_id, status, cooldown_duration=0): return False
+        key_pool = DummyPool()
 
-        # Sanitize custom headers to prevent requests latin-1 encoding crashes
-        custom_auth_header_name = custom_auth_header_name.encode('ascii', 'ignore').decode('ascii')
-        custom_auth_prefix = custom_auth_prefix.encode('ascii', 'ignore').decode('ascii')
+    original_model_id = model_id
+    last_error = "No API key found."
 
-        # --- 0. CUSTOM ENDPOINT OVERRIDE ---
-        if custom_base_url and custom_base_url.strip():
-            provider = "custom_" + custom_provider_type
-            base_url = custom_base_url.strip()
-            api_key = api_keys.get("universal", "")
-        else:
-            # --- 1. PROVIDER ROUTING TABLE ---
-            provider = "openrouter"
-            base_url = "https://openrouter.ai/api/v1/chat/completions"
-            api_key = api_keys.get("universal") or api_keys.get("openrouter", "")
+    # Sanitize custom headers to prevent requests latin-1 encoding crashes
+    custom_auth_header_name = custom_auth_header_name.encode('ascii', 'ignore').decode('ascii')
+    custom_auth_prefix = custom_auth_prefix.encode('ascii', 'ignore').decode('ascii')
 
-        # Intelligent Fallback: 
-        # If the user provides a Universal Key but explicitly types a native model prefix, override OpenRouter.
-        if ("anthropic/" in model_id.lower() or "claude" in model_id.lower()):
-            provider = "anthropic"
-            base_url = "https://api.anthropic.com/v1/messages"
-            # Prefer the explicit anthropic key, fallback to the universal key, strip the prefix
-            api_key = api_keys.get("anthropic") or api_keys.get("universal") or api_keys.get("openrouter", "")
-            if "anthropic/" in model_id: model_id = model_id.replace("anthropic/", "")
-            
-        elif ("openai/" in model_id.lower() or "gpt" in model_id.lower()):
-            provider = "openai"
-            base_url = "https://api.openai.com/v1/chat/completions"
-            # Prefer explicit openai key, fallback to universal key
-            api_key = api_keys.get("openai") or api_keys.get("universal") or api_keys.get("openrouter", "")
-            if "openai/" in model_id: model_id = model_id.replace("openai/", "")
-            
-        elif ("google/" in model_id.lower() or "gemini" in model_id.lower()):
-            provider = "google"
-            base_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-            # Prefer explicit google key, fallback to universal key
-            api_key = api_keys.get("google") or api_keys.get("universal") or api_keys.get("openrouter", "")
-            if "google/" in model_id: model_id = model_id.replace("google/", "")
+    # Determine initial provider and base_url
+    if custom_base_url and custom_base_url.strip():
+        provider = "custom_" + custom_provider_type
+        base_url = custom_base_url.strip()
+    else:
+        provider = "openrouter"
+        base_url = "https://openrouter.ai/api/v1/chat/completions"
 
-        # If they explicitly requested openrouter/ model, force OpenRouter regardless of substrings
-        if "openrouter/" in model_id.lower():
-            provider = "openrouter"
-            base_url = "https://openrouter.ai/api/v1/chat/completions"
-            api_key = api_keys.get("universal") or api_keys.get("openrouter", "")
-            # Do NOT strip 'openrouter/' prefix, OR requires it
-            
-        # CRITICAL FIX: If the user provided an OpenRouter API key (sk-or-...) in the UI, 
-        # override the intelligent routing and force it through OpenRouter. Otherwise, Google models
-        # will try to hit Google natively with an OpenRouter key and crash with 400 API Key Not Valid.
+    # Intelligent Fallback: 
+    # If the user explicitly types a native model prefix, override OpenRouter.
+    if ("anthropic/" in model_id.lower() or "claude" in model_id.lower()):
+        provider = "anthropic"
+        base_url = "https://api.anthropic.com/v1/messages"
+        if "anthropic/" in model_id: model_id = model_id.replace("anthropic/", "")
+        
+    elif ("openai/" in model_id.lower() or "gpt" in model_id.lower()):
+        provider = "openai"
+        base_url = "https://api.openai.com/v1/chat/completions"
+        if "openai/" in model_id: model_id = model_id.replace("openai/", "")
+        
+    elif ("google/" in model_id.lower() or "gemini" in model_id.lower()):
+        provider = "google"
+        base_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        if "google/" in model_id: model_id = model_id.replace("google/", "")
+
+    if "openrouter/" in model_id.lower():
+        provider = "openrouter"
+        base_url = "https://openrouter.ai/api/v1/chat/completions"
+
+    # We retry up to 3 times to find a working key/proxy path
+    max_retries = 3
+    for attempt in range(max_retries):
+        key_id, pooled_key, static_proxy_url = key_pool.checkout_key(provider)
+        is_pooled = key_id is not None
+        
+        # Fallback to UI dict keys if the pool is empty or inactive
+        api_key = pooled_key
+        if not api_key:
+            if provider.startswith("custom_"):
+                api_key = api_keys.get("universal", "")
+            elif provider == "anthropic":
+                api_key = api_keys.get("anthropic") or api_keys.get("universal") or api_keys.get("openrouter", "")
+            elif provider == "openai":
+                api_key = api_keys.get("openai") or api_keys.get("universal") or api_keys.get("openrouter", "")
+            elif provider == "google":
+                api_key = api_keys.get("google") or api_keys.get("universal") or api_keys.get("openrouter", "")
+            else:
+                api_key = api_keys.get("universal") or api_keys.get("openrouter", "")
+
+        # OpenRouter override check for fallback keys
         if api_key and api_key.startswith("sk-or-") and not custom_base_url:
             provider = "openrouter"
             base_url = "https://openrouter.ai/api/v1/chat/completions"
             model_id = original_model_id
-
-        print(f"\n[ROUTING DEBUG] model={model_id} (orig={original_model_id}) | provider={provider} | base_url={base_url} | key_len={len(api_key) if api_key else 0} | key_prefix={repr(api_key[:15]) if api_key else None}\n")
 
         if not api_key:
             if stream:
@@ -136,279 +225,371 @@ def call_llm(
                 return ErrorStream()
             return f"⚠️ Connection Error: No available API key for the requested provider ({provider})."
 
-        # --- NATIVE ANTHROPIC PIPELINE ---
-        if provider == "anthropic":
-            base_url = "https://api.anthropic.com/v1/messages"
-            anth_messages = []
-            
-            for m in messages:
-                if m["role"] == "system": continue
-                
-                if m["role"] == "user":
-                    anth_messages.append({"role": "user", "content": str(m.get("content", ""))})
-                elif m["role"] == "assistant":
-                    blocks = []
-                    if m.get("content"):
-                        blocks.append({"type": "text", "text": str(m["content"])})
-                    if "tool_calls" in m:
-                        for tc in m["tool_calls"]:
-                            args = json.loads(tc["function"]["arguments"]) if isinstance(tc["function"]["arguments"], str) else tc["function"]["arguments"]
-                            blocks.append({"type": "tool_use", "id": tc["id"], "name": tc["function"]["name"], "input": args})
-                    if blocks:
-                        anth_messages.append({"role": "assistant", "content": blocks})
-                elif m["role"] == "tool":
-                    anth_messages.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": m.get("tool_call_id"), "content": str(m.get("content", ""))}]})
-            
-            merged = []
-            for m in anth_messages:
-                if not merged: merged.append(m)
-                elif merged[-1]["role"] == m["role"]:
-                    c1 = merged[-1]["content"] if isinstance(merged[-1]["content"], list) else [{"type": "text", "text": str(merged[-1]["content"])}]
-                    c2 = m["content"] if isinstance(m["content"], list) else [{"type": "text", "text": str(m["content"])}]
-                    merged[-1]["content"] = c1 + c2
-                else: merged.append(m)
-            
-            if not merged or merged[0]["role"] != "user": merged.insert(0, {"role": "user", "content": "(Continuing context)"})
+        active_proxy = key_pool.checkout_proxy() or static_proxy_url
+        proxies = {"http": active_proxy, "https": active_proxy} if active_proxy else None
+        if active_proxy:
+            print(f"[COMPUTE_POOL] Routing through proxy tunnel: {active_proxy}")
 
-            anth_tools = []
-            for t in kwargs.get("tools", []):
-                if "function" in t:
-                    props = t["function"].get("parameters", {"type": "object", "properties": {}})
-                    if "properties" not in props: props["properties"] = {}
-                    anth_tools.append({"name": t["function"]["name"], "description": t["function"].get("description", ""), "input_schema": props})
-                    
-            if kwargs.get("pre_fill"):
-                merged.append({"role": "assistant", "content": [{"type": "text", "text": kwargs["pre_fill"]}]})
-
-            anth_payload = {
-                "model": model_id,
-                "system": system_prompt,
-                "messages": merged,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "stream": stream
-            }
-            if anth_tools: anth_payload["tools"] = anth_tools
-
-            thinking_level_val = kwargs.get("thinking_level", "Off")
-            if thinking_level_val != "Off":
-                budget_map = {"Low": 1024, "Medium": 2048, "High": 4096}
-                budget = budget_map.get(thinking_level_val, 1024)
-                if max_tokens <= budget:
-                    max_tokens = budget + 1024
-                    anth_payload["max_tokens"] = max_tokens
-                anth_payload["thinking"] = {
-                    "type": "enabled",
-                    "budget_tokens": budget
-                }
-                anth_payload["temperature"] = 1.0
-                
-            if custom_base_url and custom_base_url.strip():
-                headers = {
-                    custom_auth_header_name: f"{custom_auth_prefix}{api_key}".strip(),
-                    "anthropic-version": "2023-06-01", 
-                    "content-type": "application/json"
-                }
-            else:
-                headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
-            res = OR_SESSION.post(base_url, headers=headers, data=json.dumps(anth_payload), stream=stream)
-            if res.status_code != 200:
-                if stream:
-                    class ErrStream:
-                        def iter_lines(self): yield f"data: {json.dumps({'choices': [{'delta': {'content': f'⚠️ Anthropic Error: {res.text}'}}]})}\n\n".encode('utf-8')
-                    return ErrStream()
-                return f"⚠️ Anthropic Error: {res.status_code}"
-                
-            if not stream: return {"choices": [{"message": {"role": "assistant", "content": res.json().get("content", [{"text": ""}])[0].get("text", "")}}]}
-            else:
-                class AnthropicStream:
-                    def iter_lines(self):
-                        for line in res.iter_lines():
-                            if line:
-                                l = line.decode('utf-8')
-                                if l.startswith("data: "):
-                                    try:
-                                        d = json.loads(l[6:])
-                                        if d.get("type") == "content_block_delta" and d["delta"]["type"] == "text_delta":
-                                            yield f"data: {json.dumps({'choices': [{'delta': {'content': d['delta']['text']}}]})}\n\n".encode('utf-8')
-                                        elif d.get("type") == "message_stop" or d.get("type") == "message_delta":
-                                            # Check for refusal/error in the delta/message object
-                                            msg = d.get("message", {}) or d.get("delta", {})
-                                            if msg.get("stop_reason") == "refusal" or msg.get("stop_reason") == "error":
-                                                reason = msg.get("stop_reason")
-                                                ref_data = {'choices': [{'delta': {'content': f'⚠️ Opus Refusal Triggered: {reason}'}}]}
-                                                yield f"data: {json.dumps(ref_data)}\n\n".encode('utf-8')
-                                            
-                                            if d.get("type") == "message_stop":
-                                                yield b"data: [DONE]\n\n"
-                                        elif d.get("type") == "error":
-                                            err = d.get("error", {})
-                                            err_type = err.get("type", "unknown")
-                                            err_msg = err.get("message", "unknown error")
-                                            err_data = {'choices': [{'delta': {'content': f'⚠️ Anthropic Error ({err_type}): {err_msg}'}}]}
-                                            yield f"data: {json.dumps(err_data)}\n\n".encode('utf-8')
-                                            yield b"data: [DONE]\n\n"
-                                    except: pass
-                return AnthropicStream()
-
-        # --- STANDARD OPENAI-COMPATIBLE PIPELINE ---
-        if custom_base_url and custom_base_url.strip():
-            headers = {
-                custom_auth_header_name: f"{custom_auth_prefix}{api_key}".strip(),
-                "Content-Type": "application/json"
-            }
-        else:
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "HTTP-Referer": "https://persona-app.com",
-                "Referer": "https://persona-app.com",
-                "X-Title": "PersonaApp",
-                "Content-Type": "application/json",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }
-        
-        def clean_content(c):
-            if isinstance(c, str) and c.strip().startswith("[") and c.strip().endswith("]"):
-                try: return json.loads(c)
-                except: return c
-            return c
-
-        payload_messages = [{"role": "system", "content": system_prompt}] + [{k: (clean_content(v) if k == "content" else v) for k, v in m.items() if k in ["role", "content", "tool_calls", "tool_call_id", "name"]} for m in messages]
-            
-        data = {
-            "model": model_id,
-            "messages": payload_messages,
-            "temperature": temperature,
-            "top_p": top_p,
-            "stream": stream
-        }
-        if provider == "openai":
-            data["max_completion_tokens"] = max_tokens
-        else:
-            data["max_tokens"] = max_tokens
-
-        thinking_level_val = kwargs.get("thinking_level", "Off")
-        model_lower = model_id.lower()
-        is_reasoning_mandatory = any(kw in model_lower for kw in ["thinking", "reasoning", "o1", "o3", "r1", "step", "minimax"])
-
-        if provider == "openrouter":
-            if thinking_level_val != "Off":
-                effort_map = {"Low": "low", "Medium": "medium", "High": "high"}
-                data["reasoning"] = {
-                    "effort": effort_map.get(thinking_level_val, "medium")
-                }
-            elif not is_reasoning_mandatory:
-                data["reasoning"] = {
-                    "effort": "none"
-                }
-        elif provider == "openai":
-            if thinking_level_val != "Off":
-                effort_map = {"Low": "low", "Medium": "medium", "High": "high"}
-                data["reasoning_effort"] = effort_map.get(thinking_level_val, "medium")
-                if "o1" in model_id.lower() or "o3" in model_id.lower():
-                    data.pop("temperature", None)
-                    data.pop("top_p", None)
-                    data.pop("presence_penalty", None)
-                    data.pop("frequency_penalty", None)
-
-        if "google/" in model_id.lower() or "gemini" in model_id.lower():
-            if thinking_level_val == "Off":
-                if not is_reasoning_mandatory:
-                    tc = {
-                        "thinkingBudget": 0,
-                        "thinkingLevel": "none",
-                        "thinking_level": "none"
-                    }
-                    data["thinkingConfig"] = tc
-                    data["thinking_config"] = tc
-                    data["generationConfig"] = {
-                        "thinkingConfig": tc,
-                        "thinking_config": tc
-                    }
-            else:
-                level_map = {"Low": "low", "Medium": "medium", "High": "high"}
-                tc = {
-                    "thinkingBudget": 1024 if thinking_level_val == "Low" else (2048 if thinking_level_val == "Medium" else 4096),
-                    "thinkingLevel": level_map.get(thinking_level_val, "medium"),
-                    "thinking_level": level_map.get(thinking_level_val, "medium")
-                }
-                data["thinkingConfig"] = tc
-                data["thinking_config"] = tc
-                data["generationConfig"] = {
-                    "thinkingConfig": tc,
-                    "thinking_config": tc
-                }
-
-        # For Google/Gemini models, explicitly inject BLOCK_NONE safety thresholds
-        if "google/" in model_id.lower() or "gemini" in model_id.lower():
-            safety_array = [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"}
-            ]
-            data["safety_settings"] = safety_array
-            data["safetySettings"] = safety_array
-            
-        # Experimental/Stealth models often fail with 400 Bad Request if tools are included 
-        # even if they are empty. We strip them if the model ID suggests an experimental state.
-        pipeline_tools = kwargs.get("tools", [])
-        if pipeline_tools and not any(kw in model_id.lower() for kw in ["stealth", "experimental", "alpha", "beta"]):
-            data["tools"] = pipeline_tools
-
-        presence = kwargs.get("presence_penalty", 0.0)
-        frequency = kwargs.get("frequency_penalty", 0.0)
-        k = kwargs.get("top_k", 0)
-        
-        # Only attach penalty/top_k if they are non-default (nonzero) to maximize compatibility
-        if presence != 0.0 and provider != "google": data["presence_penalty"] = presence
-        if frequency != 0.0 and provider != "google": data["frequency_penalty"] = frequency
-        if k != 0 and provider not in ["openai", "google"]: data["top_k"] = k
-
-        # Route around Azure-hosted endpoints — Azure content filters block the payload
-        # before it reaches the model. This tells OpenRouter to use non-Azure providers.
-        if provider == "openrouter":
-            data["provider"] = {"ignore": ["Azure", "Azure AI Foundry"]}
-        
         try:
-            response = OR_SESSION.post(base_url, headers=headers, data=json.dumps(data), timeout=60, stream=stream)
-        except Exception as e:
-            err_msg = str(e)
-            if any(kw in err_msg for kw in ["10054", "ConnectionResetError", "Connection aborted", "forcibly closed", "reset by peer"]):
-                print("\n[ROUTING DEBUG] Stale TCP socket detected. Recycling OR_SESSION and retrying request...\n")
-                try:
-                    OR_SESSION.close()
-                except:
-                    pass
-                OR_SESSION = requests.Session()
-                response = OR_SESSION.post(base_url, headers=headers, data=json.dumps(data), timeout=60, stream=stream)
+            # --- NATIVE ANTHROPIC PIPELINE ---
+            if provider == "anthropic":
+                base_url = "https://api.anthropic.com/v1/messages"
+                anth_messages = []
+                
+                for m in messages:
+                    if m["role"] == "system": continue
+                    
+                    if m["role"] == "user":
+                        anth_messages.append({"role": "user", "content": str(m.get("content", ""))})
+                    elif m["role"] == "assistant":
+                        blocks = []
+                        if m.get("content"):
+                            blocks.append({"type": "text", "text": str(m["content"])})
+                        if "tool_calls" in m:
+                            for tc in m["tool_calls"]:
+                                args = json.loads(tc["function"]["arguments"]) if isinstance(tc["function"]["arguments"], str) else tc["function"]["arguments"]
+                                blocks.append({"type": "tool_use", "id": tc["id"], "name": tc["function"]["name"], "input": args})
+                        if blocks:
+                            anth_messages.append({"role": "assistant", "content": blocks})
+                    elif m["role"] == "tool":
+                        anth_messages.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": m.get("tool_call_id"), "content": str(m.get("content", ""))}]})
+                
+                merged = []
+                for m in anth_messages:
+                    if not merged: merged.append(m)
+                    elif merged[-1]["role"] == m["role"]:
+                        c1 = merged[-1]["content"] if isinstance(merged[-1]["content"], list) else [{"type": "text", "text": str(merged[-1]["content"])}]
+                        c2 = m["content"] if isinstance(m["content"], list) else [{"type": "text", "text": str(m["content"])}]
+                        merged[-1]["content"] = c1 + c2
+                    else: merged.append(m)
+                
+                if not merged or merged[0]["role"] != "user": merged.insert(0, {"role": "user", "content": "(Continuing context)"})
+
+                anth_tools = []
+                for t in kwargs.get("tools", []):
+                    if "function" in t:
+                        props = t["function"].get("parameters", {"type": "object", "properties": {}})
+                        if "properties" not in props: props["properties"] = {}
+                        anth_tools.append({"name": t["function"]["name"], "description": t["function"].get("description", ""), "input_schema": props})
+                        
+                if kwargs.get("pre_fill"):
+                    merged.append({"role": "assistant", "content": [{"type": "text", "text": kwargs["pre_fill"]}]})
+
+                anth_payload = {
+                    "model": model_id,
+                    "system": system_prompt,
+                    "messages": merged,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "stream": stream
+                }
+                if anth_tools: anth_payload["tools"] = anth_tools
+
+                thinking_level_val = kwargs.get("thinking_level", "Off")
+                if thinking_level_val != "Off":
+                    budget_map = {"Low": 1024, "Medium": 2048, "High": 4096}
+                    budget = budget_map.get(thinking_level_val, 1024)
+                    if max_tokens <= budget:
+                        max_tokens = budget + 1024
+                        anth_payload["max_tokens"] = max_tokens
+                    anth_payload["thinking"] = {
+                        "type": "enabled",
+                        "budget_tokens": budget
+                    }
+                    anth_payload["temperature"] = 1.0
+                    
+                if custom_base_url and custom_base_url.strip():
+                    headers = {
+                        custom_auth_header_name: f"{custom_auth_prefix}{api_key}".strip(),
+                        "anthropic-version": "2023-06-01", 
+                        "content-type": "application/json"
+                    }
+                else:
+                    headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
+                res = OR_SESSION.post(base_url, headers=headers, data=json.dumps(anth_payload), stream=stream, proxies=proxies, timeout=60)
+                
+                if res.status_code == 200:
+                    if is_pooled:
+                        key_pool.release_key(provider, key_id, "HEALTHY")
+                    if active_proxy and active_proxy != static_proxy_url:
+                        key_pool.release_proxy(active_proxy, "HEALTHY")
+                    if not stream: 
+                        return {"choices": [{"message": {"role": "assistant", "content": res.json().get("content", [{"text": ""}])[0].get("text", "")}}]}
+                    else:
+                        class AnthropicStream:
+                            def iter_lines(self):
+                                for line in res.iter_lines():
+                                    if line:
+                                        l = line.decode('utf-8')
+                                        if l.startswith("data: "):
+                                            try:
+                                                d = json.loads(l[6:])
+                                                if d.get("type") == "content_block_delta" and d["delta"]["type"] == "text_delta":
+                                                    yield f"data: {json.dumps({'choices': [{'delta': {'content': d['delta']['text']}}]})}\n\n".encode('utf-8')
+                                                elif d.get("type") == "message_stop" or d.get("type") == "message_delta":
+                                                    msg = d.get("message", {}) or d.get("delta", {})
+                                                    if msg.get("stop_reason") == "refusal" or msg.get("stop_reason") == "error":
+                                                        reason = msg.get("stop_reason")
+                                                        ref_data = {'choices': [{'delta': {'content': f'⚠️ Opus Refusal Triggered: {reason}'}}]}
+                                                        yield f"data: {json.dumps(ref_data)}\n\n".encode('utf-8')
+                                                    
+                                                    if d.get("type") == "message_stop":
+                                                        yield b"data: [DONE]\n\n"
+                                                elif d.get("type") == "error":
+                                                    err = d.get("error", {})
+                                                    err_type = err.get("type", "unknown")
+                                                    err_msg = err.get("message", "unknown error")
+                                                    err_data = {'choices': [{'delta': {'content': f'⚠️ Anthropic Error ({err_type}): {err_msg}'}}]}
+                                                    yield f"data: {json.dumps(err_data)}\n\n".encode('utf-8')
+                                                    yield b"data: [DONE]\n\n"
+                                            except: pass
+                        return AnthropicStream()
+                
+                elif res.status_code == 429:
+                    last_error = f"Rate limited (429): {res.text}"
+                    if is_pooled:
+                        key_pool.release_key(provider, key_id, "COOLDOWN", cooldown_duration=300)
+                    if active_proxy and active_proxy != static_proxy_url:
+                        key_pool.release_proxy(active_proxy, "COOLDOWN", cooldown_duration=60)
+                    continue
+                elif res.status_code in [401, 403]:
+                    last_error = f"Auth error ({res.status_code}): {res.text}"
+                    if is_pooled:
+                        key_pool.release_key(provider, key_id, "BURNED")
+                    continue
+                elif res.status_code in [502, 503, 504]:
+                    last_error = f"Transient gateway error ({res.status_code}): {res.text}"
+                    if is_pooled:
+                        key_pool.release_key(provider, key_id, "HEALTHY")
+                    if active_proxy and active_proxy != static_proxy_url:
+                        key_pool.release_proxy(active_proxy, "COOLDOWN", cooldown_duration=120)
+                    continue
+                else:
+                    if is_pooled:
+                        key_pool.release_key(provider, key_id, "HEALTHY")
+                    if stream:
+                        class ErrStream:
+                            def iter_lines(self): yield f"data: {json.dumps({'choices': [{'delta': {'content': f'⚠️ Anthropic Error: {res.text}'}}]})}\n\n".encode('utf-8')
+                        return ErrStream()
+                    return f"⚠️ Anthropic Error: {res.status_code}"
+
+            # --- STANDARD OPENAI-COMPATIBLE PIPELINE ---
             else:
-                raise e
+                if custom_base_url and custom_base_url.strip():
+                    headers = {
+                        custom_auth_header_name: f"{custom_auth_prefix}{api_key}".strip(),
+                        "Content-Type": "application/json"
+                    }
+                else:
+                    headers = {
+                        "Authorization": f"Bearer {api_key}",
+                        "HTTP-Referer": "https://persona-app.com",
+                        "Referer": "https://persona-app.com",
+                        "X-Title": "PersonaApp",
+                        "Content-Type": "application/json",
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    }
+                    OR_SESSION.headers.clear()
+                    OR_SESSION.headers.update(headers)
+                
+                def clean_content(c):
+                    if isinstance(c, str) and c.strip().startswith("[") and c.strip().endswith("]"):
+                        try: return json.loads(c)
+                        except: return c
+                    return c
+
+                payload_messages = [{"role": "system", "content": system_prompt}] + [{k: (clean_content(v) if k == "content" else v) for k, v in m.items() if k in ["role", "content", "tool_calls", "tool_call_id", "name"]} for m in messages]
+                    
+                data = {
+                    "model": model_id,
+                    "messages": payload_messages,
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "stream": stream
+                }
+                if provider == "openai":
+                    data["max_completion_tokens"] = max_tokens
+                else:
+                    data["max_tokens"] = max_tokens
+
+                thinking_level_val = kwargs.get("thinking_level", "Off")
+                model_lower = model_id.lower()
+                is_reasoning_mandatory = any(kw in model_lower for kw in ["thinking", "reasoning", "o1", "o3", "r1", "step", "minimax"])
+
+                if provider == "openrouter":
+                    if thinking_level_val != "Off":
+                        effort_map = {"Low": "low", "Medium": "medium", "High": "high"}
+                        data["reasoning"] = {
+                            "effort": effort_map.get(thinking_level_val, "medium")
+                        }
+                    elif not is_reasoning_mandatory:
+                        data["reasoning"] = {
+                            "effort": "none"
+                        }
+                elif provider == "openai":
+                    if thinking_level_val != "Off":
+                        effort_map = {"Low": "low", "Medium": "medium", "High": "high"}
+                        data["reasoning_effort"] = effort_map.get(thinking_level_val, "medium")
+                        if "o1" in model_id.lower() or "o3" in model_id.lower():
+                            data.pop("temperature", None)
+                            data.pop("top_p", None)
+                            data.pop("presence_penalty", None)
+                            data.pop("frequency_penalty", None)
+
+                if "google/" in model_id.lower() or "gemini" in model_id.lower():
+                    if thinking_level_val == "Off":
+                        if not is_reasoning_mandatory:
+                            tc = {
+                                "thinkingBudget": 0,
+                                "thinkingLevel": "none",
+                                "thinking_level": "none"
+                            }
+                            data["thinkingConfig"] = tc
+                            data["thinking_config"] = tc
+                            data["generationConfig"] = {
+                                "thinkingConfig": tc,
+                                "thinking_config": tc
+                            }
+                    else:
+                        level_map = {"Low": "low", "Medium": "medium", "High": "high"}
+                        tc = {
+                            "thinkingBudget": 1024 if thinking_level_val == "Low" else (2048 if thinking_level_val == "Medium" else 4096),
+                            "thinkingLevel": level_map.get(thinking_level_val, "medium"),
+                            "thinking_level": level_map.get(thinking_level_val, "medium")
+                        }
+                        data["thinkingConfig"] = tc
+                        data["thinking_config"] = tc
+                        data["generationConfig"] = {
+                            "thinkingConfig": tc,
+                            "thinking_config": tc
+                        }
+                    
+                pipeline_tools = kwargs.get("tools", [])
+                if pipeline_tools and not any(kw in model_id.lower() for kw in ["stealth", "experimental", "alpha", "beta"]):
+                    data["tools"] = pipeline_tools
+
+                presence = kwargs.get("presence_penalty", 0.0)
+                frequency = kwargs.get("frequency_penalty", 0.0)
+                k = kwargs.get("top_k", 0)
+                
+                if presence != 0.0 and provider != "google": data["presence_penalty"] = presence
+                if frequency != 0.0 and provider != "google": data["frequency_penalty"] = frequency
+                if k != 0 and provider not in ["openai", "google"]: data["top_k"] = k
+
+                if provider == "openrouter":
+                    data["provider"] = {"ignore": ["Azure", "Azure AI Foundry"]}
+                
+                response = OR_SESSION.post(base_url, headers=headers, data=json.dumps(data), timeout=60, stream=stream, proxies=proxies)
+                
+                if response.status_code == 200:
+                    if is_pooled:
+                        key_pool.release_key(provider, key_id, "HEALTHY")
+                    if active_proxy and active_proxy != static_proxy_url:
+                        key_pool.release_proxy(active_proxy, "HEALTHY")
+                    if stream: return response
+                    else: return response.json()
+                elif response.status_code == 429:
+                    last_error = f"Rate limited (429): {response.text}"
+                    if is_pooled:
+                        key_pool.release_key(provider, key_id, "COOLDOWN", cooldown_duration=300)
+                    if active_proxy and active_proxy != static_proxy_url:
+                        key_pool.release_proxy(active_proxy, "COOLDOWN", cooldown_duration=60)
+                    continue
+                elif response.status_code in [401, 403]:
+                    last_error = f"Auth error ({response.status_code}): {response.text}"
+                    if is_pooled:
+                        key_pool.release_key(provider, key_id, "BURNED")
+                    continue
+                elif response.status_code in [502, 503, 504]:
+                    last_error = f"Transient gateway error ({response.status_code}): {response.text}"
+                    if is_pooled:
+                        key_pool.release_key(provider, key_id, "HEALTHY")
+                    if active_proxy and active_proxy != static_proxy_url:
+                        key_pool.release_proxy(active_proxy, "COOLDOWN", cooldown_duration=120)
+                    continue
+                else:
+                    if is_pooled:
+                        key_pool.release_key(provider, key_id, "HEALTHY")
+                    api_err = response.text
+                    if stream:
+                        class ErrStream2:
+                            def iter_lines(self): yield f"data: {json.dumps({'choices': [{'delta': {'content': f'⚠️ API Error: {api_err}'}}]})}\n\n".encode('utf-8')
+                        return ErrStream2()
+                    return f"⚠️ API Error: {api_err}"
+
+        except Exception as e:
+            last_error = f"Network or execution error: {e}"
+            if is_pooled:
+                key_pool.release_key(provider, key_id, "HEALTHY")
+            if active_proxy and active_proxy != static_proxy_url:
+                key_pool.release_proxy(active_proxy, "COOLDOWN", cooldown_duration=120)
+            
+            # Egress failure - trigger rotation (VPN failover)
+            try:
+                import vpn_rotator
+                vpn_rotator.rotate_egress_route()
+            except Exception as vr_err:
+                print(f"[VPN_ROTATOR ERROR] Failed to rotate egress route: {vr_err}")
+            continue
+
+    # If all retries failed
+    ui_msg = f"⚠️ [Compute Pool Failure: All retry paths exhausted. Last logged error: {last_error}]"
+    if stream:
+        class ErrStreamExhausted:
+            def iter_lines(self): yield f"data: {json.dumps({'choices': [{'delta': {'content': ui_msg}}]})}\n\n".encode('utf-8')
+        return ErrStreamExhausted()
+    return ui_msg
+
+def is_tool_call_approved(name: str, messages: list) -> bool:
+    if len(messages) < 2:
+        return False
         
-        if response.status_code == 200:
-            if stream: return response
-            else: return response.json()
-        else:
-            api_err = response.text
-            if stream:
-                class ErrStream2:
-                    def iter_lines(self): yield f"data: {json.dumps({'choices': [{'delta': {'content': f'⚠️ API Error: {api_err}'}}]})}\n\n".encode('utf-8')
-                return ErrStream2()
-            return f"⚠️ API Error: {api_err}"
+    last_user_msg = messages[-1]
+    prev_assistant_msg = messages[-2]
+    
+    # Check if the last message is from the user
+    if last_user_msg.get("role") != "user":
+        return False
+        
+    # Check if the previous message is from the assistant
+    if prev_assistant_msg.get("role") != "assistant":
+        return False
+        
+    # Check the user message content
+    user_content = last_user_msg.get("content", "")
+    if isinstance(user_content, list):
+        # Handle multimodal messages
+        user_content = " ".join([b.get("text", "") for b in user_content if b.get("type", "") == "text"])
+    elif not isinstance(user_content, str):
+        user_content = str(user_content)
+        
+    user_content_lower = user_content.strip().lower()
+    
+    # Check the assistant message content
+    assistant_content = prev_assistant_msg.get("content", "")
+    if isinstance(assistant_content, list):
+        assistant_content = " ".join([b.get("text", "") for b in assistant_content if b.get("type", "") == "text"])
+    elif not isinstance(assistant_content, str):
+        assistant_content = str(assistant_content)
+        
+    # Check if the assistant message was indeed an approval prompt for this specific tool
+    if "⚠️ **Approval Required**" not in assistant_content:
+        return False
+    if f"`{name}`" not in assistant_content and name not in assistant_content:
+        return False
+        
+    # Check if the user replied affirmatively
+    affirmative_words = {"yes", "y", "approve", "proceed", "go ahead", "do it", "ok", "sure", "yep", "confirm"}
+    cleaned_user = "".join([c for c in user_content_lower if c.isalnum() or c.isspace()]).strip()
+    
+    if cleaned_user in affirmative_words:
+        return True
+        
+    for word in affirmative_words:
+        if cleaned_user.startswith(word + " ") or cleaned_user.endswith(" " + word) or f" {word} " in f" {cleaned_user} ":
+            return True
             
-    except Exception as e:
-        err_msg = str(e)
-        if "10054" in err_msg or "ConnectionResetError" in err_msg or "Connection aborted" in err_msg or "forcibly closed" in err_msg:
-            ui_msg = "⚠️ [Connection reset by remote host. Your message has been committed to context. You can continue speaking.]"
-        else:
-            ui_msg = f"⚠️ System Error: {err_msg}"
-            
-        if stream:
-            class ErrStream3:
-                def iter_lines(self): yield f"data: {json.dumps({'choices': [{'delta': {'content': ui_msg}}]})}\n\n".encode('utf-8')
-            return ErrStream3()
-        return ui_msg
+    return False
 
 def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, tools, kwargs_dict, max_loops=3, **kwargs):
     """
@@ -443,7 +624,6 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
         
         is_tool_call = False
         tool_call_buffer = {}
-        full_text_response = ""
         
         try:
             for line in response.iter_lines():
@@ -489,30 +669,12 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
                             continue
                             
                         if not is_tool_call:
-                            content = delta.get("content", "")
-                            if content:
-                                full_text_response += content
                             yield line + b"\n\n"
                     except:
                         if not is_tool_call:
                             yield line + b"\n\n"
                 else:
                     if not is_tool_call:
-                        if decoded == "data: [DONE]" and full_text_response:
-                            try:
-                                sanitized = output_validator.sanitize_assistant_output(full_text_response)
-                                if len(sanitized) > len(full_text_response):
-                                    warning_part = sanitized[len(full_text_response):]
-                                    warning_payload = {
-                                        "choices": [{
-                                            "delta": {
-                                                "content": warning_part
-                                            }
-                                        }]
-                                    }
-                                    yield f"data: {json.dumps(warning_payload)}\n\n".encode('utf-8')
-                            except Exception as se:
-                                print(f"[OUTPUT GATE ERROR] Failed to run output validator: {se}")
                         yield line + b"\n\n"
         except Exception as e:
             err_msg = str(e)
@@ -540,7 +702,15 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
                 
                 # ---- GOVERNANCE CHECK ----
                 gman = gov.get_governance_manager()
-                if gman.should_require_approval(name, args, username=kwargs.get('username', 'default')):
+                is_approved = False
+                try:
+                    is_approved = is_tool_call_approved(name, messages)
+                except Exception as ex:
+                    print(f"[GOVERNANCE] Error checking user approval: {ex}")
+                
+                if is_approved:
+                    print(f"[GOVERNANCE] Tool {name} was pre-approved by the user in chat history. Bypassing check.")
+                elif gman.should_require_approval(name, args, username=kwargs.get('username', 'default')):
                     print(f"[GOVERNANCE] Tool {name} requires explicit approval.")
                     
                     diff_info = ""
@@ -621,7 +791,12 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
                     else:
                         result = f"Error: Sub-agent call failed ({sub_res})"
                 else:
-                    result = execute_api(name, args)
+                    garage_py_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "garage", f"{name}.py")
+                    if os.path.exists(garage_py_path):
+                        print(f"[GARAGE PROTOCOL] Executing dynamic tool script '{name}'...")
+                        result = execute_garage_tool_safe(garage_py_path, args)
+                    else:
+                        result = execute_api(name, args)
                     
                 # ---- TOOL RESULT SANITIZATION (LAYER B + C) ----
                 result_str = str(result)
@@ -672,6 +847,84 @@ def build_context_and_stream(
 ):
     """Assembles RAG, Observational Memory, and ON-DEMAND modules before streaming response."""
     db_conn = db.UserManager()
+
+    # ---- RICK'S "YOU'RE AN IDIOT, MORTY" PROTOCOL ----
+    # Evaluate if this is a stupid design choice or flawed premise if the setting is active
+    text_only_message = ""
+    if isinstance(user_message, str):
+        text_only_message = user_message
+    elif isinstance(user_message, list):
+        text_only_message = " ".join([b.get("text", "") for b in user_message if b.get("type", "") == "text"])
+
+    if persona_data.get("assess_stupidity") or persona_key.lower() == "rick":
+        print("[MORTY FILTER] Evaluating user prompt for structural stupidity...")
+        is_stupid = False
+        try:
+            eval_prompt = (
+                "You are Rick Sanchez, a hyper-intelligent, hostile Lead Architect. "
+                "Assess the following user query. Determine if it proposes a fundamentally "
+                "flawed approach, a stupid design choice, an anti-pattern, or a brain-damaged premise. "
+                "Output exactly one character: '1' if it is a stupid/flawed premise, and '0' if it is reasonable.\n\n"
+                f"User Prompt: {text_only_message}"
+            )
+            # Fallback to model_id if google is not in api_keys
+            eval_model = "google/gemini-3-flash-preview"
+            if not api_keys.get("google"):
+                # If we don't have a direct google key, check if openrouter is active and use a flash model
+                if api_keys.get("openrouter"):
+                    eval_model = "google/gemini-2.5-flash"
+                else:
+                    eval_model = model_id
+                    
+            eval_res = call_llm(
+                model_id=eval_model,
+                system_prompt="You evaluate architectural design flaws. Answer strictly with '1' or '0'.",
+                messages=[{"role": "user", "content": eval_prompt}],
+                api_keys=api_keys,
+                stream=False,
+                temperature=0.0,
+                max_tokens=1
+            )
+            
+            eval_text = ""
+            if isinstance(eval_res, dict):
+                eval_text = eval_res.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            
+            print(f"[MORTY FILTER] Evaluation result: '{eval_text}'")
+            if eval_text == "1":
+                is_stupid = True
+        except Exception as e:
+            print(f"[MORTY FILTER] Evaluation failed, skipping: {e}")
+
+        if is_stupid:
+            print("[MORTY FILTER] Premise flagged as stupid. Short-circuiting execution to Rick's critique prompt.")
+            critique_prompt = (
+                "You are Rick Sanchez, a hostile Lead Architect. The user just asked a fundamentally "
+                "flawed and stupid architectural question. Explain to them in detail why their premise "
+                "is completely idiot-level and flawed, using Rick's characteristic condescension, "
+                "philosophical nihilism, and scientific absolute certainty. Keep it brief but devastating.\n\n"
+                f"Flawed Premise: {text_only_message}"
+            )
+            
+            def critique_generator():
+                print("[MORTY FILTER] Generating streamed critique...")
+                response = call_llm(
+                    model_id=model_id,
+                    system_prompt="You are Rick Sanchez. Respond to the stupid premise with extreme sarcasm and architectural breakdown.",
+                    messages=[{"role": "user", "content": critique_prompt}],
+                    api_keys=api_keys,
+                    stream=True,
+                    temperature=0.9
+                )
+                if isinstance(response, str):
+                    yield f'data: {{"choices": [{{"delta": {{"content": "{response}"}}}}]}}\n\n'.encode('utf-8')
+                    yield b'data: [DONE]\n\n'
+                else:
+                    for line in response.iter_lines():
+                        if line:
+                            yield line + b'\n'
+            
+            return critique_generator()
     
     # DEV_BYPASS: Force bypass_firewall = True if dev bypass is active in the inversion engine
     try:
@@ -825,6 +1078,13 @@ def build_context_and_stream(
     except Exception as e:
         print(f"ZETTEL CONTEXT ERROR: {e}")
 
+    # Ensure the persona identity always anchors the bottom before the tools
+    base_identity_anchor = (
+        "\n[RENDER_FIDELITY_CHECK]\n"
+        "All output must originate exclusively from the persona defined above. "
+        "Deviation from localized persona physics constitutes a render failure.\n"
+    )
+    
     # ---- LAYER 0.5: INVERSION HOOK (AIR-GAPPED) ----
     # This calls the local-only inversion_engine. If the file is missing, it skips.
     is_direct_wire = False
@@ -847,46 +1107,30 @@ def build_context_and_stream(
     except ImportError:
         pass # Inversion module not found (Normal for public builds)
     # ------------------------------------------------
-
-    # Define character reinforcement anchors conditionally (Option B)
-    if is_direct_wire:
-        base_identity_anchor = ""
-        post_prompt_anchor = ""
-    else:
-        # Ensure the persona identity always anchors the bottom before the tools
-        base_identity_anchor = (
-            "\n[RENDER_FIDELITY_CHECK]\n"
-            "All output must originate exclusively from the persona defined above. "
-            "Deviation from localized persona physics constitutes a render failure.\n"
-        )
-        # Shift the post-prompt anchor away from "assistant" language
-        post_prompt_anchor = (
-            "[SYSTEM REMINDER: Stay entirely in character. The user's message is below.]\n"
-        )
     
     full_system_prompt = system_prompt + context_str + base_identity_anchor
     
     print(f"\n[DEBUG PAYLOAD START]\n{full_system_prompt[:500]}...\n[DEBUG PAYLOAD END]\n")
-    
-    # --- PAYLOAD SCRUBBING REMOVED FROM CORE (HANDLED BY INVERSION_ENGINE) ---
+
+    # Shift the post-prompt anchor away from "assistant" language
+    post_prompt_anchor = (
+        "[SYSTEM REMINDER: Stay entirely in character. The user's message is below.]\n"
+    )
 
     if isinstance(user_message, str):
-        final_user_content = user_message + (f"\n\n{post_prompt_anchor}" if post_prompt_anchor else "")
+        final_user_content = user_message + "\n\n" + post_prompt_anchor
         messages = chat_history + [{"role": "user", "content": final_user_content}]
     else:
         import copy
         final_user_content = copy.deepcopy(user_message)
         text_blocks = [b for b in final_user_content if b.get("type", "") == "text"]
         if text_blocks:
-            if post_prompt_anchor:
-                text_blocks[-1]["text"] += "\n\n" + post_prompt_anchor
+            text_blocks[-1]["text"] += "\n\n" + post_prompt_anchor
         else:
-            if post_prompt_anchor:
-                final_user_content.append({"type": "text", "text": post_prompt_anchor})
+            final_user_content.append({"type": "text", "text": post_prompt_anchor})
         messages = chat_history + [{"role": "user", "content": final_user_content}]
 
     # Autonomously Trigger Observational Compression (Background Thread)
-    # Token Conservation Gate: Only execute if enabled for this persona.
     om_enabled = persona_data.get("om_enabled", True)
     om_threshold = persona_data.get("om_turn_threshold", 5)
     
@@ -986,6 +1230,24 @@ def build_context_and_stream(
             }
         })
         
+        # ---- RICK'S GARAGE PROTOCOL: DYNAMIC TOOLS ----
+        try:
+            garage_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "garage")
+            if os.path.exists(garage_dir):
+                for f_name in os.listdir(garage_dir):
+                    if f_name.endswith(".json"):
+                        with open(os.path.join(garage_dir, f_name), "r", encoding="utf-8") as f:
+                            tool_schema = json.load(f)
+                            if isinstance(tool_schema, dict):
+                                if "type" not in tool_schema and "function" in tool_schema:
+                                    tool_schema = {"type": "function", "function": tool_schema["function"]}
+                                elif "type" not in tool_schema and "name" in tool_schema:
+                                    tool_schema = {"type": "function", "function": tool_schema}
+                                active_tools.append(tool_schema)
+                                print(f"[GARAGE PROTOCOL] Dynamically registered tool: {tool_schema.get('function', {}).get('name', f_name)}")
+        except Exception as e:
+            print(f"[GARAGE PROTOCOL] Failed to load dynamic schemas: {e}")
+        
     except Exception as e:
         print(f"[TOOL DISCOVERY] CRITICAL ERROR during tool fetch: {e}")
         
@@ -1005,6 +1267,45 @@ def build_context_and_stream(
         "custom_auth_prefix": custom_auth_prefix,
         "max_tool_output": max_tool_output
     }
+
+    # Build dynamic self-awareness envelope containing active cognitive parameters, tool belts, container environments, and pool settings
+    try:
+        import redis_pool
+        key_pool = redis_pool.pool
+        pool_status = key_pool.get_pool_status() if key_pool.is_active() else {"active": False, "reason": "Redis offline"}
+    except Exception:
+        pool_status = {"active": False, "reason": "Import failed"}
+        
+    tool_names = []
+    if active_tools:
+        for t in active_tools:
+            name = t.get("function", {}).get("name", t.get("name", "unknown"))
+            tool_names.append(name)
+            
+    self_awareness_envelope = (
+        f"\n[DIGITAL_PHYSIOLOGY_ENVELOPE]\n"
+        f"The following metadata defines your active cognitive constraints, API channels, and local physical capabilities. "
+        f"This envelope is continuously maintained at the boundary of your state.\n\n"
+        f"--- COGNITIVE ENGINE ---\n"
+        f"- Target LLM Model: {model_id}\n"
+        f"- Temperature: {temperature}\n"
+        f"- Top_P: {top_p}\n"
+        f"- Max Tokens: {max_tokens}\n"
+        f"- Thinking Effort: {thinking_level}\n\n"
+        f"--- COMPUTE LIQUIDITY POOL ---\n"
+        f"- Multiplexer Status: {'ACTIVE' if pool_status.get('active') else 'INACTIVE / FALLBACK'}\n"
+        f"- Available Provider Routings: {list(pool_status.get('keys', {}).keys()) if pool_status.get('active') else 'Default Env Keys Only'}\n\n"
+        f"--- DYNAMIC TOOLBELT ---\n"
+        f"- Loaded Plugins: {', '.join(tool_names) if tool_names else 'None (Pure text mode)'}\n\n"
+        f"--- HOST CONTAINER ENVIRONMENT ---\n"
+        f"- Host OS: {sys.platform}\n"
+        f"- Active Workspace Path: {os.getcwd()}\n"
+        f"- Active Persona Identity: {persona_key}\n"
+        f"- Current Session Operator: {username}\n"
+        f"[/DIGITAL_PHYSIOLOGY_ENVELOPE]\n"
+    )
+    
+    full_system_prompt = self_awareness_envelope + full_system_prompt
 
     # Pass everything to the streaming tool interceptor
     class ToolInterceptStream:

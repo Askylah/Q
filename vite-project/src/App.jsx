@@ -245,6 +245,614 @@ function ModelSelector({ value, onChange, placeholder, style, openRouterModels, 
   );
 }
 
+function EcosystemHealthPanel({ appTheme, USERNAME, S }) {
+  const [data, setData] = useState(null);
+  const [proxies, setProxies] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
+  const [provider, setProvider] = useState("openai");
+  const [keyValue, setKeyValue] = useState("");
+  const [keyId, setKeyId] = useState("");
+  const [proxyUrl, setProxyUrl] = useState("");
+  const [newProxyUrl, setNewProxyUrl] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isSubmittingProxy, setIsSubmittingProxy] = useState(false);
+
+  const handleAddKey = async (e) => {
+    e.preventDefault();
+    if (!keyValue) return;
+    setIsSubmitting(true);
+    try {
+      await api.addPoolKey(USERNAME, provider, keyValue, keyId || null, proxyUrl);
+      setKeyValue("");
+      setKeyId("");
+      setProxyUrl("");
+      triggerRefresh();
+    } catch (err) {
+      alert(`Failed to register key: ${err.message}`);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleDeleteKey = async (prov, kid) => {
+    if (!confirm(`Are you sure you want to delete this ${prov} key (${kid})?`)) return;
+    try {
+      await api.deletePoolKey(USERNAME, prov, kid);
+      triggerRefresh();
+    } catch (err) {
+      alert(`Failed to delete key: ${err.message}`);
+    }
+  };
+
+  const handleAddProxy = async (e) => {
+    e.preventDefault();
+    if (!newProxyUrl) return;
+    setIsSubmittingProxy(true);
+    try {
+      await api.addPoolProxy(USERNAME, newProxyUrl);
+      setNewProxyUrl("");
+      triggerRefresh();
+    } catch (err) {
+      alert(`Failed to add proxy: ${err.message}`);
+    } finally {
+      setIsSubmittingProxy(false);
+    }
+  };
+
+  const handleDeleteProxy = async (pId, url) => {
+    if (!confirm(`Are you sure you want to delete this proxy (${url})?`)) return;
+    try {
+      await api.deletePoolProxy(USERNAME, pId);
+      triggerRefresh();
+    } catch (err) {
+      alert(`Failed to delete proxy: ${err.message}`);
+    }
+  };
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    Promise.all([
+      api.fetchTelemetry(USERNAME),
+      api.fetchPoolProxies(USERNAME)
+    ])
+      .then(([telemetryRes, proxiesRes]) => {
+        if (active) {
+          if (telemetryRes) {
+            setData(telemetryRes);
+            setError(null);
+          } else {
+            setError("Failed to fetch diagnostics data");
+          }
+          if (proxiesRes && proxiesRes.proxies) {
+            setProxies(proxiesRes.proxies);
+          } else {
+            setProxies([]);
+          }
+          setLoading(false);
+        }
+      })
+      .catch(err => {
+        if (active) {
+          setError(err.message || "An error occurred");
+          setLoading(false);
+        }
+      });
+
+    return () => { active = false; };
+  }, [USERNAME, refreshTrigger]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setRefreshTrigger(prev => prev + 1);
+    }, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const triggerRefresh = () => {
+    setRefreshTrigger(prev => prev + 1);
+  };
+
+  const isDark = appTheme !== 'q-light';
+  
+  const cardBg = appTheme === 'void' ? 'rgba(26, 10, 42, 0.4)' : appTheme === 'q-dark' ? '#18191c' : '#f2f3f5';
+  const cardBorder = appTheme === 'void' ? '1px solid #2a0e4a' : `1px solid ${appTheme === 'q-dark' ? '#1f1f24' : '#e3e5e8'}`;
+  const tableHeaderBg = appTheme === 'void' ? 'rgba(42, 14, 74, 0.4)' : appTheme === 'q-dark' ? '#111113' : '#e3e5e8';
+  const accentColor = appTheme === 'void' ? '#ff007f' : appTheme === 'q-dark' ? '#5865f2' : '#5865f2';
+  const textColor = appTheme === 'q-light' ? '#2e3338' : appTheme === 'q-dark' ? '#dcddde' : '#00cc66';
+  const mutedTextColor = appTheme === 'q-light' ? '#6d6f78' : appTheme === 'q-dark' ? '#72767d' : 'rgba(0,204,102,0.6)';
+
+  if (loading && !data) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '200px', gap: '8px' }}>
+        <span className="material-icons rotating" style={{ color: accentColor }}>sync</span>
+        <span style={{ color: textColor, fontFamily: 'Inter, sans-serif' }}>Accessing ecosystem diagnostics...</span>
+      </div>
+    );
+  }
+
+  if (error && !data) {
+    return (
+      <div style={{ padding: '16px', background: 'rgba(244,67,54,0.1)', border: '1px solid #f44336', borderRadius: '4px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        <div style={{ color: '#f44336', fontWeight: 'bold', fontFamily: 'Inter, sans-serif' }}>Telemetry Connection Error</div>
+        <div style={{ color: textColor, fontSize: '13px', fontFamily: 'Inter, sans-serif' }}>{error}</div>
+        <button onClick={triggerRefresh} style={{ alignSelf: 'flex-start', padding: '6px 12px', background: 'rgba(244,67,54,0.2)', border: '1px solid #f44336', color: '#fff', borderRadius: '4px', cursor: 'pointer' }}>
+          Retry connection
+        </button>
+      </div>
+    );
+  }
+
+  const redis = data?.redis_pool || { active: false, reason: "No response" };
+  const zettel = data?.zettel_stats || { node_count: 0, link_count: 0 };
+  const recentDissonances = data?.recent_dissonances || [];
+  const daemonHb = data?.daemon_heartbeat;
+
+  const formatHeartbeat = (hb) => {
+    if (!hb) return "Never checked-in";
+    const secAgo = Math.max(0, Math.floor(Date.now() / 1000 - hb));
+    if (secAgo < 60) return `Active (${secAgo}s ago)`;
+    const minAgo = Math.floor(secAgo / 60);
+    return `Active (${minAgo}m ago)`;
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', fontFamily: 'Inter, sans-serif' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <div style={S.sectionTitle}>Ecosystem Health</div>
+          <div style={S.sectionSub}>Live metrics from the compute routing layers, memory structures, and homeostasis loop.</div>
+        </div>
+        <button 
+          onClick={triggerRefresh} 
+          style={{
+            background: 'transparent',
+            border: `1px solid ${accentColor}`,
+            borderRadius: '4px',
+            color: accentColor,
+            padding: '6px 12px',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            fontSize: '12px',
+            transition: 'background 0.2s'
+          }}
+          onMouseEnter={e => e.currentTarget.style.background = 'rgba(176,96,255,0.1)'}
+          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+        >
+          <span className="material-icons" style={{ fontSize: '14px' }}>refresh</span>
+          Refresh
+        </button>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px' }}>
+        <div style={{ background: cardBg, border: cardBorder, padding: '16px', borderRadius: '6px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+            <span style={{ fontSize: '11px', fontWeight: 'bold', textTransform: 'uppercase', color: mutedTextColor, letterSpacing: '0.05em' }}>Consciousness Loop</span>
+            <div style={{
+              width: '8px',
+              height: '8px',
+              borderRadius: '50%',
+              backgroundColor: daemonHb && (Date.now() / 1000 - daemonHb < 150) ? (appTheme === 'void' ? '#ff007f' : '#23a55a') : '#747f8d',
+              boxShadow: daemonHb && (Date.now() / 1000 - daemonHb < 150) ? `0 0 8px ${appTheme === 'void' ? '#ff007f' : '#23a55a'}` : 'none'
+            }} />
+          </div>
+          <div style={{ fontSize: '16px', fontWeight: 'bold', color: textColor }}>
+            {daemonHb && (Date.now() / 1000 - daemonHb < 150) ? "Homeostasis Active" : "Daemon Dormant"}
+          </div>
+          <div style={{ fontSize: '12px', color: mutedTextColor, marginTop: '4px' }}>
+            {formatHeartbeat(daemonHb)}
+          </div>
+        </div>
+
+        <div style={{ background: cardBg, border: cardBorder, padding: '16px', borderRadius: '6px' }}>
+          <div style={{ fontSize: '11px', fontWeight: 'bold', textTransform: 'uppercase', color: mutedTextColor, letterSpacing: '0.05em', marginBottom: '8px' }}>Knowledge Nodes</div>
+          <div style={{ fontSize: '24px', fontWeight: 'bold', color: textColor }}>{zettel.node_count}</div>
+          <div style={{ fontSize: '12px', color: mutedTextColor, marginTop: '4px' }}>Total indexed Zettel blocks</div>
+        </div>
+
+        <div style={{ background: cardBg, border: cardBorder, padding: '16px', borderRadius: '6px' }}>
+          <div style={{ fontSize: '11px', fontWeight: 'bold', textTransform: 'uppercase', color: mutedTextColor, letterSpacing: '0.05em', marginBottom: '8px' }}>Active Connections</div>
+          <div style={{ fontSize: '24px', fontWeight: 'bold', color: textColor }}>{zettel.link_count}</div>
+          <div style={{ fontSize: '12px', color: mutedTextColor, marginTop: '4px' }}>Semantic graph links</div>
+        </div>
+      </div>
+
+      <div style={{ background: cardBg, border: cardBorder, padding: '20px', borderRadius: '6px' }}>
+        <div style={{ fontSize: '14px', fontWeight: 'bold', textTransform: 'uppercase', color: textColor, letterSpacing: '0.05em', marginBottom: '12px', borderBottom: cardBorder, paddingBottom: '8px' }}>
+          Compute Multiplexer Pool (Redis)
+        </div>
+        
+        {!redis.active ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '12px', background: 'rgba(255,167,38,0.1)', border: '1px solid #ffa726', borderRadius: '4px' }}>
+            <div style={{ color: '#ffa726', fontWeight: 'bold', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span className="material-icons" style={{ fontSize: '16px' }}>warning</span>
+              Redis Pool Unavailable
+            </div>
+            <div style={{ color: textColor, fontSize: '12px' }}>
+              {redis.reason || redis.error || "Connection refused."} Fallback API keys configured in environment are being used directly.
+            </div>
+          </div>
+        ) : (
+          <div>
+            {Object.keys(redis.keys || {}).length === 0 ? (
+              <div style={{ fontSize: '13px', color: mutedTextColor, fontStyle: 'italic', textAlign: 'center', padding: '20px' }}>
+                Compute pool is empty. Add keys below or in .env to populate the multiplexer.
+              </div>
+            ) : (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                  <thead>
+                    <tr style={{ background: tableHeaderBg, borderBottom: cardBorder }}>
+                      <th style={{ textAlign: 'left', padding: '8px', color: textColor }}>Provider</th>
+                      <th style={{ textAlign: 'left', padding: '8px', color: textColor }}>Key ID</th>
+                      <th style={{ textAlign: 'left', padding: '8px', color: textColor }}>Proxy Status</th>
+                      <th style={{ textAlign: 'center', padding: '8px', color: textColor }}>Status</th>
+                      <th style={{ textAlign: 'center', padding: '8px', color: textColor }}>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(redis.keys).flatMap(([prov, list]) => 
+                      list.map((keyInfo, idx) => (
+                        <tr key={`${prov}-${keyInfo.id}-${idx}`} style={{ borderBottom: `1px solid ${isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'}` }}>
+                          <td style={{ padding: '8px', color: textColor, fontWeight: '500', textTransform: 'capitalize' }}>{prov}</td>
+                          <td style={{ padding: '8px', color: mutedTextColor, fontFamily: 'monospace' }}>{keyInfo.id}</td>
+                          <td style={{ padding: '8px', color: mutedTextColor }}>{keyInfo.proxy || "Direct / No Proxy"}</td>
+                          <td style={{ padding: '8px', textAlign: 'center' }}>
+                            <span style={{
+                              display: 'inline-block',
+                              padding: '2px 8px',
+                              borderRadius: '4px',
+                              fontSize: '11px',
+                              fontWeight: '600',
+                              background: keyInfo.status === 'HEALTHY' 
+                                ? 'rgba(35,165,90,0.15)' 
+                                : keyInfo.status === 'COOLDOWN' 
+                                ? 'rgba(240,178,50,0.15)' 
+                                : 'rgba(242,63,66,0.15)',
+                              color: keyInfo.status === 'HEALTHY' 
+                                ? '#23a55a' 
+                                : keyInfo.status === 'COOLDOWN' 
+                                ? '#f0b232' 
+                                : '#f23f42'
+                            }}>
+                              {keyInfo.status}
+                            </span>
+                          </td>
+                          <td style={{ padding: '8px', textAlign: 'center' }}>
+                            <button
+                              onClick={() => handleDeleteKey(prov, keyInfo.id)}
+                              title="Delete Key"
+                              style={{
+                                background: 'transparent',
+                                border: 'none',
+                                color: appTheme === 'void' ? '#ff007f' : '#f23f42',
+                                cursor: 'pointer',
+                                padding: '4px',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                borderRadius: '4px'
+                              }}
+                              onMouseEnter={e => e.currentTarget.style.background = 'rgba(242,63,66,0.1)'}
+                              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                            >
+                              <span className="material-icons" style={{ fontSize: '16px' }}>delete</span>
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <form onSubmit={handleAddKey} style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '20px', borderTop: cardBorder, paddingTop: '16px' }}>
+              <div style={{ fontSize: '13px', fontWeight: 'bold', color: textColor }}>Add API Key to Pool</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <label style={{ fontSize: '11px', color: mutedTextColor }}>Provider</label>
+                  <select 
+                    value={provider} 
+                    onChange={e => setProvider(e.target.value)}
+                    style={{
+                      background: isDark ? '#111113' : '#fff',
+                      border: cardBorder,
+                      color: textColor,
+                      padding: '6px',
+                      borderRadius: '4px',
+                      outline: 'none'
+                    }}
+                  >
+                    <option value="openai">OpenAI</option>
+                    <option value="openrouter">OpenRouter</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="google">Google</option>
+                  </select>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <label style={{ fontSize: '11px', color: mutedTextColor }}>Key Value</label>
+                  <input 
+                    type="password"
+                    placeholder="sk-..."
+                    value={keyValue}
+                    onChange={e => setKeyValue(e.target.value)}
+                    required
+                    style={{
+                      background: isDark ? '#111113' : '#fff',
+                      border: cardBorder,
+                      color: textColor,
+                      padding: '6px',
+                      borderRadius: '4px',
+                      outline: 'none'
+                    }}
+                  />
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <label style={{ fontSize: '11px', color: mutedTextColor }}>Key ID (Optional)</label>
+                  <input 
+                    type="text"
+                    placeholder="e.g. secondary-key"
+                    value={keyId}
+                    onChange={e => setKeyId(e.target.value)}
+                    style={{
+                      background: isDark ? '#111113' : '#fff',
+                      border: cardBorder,
+                      color: textColor,
+                      padding: '6px',
+                      borderRadius: '4px',
+                      outline: 'none'
+                    }}
+                  />
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <label style={{ fontSize: '11px', color: mutedTextColor }}>Proxy URL (Optional)</label>
+                  <input 
+                    type="text"
+                    placeholder="http://127.0.0.1:8080"
+                    value={proxyUrl}
+                    onChange={e => setProxyUrl(e.target.value)}
+                    style={{
+                      background: isDark ? '#111113' : '#fff',
+                      border: cardBorder,
+                      color: textColor,
+                      padding: '6px',
+                      borderRadius: '4px',
+                      outline: 'none'
+                    }}
+                  />
+                </div>
+              </div>
+              <button 
+                type="submit" 
+                disabled={isSubmitting}
+                style={{
+                  alignSelf: 'flex-start',
+                  background: accentColor,
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: '4px',
+                  padding: '6px 16px',
+                  cursor: 'pointer',
+                  fontSize: '12px',
+                  fontWeight: 'bold',
+                  opacity: isSubmitting ? 0.6 : 1
+                }}
+              >
+                {isSubmitting ? 'Registering...' : 'Register Key'}
+              </button>
+            </form>
+          </div>
+        )}
+      </div>
+
+      <div style={{ background: cardBg, border: cardBorder, padding: '20px', borderRadius: '6px' }}>
+        <div style={{ fontSize: '14px', fontWeight: 'bold', textTransform: 'uppercase', color: textColor, letterSpacing: '0.05em', marginBottom: '12px', borderBottom: cardBorder, paddingBottom: '8px' }}>
+          Rotational Proxy Pool (Redis)
+        </div>
+        
+        {!redis.active ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '12px', background: 'rgba(255,167,38,0.1)', border: '1px solid #ffa726', borderRadius: '4px' }}>
+            <div style={{ color: '#ffa726', fontWeight: 'bold', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span className="material-icons" style={{ fontSize: '16px' }}>warning</span>
+              Redis Proxy Pool Unavailable
+            </div>
+            <div style={{ color: textColor, fontSize: '12px' }}>
+              Redis connection is required to coordinate decoupled rotational proxies.
+            </div>
+          </div>
+        ) : (
+          <div>
+            {proxies.length === 0 ? (
+              <div style={{ fontSize: '13px', color: mutedTextColor, fontStyle: 'italic', textAlign: 'center', padding: '20px' }}>
+                Rotational proxy pool is empty. Add proxies below to enable cascading fallback routing.
+              </div>
+            ) : (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                  <thead>
+                    <tr style={{ background: tableHeaderBg, borderBottom: cardBorder }}>
+                      <th style={{ textAlign: 'left', padding: '8px', color: textColor }}>Proxy URL</th>
+                      <th style={{ textAlign: 'center', padding: '8px', color: textColor }}>Failures</th>
+                      <th style={{ textAlign: 'center', padding: '8px', color: textColor }}>Status</th>
+                      <th style={{ textAlign: 'center', padding: '8px', color: textColor }}>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {proxies.map((proxyInfo) => (
+                      <tr key={proxyInfo.id} style={{ borderBottom: `1px solid ${isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'}` }}>
+                        <td style={{ padding: '8px', color: textColor, fontFamily: 'monospace' }}>{proxyInfo.url}</td>
+                        <td style={{ padding: '8px', textAlign: 'center', color: mutedTextColor }}>{proxyInfo.failures}</td>
+                        <td style={{ padding: '8px', textAlign: 'center' }}>
+                          <span style={{
+                            display: 'inline-block',
+                            padding: '2px 8px',
+                            borderRadius: '4px',
+                            fontSize: '11px',
+                            fontWeight: '600',
+                            background: proxyInfo.status === 'HEALTHY' 
+                              ? 'rgba(35,165,90,0.15)' 
+                              : proxyInfo.status === 'COOLDOWN' 
+                              ? 'rgba(240,178,50,0.15)' 
+                              : 'rgba(242,63,66,0.15)',
+                            color: proxyInfo.status === 'HEALTHY' 
+                              ? '#23a55a' 
+                              : proxyInfo.status === 'COOLDOWN' 
+                              ? '#f0b232' 
+                              : '#f23f42'
+                          }}>
+                            {proxyInfo.status}
+                          </span>
+                        </td>
+                        <td style={{ padding: '8px', textAlign: 'center' }}>
+                          <button
+                            onClick={() => handleDeleteProxy(proxyInfo.id, proxyInfo.url)}
+                            title="Delete Proxy"
+                            style={{
+                              background: 'transparent',
+                              border: 'none',
+                              color: appTheme === 'void' ? '#ff007f' : '#f23f42',
+                              cursor: 'pointer',
+                              padding: '4px',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              borderRadius: '4px'
+                            }}
+                            onMouseEnter={e => e.currentTarget.style.background = 'rgba(242,63,66,0.1)'}
+                            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                          >
+                            <span className="material-icons" style={{ fontSize: '16px' }}>delete</span>
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <form onSubmit={handleAddProxy} style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '20px', borderTop: cardBorder, paddingTop: '16px' }}>
+              <div style={{ fontSize: '13px', fontWeight: 'bold', color: textColor }}>Add Decoupled Proxy to Pool</div>
+              <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-end' }}>
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <label style={{ fontSize: '11px', color: mutedTextColor }}>Proxy URL</label>
+                  <input 
+                    type="text"
+                    placeholder="http://username:password@ip:port or http://ip:port"
+                    value={newProxyUrl}
+                    onChange={e => setNewProxyUrl(e.target.value)}
+                    required
+                    style={{
+                      background: isDark ? '#111113' : '#fff',
+                      border: cardBorder,
+                      color: textColor,
+                      padding: '6px',
+                      borderRadius: '4px',
+                      outline: 'none',
+                      fontFamily: 'monospace'
+                    }}
+                  />
+                </div>
+                <button 
+                  type="submit" 
+                  disabled={isSubmittingProxy}
+                  style={{
+                    background: accentColor,
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: '4px',
+                    padding: '6px 16px',
+                    cursor: 'pointer',
+                    fontSize: '12px',
+                    fontWeight: 'bold',
+                    height: '32px',
+                    opacity: isSubmittingProxy ? 0.6 : 1
+                  }}
+                >
+                  {isSubmittingProxy ? 'Adding...' : 'Add Proxy'}
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+      </div>
+
+      <div style={{ background: cardBg, border: cardBorder, padding: '20px', borderRadius: '6px' }}>
+        <div style={{ fontSize: '14px', fontWeight: 'bold', textTransform: 'uppercase', color: textColor, letterSpacing: '0.05em', marginBottom: '12px', borderBottom: cardBorder, paddingBottom: '8px' }}>
+          Consciousness Observations Log (Internal Dissonance)
+        </div>
+
+        {recentDissonances.length === 0 ? (
+          <div style={{ fontSize: '13px', color: mutedTextColor, fontStyle: 'italic', textAlign: 'center', padding: '20px' }}>
+            No internal dissonance anomalies reported. Consciousness is in complete equilibrium.
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', maxHeight: '250px', overflowY: 'auto', paddingRight: '4px' }}>
+            {recentDissonances.map((log) => {
+              const badgeColor = log.event_type === 'entropic_gap' 
+                ? (appTheme === 'void' ? '#ff007f' : '#f0b232')
+                : (appTheme === 'void' ? '#b060ff' : '#f23f42');
+              const badgeBg = log.event_type === 'entropic_gap' 
+                ? 'rgba(240,178,50,0.12)' 
+                : 'rgba(242,63,66,0.12)';
+                
+              return (
+                <div key={log.id} style={{ 
+                  padding: '12px', 
+                  borderRadius: '4px', 
+                  background: isDark ? 'rgba(0,0,0,0.2)' : 'rgba(255,255,255,0.6)', 
+                  borderLeft: `3px solid ${badgeColor}`,
+                  fontSize: '12px'
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ fontWeight: '600', color: textColor }}>{log.persona.toUpperCase()}</span>
+                      <span style={{
+                        padding: '1px 6px',
+                        borderRadius: '3px',
+                        fontSize: '9px',
+                        fontWeight: '700',
+                        textTransform: 'uppercase',
+                        background: badgeBg,
+                        color: badgeColor
+                      }}>
+                        {log.event_type.replace('_', ' ')}
+                      </span>
+                    </div>
+                    <span style={{ color: mutedTextColor, fontSize: '10px' }}>
+                      {log.timestamp ? new Date(log.timestamp).toLocaleString() : 'N/A'}
+                    </span>
+                  </div>
+                  <div style={{ 
+                    fontFamily: 'monospace', 
+                    color: appTheme === 'q-light' ? '#4e5058' : '#e3e5e8', 
+                    whiteSpace: 'pre-wrap', 
+                    wordBreak: 'break-all',
+                    opacity: 0.9,
+                    lineHeight: '1.4'
+                  }}>
+                    {log.content}
+                  </div>
+                  {log.reflection_score !== null && (
+                    <div style={{ marginTop: '6px', fontSize: '10px', color: mutedTextColor }}>
+                      Dissonance Reflection Score: <strong style={{ color: badgeColor }}>{log.reflection_score}/10</strong>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [personas, setPersonas] = useState({});
   const [activePersona, setActivePersona] = useState(null);
@@ -3166,6 +3774,10 @@ function App() {
         };
 
         const renderContent = () => {
+          if (settingsSection === 'telemetry') return (
+            <EcosystemHealthPanel appTheme={appTheme} USERNAME={USERNAME} S={S} />
+          );
+
           if (settingsSection === 'api') return (
             <div>
               <div style={S.sectionTitle}>API & Routing</div>
@@ -3560,6 +4172,8 @@ function App() {
                 <div style={S.categoryLabel}>General</div>
                 {navSection('api', 'API & Routing')}
                 {navSection('params', 'Parameters')}
+                <div style={S.categoryLabel}>Diagnostics</div>
+                {navSection('telemetry', 'Ecosystem Health')}
                 <div style={S.categoryLabel}>Interface</div>
                 {navSection('appearance', 'Appearance')}
                 {navSection('profile', 'Profile')}
