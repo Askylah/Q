@@ -1251,6 +1251,19 @@ def build_context_and_stream(
     except Exception as e:
         print(f"[TOOL DISCOVERY] CRITICAL ERROR during tool fetch: {e}")
         
+    # Deduplicate active_tools by function name to avoid API duplicate function declaration errors
+    seen_tool_names = set()
+    deduped_tools = []
+    for tool in active_tools:
+        name = tool.get("function", {}).get("name")
+        if name:
+            if name in seen_tool_names:
+                print(f"[TOOL DISCOVERY] Warning: Skipped duplicate declaration of tool: {name}")
+                continue
+            seen_tool_names.add(name)
+        deduped_tools.append(tool)
+    active_tools = deduped_tools
+
     print(f"[TOOL DISCOVERY COMPLETE] Total tools bound to payload: {len(active_tools)}\n")
 
     kwargs_dict = {
