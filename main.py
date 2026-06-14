@@ -30,12 +30,12 @@ def start_consciousness_daemon():
             import sys
             worker_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stream_worker.py")
             if os.path.exists(worker_path):
-                print(f"[SYSTEM] Spawning Consciousness Daemon background process: {worker_path}")
+                print(f"[SYSTEM] Spawning Consciousness Daemon background process: {worker_path}", flush=True)
                 subprocess.Popen([sys.executable, worker_path])
             else:
-                print(f"[SYSTEM ERROR] stream_worker.py not found at {worker_path}")
+                print(f"[SYSTEM ERROR] stream_worker.py not found at {worker_path}", flush=True)
         except Exception as e:
-            print(f"[SYSTEM ERROR] Failed to spawn Consciousness Daemon: {e}")
+            print(f"[SYSTEM ERROR] Failed to spawn Consciousness Daemon: {e}", flush=True)
             
     threading.Thread(target=run_daemon, daemon=True).start()
 
