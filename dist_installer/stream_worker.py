@@ -517,6 +517,16 @@ class ConsciousnessWorker:
             time.sleep(interval_seconds)
 
 if __name__ == "__main__":
+    import socket
+    # Socket-based single-instance lock to prevent duplicate runs
+    try:
+        _lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        _lock_socket.bind(('127.0.0.1', 18388))
+        _lock_socket.listen(1)
+    except socket.error:
+        print("[CONSCIOUSNESS_DAEMON] Another instance is already running. Exiting silently.")
+        sys.exit(0)
+
     worker = ConsciousnessWorker()
     # Read custom interval if passed
     interval = int(sys.argv[1]) if len(sys.argv) > 1 else 60

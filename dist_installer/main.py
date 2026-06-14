@@ -22,6 +22,23 @@ load_dotenv()
 
 app = FastAPI(title="PersonaApp API")
 
+@app.on_event("startup")
+def start_consciousness_daemon():
+    def run_daemon():
+        try:
+            import subprocess
+            import sys
+            worker_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stream_worker.py")
+            if os.path.exists(worker_path):
+                print(f"[SYSTEM] Spawning Consciousness Daemon background process: {worker_path}")
+                subprocess.Popen([sys.executable, worker_path])
+            else:
+                print(f"[SYSTEM ERROR] stream_worker.py not found at {worker_path}")
+        except Exception as e:
+            print(f"[SYSTEM ERROR] Failed to spawn Consciousness Daemon: {e}")
+            
+    threading.Thread(target=run_daemon, daemon=True).start()
+
 # ============================================================
 # LAYER 3: THE BLACKHOLE (GHOST MODE)
 # ============================================================
