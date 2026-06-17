@@ -79,7 +79,11 @@ class SkillOrchestrator:
         tools = []
         for sid in active:
             if sid in self.skills:
-                tools.extend(self.skills[sid].get("tools", []))
+                for tool in self.skills[sid].get("tools", []):
+                    t_copy = dict(tool)
+                    if "type" not in t_copy:
+                        t_copy["type"] = "function"
+                    tools.append(t_copy)
         return tools
 
     def get_active_prompts(self, session_id: str) -> str:

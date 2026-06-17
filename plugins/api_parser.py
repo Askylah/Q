@@ -71,6 +71,8 @@ def load_universal_schemas():
                             # Check if it is a pre-formatted OpenAI tool spec
                             elif "function" in schema_data and "name" in schema_data["function"]:
                                 func_name = schema_data["function"]["name"]
+                                if "type" not in schema_data:
+                                    schema_data["type"] = "function"
                                 tools.append(schema_data)
                                 
                                 # Setup custom execution spec

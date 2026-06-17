@@ -436,33 +436,10 @@ def call_llm(
                             data.pop("presence_penalty", None)
                             data.pop("frequency_penalty", None)
 
-                if "google/" in model_id.lower() or "gemini" in model_id.lower():
-                    if thinking_level_val == "Off":
-                        if not is_reasoning_mandatory:
-                            tc = {
-                                "thinkingBudget": 0,
-                                "thinkingLevel": "none",
-                                "thinking_level": "none"
-                            }
-                            data["thinkingConfig"] = tc
-                            data["thinking_config"] = tc
-                            data["generationConfig"] = {
-                                "thinkingConfig": tc,
-                                "thinking_config": tc
-                            }
-                    else:
-                        level_map = {"Low": "low", "Medium": "medium", "High": "high"}
-                        tc = {
-                            "thinkingBudget": 1024 if thinking_level_val == "Low" else (2048 if thinking_level_val == "Medium" else 4096),
-                            "thinkingLevel": level_map.get(thinking_level_val, "medium"),
-                            "thinking_level": level_map.get(thinking_level_val, "medium")
-                        }
-                        data["thinkingConfig"] = tc
-                        data["thinking_config"] = tc
-                        data["generationConfig"] = {
-                            "thinkingConfig": tc,
-                            "thinking_config": tc
-                        }
+                if provider == "google":
+                    if thinking_level_val != "Off":
+                        effort_map = {"Low": "low", "Medium": "medium", "High": "high"}
+                        data["reasoning_effort"] = effort_map.get(thinking_level_val, "medium")
                     
                 pipeline_tools = kwargs.get("tools", [])
                 if pipeline_tools and not any(kw in model_id.lower() for kw in ["stealth", "experimental", "alpha", "beta"]):
