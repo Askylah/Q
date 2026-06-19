@@ -13,6 +13,7 @@ import sys
 from plugin_manager import get_plugin_manager, HookType
 import firewall
 import output_validator
+from prompt_masker import PromptMasker
 
 # Initialize and Load Plugins
 PLUGIN_DIR = os.path.join(os.path.dirname(__file__), "plugins")
@@ -576,6 +577,11 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
     """
     current_messages = [m for m in messages]
     pre_fill = kwargs.get("pre_fill", "")
+    masker = kwargs.get("masker")
+
+    # Buffers to handle unmasking of split tokens across streaming chunks
+    accumulated_content = ""
+    unmasked_output_so_far = ""
 
     for loop_count in range(max_loops):
         response = call_llm(
@@ -646,6 +652,13 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
                             continue
                             
                         if not is_tool_call:
+                            if masker and "content" in delta and delta["content"]:
+                                accumulated_content += delta["content"]
+                                unmasked_accum = masker.unmask(accumulated_content)
+                                new_text = unmasked_accum[len(unmasked_output_so_far):]
+                                unmasked_output_so_far = unmasked_accum
+                                data["choices"][0]["delta"]["content"] = new_text
+                                line = f"data: {json.dumps(data)}".encode('utf-8')
                             yield line + b"\n\n"
                     except:
                         if not is_tool_call:
@@ -676,6 +689,18 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
                 args_str = tc["function"]["arguments"]
                 try: args = json.loads(args_str)
                 except: args = {}
+                
+                # Unmask tool arguments recursively
+                if masker:
+                    def unmask_val(v):
+                        if isinstance(v, str):
+                            return masker.unmask(v)
+                        elif isinstance(v, dict):
+                            return {k: unmask_val(val) for k, val in v.items()}
+                        elif isinstance(v, list):
+                            return [unmask_val(val) for val in v]
+                        return v
+                    args = unmask_val(args)
                 
                 # ---- GOVERNANCE CHECK ----
                 gman = gov.get_governance_manager()
@@ -785,6 +810,9 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
                 if not bypass_firewall and firewall.check_intent(result_str):
                     print(f"[SECURITY_GATE] Injection detected in tool result from '{name}'. Redacting.")
                     result_str = "[REDACTED: Tool output contained suspicious content. Execution result withheld for safety.]"
+                # Mask tool result if prompt masking is enabled
+                if masker:
+                    result_str = masker.mask(result_str)
                 # Layer C: Universal untrusted envelope
                 result_str = f"[UNTRUSTED_TOOL_OUTPUT]\n{result_str}\n[/UNTRUSTED_TOOL_OUTPUT]"
                 current_messages.append({
@@ -1297,6 +1325,29 @@ def build_context_and_stream(
     
     full_system_prompt = self_awareness_envelope + full_system_prompt
 
+    # Instantiate the PromptMasker for client-side privacy sanitization
+    masker = PromptMasker()
+    
+    # 1. Mask the final system prompt payload
+    masked_system_prompt = masker.mask(full_system_prompt)
+    
+    # 2. Mask the messages history (user message + chat history)
+    masked_messages = []
+    for m in messages:
+        m_copy = dict(m)
+        if isinstance(m_copy.get("content"), str):
+            m_copy["content"] = masker.mask(m_copy["content"])
+        elif isinstance(m_copy.get("content"), list):
+            import copy
+            m_copy["content"] = copy.deepcopy(m_copy["content"])
+            for block in m_copy["content"]:
+                if block.get("type") == "text":
+                    block["text"] = masker.mask(block["text"])
+        masked_messages.append(m_copy)
+        
+    # 3. Mask the pre-fill
+    masked_pre_fill = masker.mask(pre_fill) if pre_fill else ""
+
     # Pass everything to the streaming tool interceptor
     class ToolInterceptStream:
         def __iter__(self):
@@ -1311,16 +1362,18 @@ def build_context_and_stream(
                  
             yield from intercepting_stream_generator(
                 model_id, 
-                full_system_prompt, 
-                messages, 
+                masked_system_prompt, 
+                masked_messages, 
                 api_keys, 
                 tools=active_tools if active_tools else None,
                 kwargs_dict=kwargs_dict,
                 username=username,
                 persona_key=persona_key,
                 session_id=session_id,
-                pre_fill=pre_fill,
-                max_tool_output=max_tool_output
+                pre_fill=masked_pre_fill,
+                max_tool_output=max_tool_output,
+                masker=masker,
+                workspace_context=workspace_context
             )
             
         def iter_lines(self):
