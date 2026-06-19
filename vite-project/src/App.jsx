@@ -1923,15 +1923,22 @@ function App() {
   useEffect(() => {
     if (!activePersona) return;
 
-    // Clear the active buffer
+    // Instantly clear history buffer to prevent stale context bleeding
     setLiveStreamText("");
+    setChatHistory([]);
 
+    let active = true;
     const loadHistory = async () => {
       const history = await api.fetchChatHistory(activePersona, USERNAME, 50);
-      setChatHistory(history);
+      if (active) {
+        setChatHistory(history);
+      }
     };
 
     loadHistory();
+    return () => {
+      active = false;
+    };
   }, [activePersona, personas, USERNAME]);
 
   // Auto-scroll to bottom of chat
