@@ -110,6 +110,15 @@ try:
 except ImportError:
     mcp_client = None
 
+# Multi-server MCP Router (replaces single-server mcp_client for namespaced tools)
+try:
+    from mcp_router import get_router as _get_mcp_router
+    _MCP_ROUTER_AVAILABLE = True
+except ImportError:
+    _get_mcp_router = None
+    _MCP_ROUTER_AVAILABLE = False
+    print("[LLM_ENGINE] mcp_router not available — namespaced MCP tools disabled.")
+
 try:
     from api_parser import load_universal_schemas, execute_api
 except ImportError:
@@ -792,6 +801,10 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
                         result = sub_res.get("choices", [{}])[0].get("message", {}).get("content", "Error: No response from sub-agent.")
                     else:
                         result = f"Error: Sub-agent call failed ({sub_res})"
+                elif "__" in name and _MCP_ROUTER_AVAILABLE:
+                    # ── MCP Router dispatch (namespaced: server__tool) ──────────────────
+                    print(f"[MCP_ROUTER] Routing namespaced tool call: '{name}'")
+                    result = _get_mcp_router().route_call_sync(name, args)
                 else:
                     garage_py_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "garage", f"{name}.py")
                     if os.path.exists(garage_py_path):
