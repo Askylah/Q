@@ -35,5 +35,3 @@ Rather than relying solely on probabilistic semantic intent, `firewall.py` enfor
 Located in `llm_engine.py`, this is the final failsafe before data reaches the model.
 *   Regardless of the source (Docker execution, API calls, web searches, or local files), **ALL** external data is mandatorily wrapped in `<untrusted_tool_output>` tags. This ensures the LLM mathematically separates structural instructions from untrusted data streams.
 
-## 🧪 Red-Teaming Usage
-Q is uniquely suited for red-teaming because you can simulate adversarial swarms. By deploying "Attacker" and "Defender" personas in a shared namespace, you can observe how agents attempt to bypass security layers or discover vulnerabilities in a zero-risk environment.
