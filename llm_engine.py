@@ -1,8 +1,10 @@
 import json
+import asyncio
 import threading
 import os
 import requests
 from datetime import datetime
+os.environ["GCP_METADATA_TIMEOUT"] = "1"
 import database as db
 import governance_manager as gov
 from rag_engine import PersonaRAG
@@ -15,6 +17,10 @@ import firewall
 import output_validator
 from prompt_masker import PromptMasker
 
+_MCP_TOOLS_CACHE = None
+_MCP_TOOLS_CACHE_TIME = 0.0
+_VERTEX_TOKEN_CACHE = None
+_VERTEX_TOKEN_CACHE_TIME = 0.0
 # Initialize and Load Plugins
 PLUGIN_DIR = os.path.join(os.path.dirname(__file__), "plugins")
 manager = get_plugin_manager()
@@ -126,6 +132,10 @@ except ImportError:
     def execute_api(name, args): return "Failsafe."
 
 OR_SESSION = requests.Session()
+adapter = requests.adapters.HTTPAdapter(pool_connections=100, pool_maxsize=100)
+OR_SESSION.mount("http://", adapter)
+OR_SESSION.mount("https://", adapter)
+
 
 def get_rag_engine():
     # Cache RAG globally on backend
@@ -167,6 +177,7 @@ def call_llm(
         key_pool = DummyPool()
 
     original_model_id = model_id
+    clean_model = model_id
     last_error = "No API key found."
 
     # Sanitize custom headers to prevent requests latin-1 encoding crashes
@@ -174,6 +185,9 @@ def call_llm(
     custom_auth_prefix = custom_auth_prefix.encode('ascii', 'ignore').decode('ascii')
 
     # Determine initial provider and base_url
+    import os
+    use_vertex = bool(os.getenv("VERTEX_PROJECT_ID"))
+
     if custom_base_url and custom_base_url.strip():
         provider = "custom_" + custom_provider_type
         base_url = custom_base_url.strip()
@@ -181,46 +195,120 @@ def call_llm(
         provider = "openrouter"
         base_url = "https://openrouter.ai/api/v1/chat/completions"
 
-    # Intelligent Fallback: 
-    # If the user explicitly types a native model prefix, override OpenRouter.
-    if ("anthropic/" in model_id.lower() or "claude" in model_id.lower()):
-        provider = "anthropic"
-        base_url = "https://api.anthropic.com/v1/messages"
-        if "anthropic/" in model_id: model_id = model_id.replace("anthropic/", "")
+    # Intelligent Fallback & Environment-based Vertex Routing
+    if not (custom_base_url and custom_base_url.strip()):
+        is_google_model = ("google/" in model_id.lower() or "gemini" in model_id.lower())
+        is_anthropic_model = ("anthropic/" in model_id.lower() or "claude" in model_id.lower())
         
-    elif ("openai/" in model_id.lower() or "gpt" in model_id.lower()):
-        provider = "openai"
-        base_url = "https://api.openai.com/v1/chat/completions"
-        if "openai/" in model_id: model_id = model_id.replace("openai/", "")
-        
-    elif ("google/" in model_id.lower() or "gemini" in model_id.lower()):
-        provider = "google"
-        base_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-        if "google/" in model_id: model_id = model_id.replace("google/", "")
+        # Only route native Google models through Vertex. 
+        # All partner/Anthropic models bypass Vertex entirely to avoid OAuth latency.
+        if use_vertex and is_google_model:
+            # Vertex AI Route
+            try:
+                from google.auth import default
+                import google.auth.transport.requests
+                
+                gcp_project = os.getenv("VERTEX_PROJECT_ID")
+                gcp_location = os.getenv("VERTEX_LOCATION", "us-central1")
+                
+                creds, default_project = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+                if not gcp_project:
+                    gcp_project = default_project
+                    
+                if not gcp_project:
+                    raise ValueError("GCP Project ID not found. Please set VERTEX_PROJECT_ID in your .env file.")
+                    
+                global _VERTEX_TOKEN_CACHE, _VERTEX_TOKEN_CACHE_TIME
+                import time
+                now_time = time.time()
+                
+                # Check if we have a valid cached token (last refreshed < 50 mins ago)
+                if _VERTEX_TOKEN_CACHE is not None and (now_time - _VERTEX_TOKEN_CACHE_TIME) < 3000.0:
+                    api_key = _VERTEX_TOKEN_CACHE
+                else:
+                    print("[VERTEX] Refreshing OAuth access token...", flush=True)
+                    creds.refresh(google.auth.transport.requests.Request())
+                    api_key = creds.token
+                    _VERTEX_TOKEN_CACHE = api_key
+                    _VERTEX_TOKEN_CACHE_TIME = now_time
+            except Exception as gcp_err:
+                err_msg = f"⚠️ Vertex Auth Failure: {gcp_err}"
+                if stream:
+                    class ErrStreamVertex:
+                        def iter_lines(self): yield f"data: {json.dumps({'choices': [{'delta': {'content': err_msg}}]})}\n\n".encode('utf-8')
+                    return ErrStreamVertex()
+                return err_msg
 
-    if "openrouter/" in model_id.lower():
-        provider = "openrouter"
-        base_url = "https://openrouter.ai/api/v1/chat/completions"
+            if gcp_location.lower() == "global":
+                gcp_host = "aiplatform.googleapis.com"
+            elif gcp_location.lower() == "us":
+                gcp_host = "aiplatform.us.rep.googleapis.com"
+            else:
+                gcp_host = f"{gcp_location}-aiplatform.googleapis.com"
+
+            if is_anthropic_model:
+                provider = "anthropic"
+                clean_model = model_id
+                if "anthropic/" in clean_model.lower():
+                    clean_model = clean_model.replace("anthropic/", "")
+                base_url = f"https://{gcp_host}/v1/projects/{gcp_project}/locations/{gcp_location}/publishers/anthropic/models/{clean_model}:rawPredict"
+                model_id = clean_model
+            else:
+                provider = "google_vertex"
+                clean_model = model_id
+                if "google/" in clean_model.lower():
+                    clean_model = clean_model.replace("google/", "")
+                base_url = f"https://{gcp_host}/v1/projects/{gcp_project}/locations/{gcp_location}/endpoints/openapi/chat/completions"
+                if "/" not in clean_model:
+                    model_id = f"google/{clean_model}"
+                else:
+                    model_id = clean_model
+        else:
+            # Standard developer API fallbacks
+            if is_anthropic_model:
+                provider = "anthropic"
+                base_url = "https://api.anthropic.com/v1/messages"
+                if "anthropic/" in model_id: model_id = model_id.replace("anthropic/", "")
+                
+            elif ("openai/" in model_id.lower() or "gpt" in model_id.lower()):
+                provider = "openai"
+                base_url = "https://api.openai.com/v1/chat/completions"
+                if "openai/" in model_id: model_id = model_id.replace("openai/", "")
+                
+            elif is_google_model:
+                provider = "google"
+                base_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+                if "google/" in model_id: model_id = model_id.replace("google/", "")
+
+            if "openrouter/" in model_id.lower():
+                provider = "openrouter"
+                base_url = "https://openrouter.ai/api/v1/chat/completions"
 
     # We retry up to 3 times to find a working key/proxy path
-    max_retries = 3
+    max_retries = kwargs.get("max_retries", 3)
     for attempt in range(max_retries):
-        key_id, pooled_key, static_proxy_url = key_pool.checkout_key(provider)
-        is_pooled = key_id is not None
-        
-        # Fallback to UI dict keys if the pool is empty or inactive
-        api_key = pooled_key
-        if not api_key:
-            if provider.startswith("custom_"):
-                api_key = api_keys.get("universal", "")
-            elif provider == "anthropic":
-                api_key = api_keys.get("anthropic") or api_keys.get("universal") or api_keys.get("openrouter", "")
-            elif provider == "openai":
-                api_key = api_keys.get("openai") or api_keys.get("universal") or api_keys.get("openrouter", "")
-            elif provider == "google":
-                api_key = api_keys.get("google") or api_keys.get("universal") or api_keys.get("openrouter", "")
-            else:
-                api_key = api_keys.get("universal") or api_keys.get("openrouter", "")
+        if provider == "google_vertex" or (provider == "anthropic" and "aiplatform" in base_url):
+            key_id = None
+            pooled_key = None
+            static_proxy_url = None
+            is_pooled = False
+        else:
+            key_id, pooled_key, static_proxy_url = key_pool.checkout_key(provider)
+            is_pooled = key_id is not None
+            
+            # Fallback to UI dict keys if the pool is empty or inactive
+            api_key = pooled_key
+            if not api_key:
+                if provider.startswith("custom_"):
+                    api_key = api_keys.get("universal", "")
+                elif provider == "anthropic":
+                    api_key = api_keys.get("anthropic") or api_keys.get("universal") or api_keys.get("openrouter", "")
+                elif provider == "openai":
+                    api_key = api_keys.get("openai") or api_keys.get("universal") or api_keys.get("openrouter", "")
+                elif provider == "google":
+                    api_key = api_keys.get("google") or api_keys.get("universal") or api_keys.get("openrouter", "")
+                else:
+                    api_key = api_keys.get("universal") or api_keys.get("openrouter", "")
 
         # OpenRouter override check for fallback keys
         if api_key and api_key.startswith("sk-or-") and not custom_base_url:
@@ -243,7 +331,8 @@ def call_llm(
         try:
             # --- NATIVE ANTHROPIC PIPELINE ---
             if provider == "anthropic":
-                base_url = "https://api.anthropic.com/v1/messages"
+                if "aiplatform" not in base_url:
+                    base_url = "https://api.anthropic.com/v1/messages"
                 anth_messages = []
                 
                 for m in messages:
@@ -294,6 +383,14 @@ def call_llm(
                     "stream": stream
                 }
                 if anth_tools: anth_payload["tools"] = anth_tools
+                 
+                if kwargs.get("tool_choice"):
+                    choice = kwargs["tool_choice"]
+                    if isinstance(choice, dict) and choice.get("type") == "function":
+                        anth_payload["tool_choice"] = {
+                            "type": "tool",
+                            "name": choice["function"]["name"]
+                        }
 
                 thinking_level_val = kwargs.get("thinking_level", "Off")
                 if thinking_level_val != "Off":
@@ -308,7 +405,12 @@ def call_llm(
                     }
                     anth_payload["temperature"] = 1.0
                     
-                if custom_base_url and custom_base_url.strip():
+                if "aiplatform" in base_url:
+                    headers = {
+                        "Authorization": f"Bearer {api_key}",
+                        "content-type": "application/json"
+                    }
+                elif custom_base_url and custom_base_url.strip():
                     headers = {
                         custom_auth_header_name: f"{custom_auth_prefix}{api_key}".strip(),
                         "anthropic-version": "2023-06-01", 
@@ -335,7 +437,9 @@ def call_llm(
                                             try:
                                                 d = json.loads(l[6:])
                                                 if d.get("type") == "content_block_delta" and d["delta"]["type"] == "text_delta":
-                                                    yield f"data: {json.dumps({'choices': [{'delta': {'content': d['delta']['text']}}]})}\n\n".encode('utf-8')
+                                                    text = d['delta']['text']
+                                                    cleaned_text = text.replace("</node>", "").replace("</system_state>", "")
+                                                    yield f"data: {json.dumps({'choices': [{'delta': {'content': cleaned_text}}]})}\n\n".encode('utf-8')
                                                 elif d.get("type") == "message_stop" or d.get("type") == "message_delta":
                                                     msg = d.get("message", {}) or d.get("delta", {})
                                                     if msg.get("stop_reason") == "refusal" or msg.get("stop_reason") == "error":
@@ -361,11 +465,39 @@ def call_llm(
                         key_pool.release_key(provider, key_id, "COOLDOWN", cooldown_duration=300)
                     if active_proxy and active_proxy != static_proxy_url:
                         key_pool.release_proxy(active_proxy, "COOLDOWN", cooldown_duration=60)
+                    
+                    if "aiplatform" in base_url:
+                        print("[VERTEX FALLBACK] Rate limited/Quota exceeded on Vertex. Swapping to OpenRouter/Standard keys.")
+                        if api_keys.get("openrouter") or api_keys.get("universal"):
+                            provider = "openrouter"
+                            base_url = "https://openrouter.ai/api/v1/chat/completions"
+                            if "fable" in model_id.lower():
+                                model_id = "anthropic/claude-3.5-sonnet"
+                        else:
+                            provider = "anthropic"
+                            base_url = "https://api.anthropic.com/v1/messages"
+                            if "anthropic/" in model_id: model_id = model_id.replace("anthropic/", "")
+                            if "fable" in model_id.lower():
+                                model_id = "claude-3-5-sonnet-20241022"
                     continue
                 elif res.status_code in [401, 403]:
                     last_error = f"Auth error ({res.status_code}): {res.text}"
                     if is_pooled:
                         key_pool.release_key(provider, key_id, "BURNED")
+                    
+                    if "aiplatform" in base_url:
+                        print("[VERTEX FALLBACK] Auth error on Vertex. Swapping to OpenRouter/Standard keys.")
+                        if api_keys.get("openrouter") or api_keys.get("universal"):
+                            provider = "openrouter"
+                            base_url = "https://openrouter.ai/api/v1/chat/completions"
+                            if "fable" in model_id.lower():
+                                model_id = "anthropic/claude-3.5-sonnet"
+                        else:
+                            provider = "anthropic"
+                            base_url = "https://api.anthropic.com/v1/messages"
+                            if "anthropic/" in model_id: model_id = model_id.replace("anthropic/", "")
+                            if "fable" in model_id.lower():
+                                model_id = "claude-3-5-sonnet-20241022"
                     continue
                 elif res.status_code in [502, 503, 504]:
                     last_error = f"Transient gateway error ({res.status_code}): {res.text}"
@@ -399,8 +531,7 @@ def call_llm(
                         "Content-Type": "application/json",
                         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                     }
-                    OR_SESSION.headers.clear()
-                    OR_SESSION.headers.update(headers)
+
                 
                 def clean_content(c):
                     if isinstance(c, str) and c.strip().startswith("[") and c.strip().endswith("]"):
@@ -408,7 +539,16 @@ def call_llm(
                         except: return c
                     return c
 
-                payload_messages = [{"role": "system", "content": system_prompt}] + [{k: (clean_content(v) if k == "content" else v) for k, v in m.items() if k in ["role", "content", "tool_calls", "tool_call_id", "name"]} for m in messages]
+                local_messages = messages
+                pre_fill = kwargs.get("pre_fill", "")
+                if pre_fill and provider != "anthropic" and local_messages:
+                    local_messages = [dict(m) for m in messages]
+                    last_content = local_messages[-1].get("content", "")
+                    if isinstance(last_content, str):
+                        if not last_content.endswith(pre_fill):
+                            local_messages[-1]["content"] = last_content.rstrip() + f"\n{pre_fill}"
+
+                payload_messages = [{"role": "system", "content": system_prompt}] + [{k: (clean_content(v) if k == "content" else v) for k, v in m.items() if k in ["role", "content", "tool_calls", "tool_call_id", "name"]} for m in local_messages]
                     
                 data = {
                     "model": model_id,
@@ -424,7 +564,7 @@ def call_llm(
 
                 thinking_level_val = kwargs.get("thinking_level", "Off")
                 model_lower = model_id.lower()
-                is_reasoning_mandatory = any(kw in model_lower for kw in ["thinking", "reasoning", "o1", "o3", "r1", "step", "minimax"])
+                is_reasoning_mandatory = any(kw in model_lower for kw in ["thinking", "reasoning", "o1", "o3", "r1", "step", "minimax", "fable"])
 
                 if provider == "openrouter":
                     if thinking_level_val != "Off":
@@ -454,6 +594,8 @@ def call_llm(
                 pipeline_tools = kwargs.get("tools", [])
                 if pipeline_tools and not any(kw in model_id.lower() for kw in ["stealth", "experimental", "alpha", "beta"]):
                     data["tools"] = pipeline_tools
+                if kwargs.get("tool_choice"):
+                    data["tool_choice"] = kwargs["tool_choice"]
 
                 presence = kwargs.get("presence_penalty", 0.0)
                 frequency = kwargs.get("frequency_penalty", 0.0)
@@ -475,17 +617,44 @@ def call_llm(
                         key_pool.release_proxy(active_proxy, "HEALTHY")
                     if stream: return response
                     else: return response.json()
-                elif response.status_code == 429:
+                else:
+                    print(f"[COMPUTE_POOL ERROR] Request to {provider} ({base_url}) failed. Status: {response.status_code}. Response: {response.text}")
+                
+                if response.status_code == 429:
                     last_error = f"Rate limited (429): {response.text}"
                     if is_pooled:
                         key_pool.release_key(provider, key_id, "COOLDOWN", cooldown_duration=300)
                     if active_proxy and active_proxy != static_proxy_url:
                         key_pool.release_proxy(active_proxy, "COOLDOWN", cooldown_duration=60)
+                    
+                    if "aiplatform" in base_url:
+                        print("[VERTEX FALLBACK] Rate limited/Quota exceeded on Vertex. Swapping to OpenRouter/Standard keys.")
+                        if api_keys.get("openrouter") or api_keys.get("universal"):
+                            provider = "openrouter"
+                            base_url = "https://openrouter.ai/api/v1/chat/completions"
+                            if "fable" in model_id.lower():
+                                model_id = "anthropic/claude-3.5-sonnet"
+                        else:
+                            provider = "google"
+                            base_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+                            if "google/" in model_id: model_id = model_id.replace("google/", "")
                     continue
                 elif response.status_code in [401, 403]:
                     last_error = f"Auth error ({response.status_code}): {response.text}"
                     if is_pooled:
                         key_pool.release_key(provider, key_id, "BURNED")
+                    
+                    if "aiplatform" in base_url:
+                        print("[VERTEX FALLBACK] Auth error on Vertex. Swapping to OpenRouter/Standard keys.")
+                        if api_keys.get("openrouter") or api_keys.get("universal"):
+                            provider = "openrouter"
+                            base_url = "https://openrouter.ai/api/v1/chat/completions"
+                            if "fable" in model_id.lower():
+                                model_id = "anthropic/claude-3.5-sonnet"
+                        else:
+                            provider = "google"
+                            base_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+                            if "google/" in model_id: model_id = model_id.replace("google/", "")
                     continue
                 elif response.status_code in [502, 503, 504]:
                     last_error = f"Transient gateway error ({response.status_code}): {response.text}"
@@ -578,19 +747,132 @@ def is_tool_call_approved(name: str, messages: list) -> bool:
             
     return False
 
-def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, tools, kwargs_dict, max_loops=3, **kwargs):
+def _accumulate_tool_call(tool_call_buffer, delta):
+    if "tool_calls" in delta:
+        for tc in delta["tool_calls"]:
+            idx = tc.get("index", 0)
+            if idx not in tool_call_buffer:
+                tool_call_buffer[idx] = {
+                    "id": tc.get("id", ""),
+                    "type": tc.get("type", "function"),
+                    "function": {"name": "", "arguments": ""}
+                }
+            
+            for k, v in tc.items():
+                if k not in ["index", "id", "function", "type"]:
+                    tool_call_buffer[idx][k] = v
+                    
+            if "function" in tc:
+                f = tc["function"]
+                for fk, fv in f.items():
+                    if fk not in ["name", "arguments"]:
+                        if fk not in tool_call_buffer[idx]["function"]:
+                            tool_call_buffer[idx]["function"][fk] = fv
+                        else:
+                            if isinstance(tool_call_buffer[idx]["function"][fk], str) and isinstance(fv, str):
+                                tool_call_buffer[idx]["function"][fk] += fv
+                                
+                if "name" in f: tool_call_buffer[idx]["function"]["name"] += f["name"]
+                if "arguments" in f: tool_call_buffer[idx]["function"]["arguments"] += f["arguments"]
+
+def stream_reader_thread(response, q, loop, masker):
+    """Reads lines from the raw LLM response stream and queues them directly. Bypasses old sentence buffering."""
+    import time
+    
+    local_queue_buffer = []
+    last_flush_time = time.time()
+
+    def queue_item(item_type, val):
+        nonlocal last_flush_time
+        if item_type in ("raw", "error") and isinstance(val, (bytes, str)):
+            raw_val = val.encode('utf-8') if isinstance(val, str) else val
+            val = raw_val.rstrip(b'\r\n') + b'\n\n'
+        local_queue_buffer.append((item_type, val))
+        now = time.time()
+        if len(local_queue_buffer) >= 20 or (now - last_flush_time) >= 0.05:
+            flush_local_buffer()
+            last_flush_time = now
+
+    def flush_local_buffer():
+        if local_queue_buffer:
+            items_to_send = list(local_queue_buffer)
+            local_queue_buffer.clear()
+            def put_batch():
+                for itype, ival in items_to_send:
+                    q.put_nowait((itype, ival))
+            loop.call_soon_threadsafe(put_batch)
+
+    try:
+        for line in response.iter_lines():
+            if not line:
+                continue
+            decoded = line.decode('utf-8')
+            
+            if "⚠️ System Error:" in decoded or "⚠️ Connection Error:" in decoded or "⚠️ Stream Error:" in decoded:
+                queue_item("error", line.encode('utf-8') if isinstance(line, str) else line)
+                flush_local_buffer()
+                return
+            
+            if decoded.startswith("data: ") and decoded != "data: [DONE]":
+                try:
+                    data = json.loads(decoded[6:])
+                    delta = data.get("choices", [{}])[0].get("delta", {})
+                    
+                    if "tool_calls" in delta:
+                        queue_item("tool_call", delta)
+                        continue
+                    
+                    content = delta.get("content", "")
+                    if content:
+                        cleaned = content.replace("</node>", "").replace("</system_state>", "")
+                        if cleaned != content:
+                            delta["content"] = cleaned
+                            data["choices"][0]["delta"] = delta
+                            line = f"data: {json.dumps(data)}\n\n".encode('utf-8')
+                        else:
+                            line = line.encode('utf-8') if isinstance(line, str) else line
+                    else:
+                        line = line.encode('utf-8') if isinstance(line, str) else line
+                    
+                    queue_item("raw", line)
+                except Exception:
+                    queue_item("raw", line.encode('utf-8') if isinstance(line, str) else line)
+            else:
+                if decoded != "data: [DONE]":
+                    queue_item("raw", line.encode('utf-8') if isinstance(line, str) else line)
+        
+        flush_local_buffer()
+            
+    except Exception as e:
+        queue_item("exception", str(e))
+        flush_local_buffer()
+    finally:
+        loop.call_soon_threadsafe(q.put_nowait, ("done", None))
+
+def _format_exception(err_msg: str) -> bytes:
+    if "10054" in err_msg or "ConnectionResetError" in err_msg or "Connection aborted" in err_msg or "forcibly closed" in err_msg:
+        reset_content = "\n\n⚠️ *[Connection reset by remote host. Your message has been committed to context. You can continue speaking.]*"
+        return f"data: {json.dumps({'choices': [{'delta': {'content': reset_content}}]})}\n\n".encode('utf-8')
+    else:
+        err_content = f"\n\n⚠️ *[System Error during stream: {err_msg}]*"
+        return f"data: {json.dumps({'choices': [{'delta': {'content': err_content}}]})}\n\n".encode('utf-8')
+
+def _format_sse_delta(content: str) -> bytes:
+    data = {"choices": [{"delta": {"content": content}}]}
+    return f"data: {json.dumps(data)}\n\n".encode('utf-8')
+
+async def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, tools, kwargs_dict, max_loops=3, **kwargs):
     """
-    Consumes the SSE stream. If it detects `tool_calls` chunks, it buffers them, 
-    executes them locally, appends the result to the messages, and recurses 
-    to stream the final text response back to the user.
+    Consumes the SSE stream asynchronously. Integrates sentence-buffered, 
+    decoupled parallel translation routing, keep-alive SSE heartbeats, and 
+    a guaranteed [DONE] terminal sequence.
     """
     current_messages = [m for m in messages]
     pre_fill = kwargs.get("pre_fill", "")
     masker = kwargs.get("masker")
+    bypass_firewall = kwargs.get("bypass_firewall", False)
 
-    # Buffers to handle unmasking of split tokens across streaming chunks
-    accumulated_content = ""
-    unmasked_output_so_far = ""
+    done_yielded = False
 
     for loop_count in range(max_loops):
         response = call_llm(
@@ -693,27 +975,27 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
                 assistant_m["tool_calls"].append(tc)
             current_messages.append(assistant_m)
             
-            for idx, tc in tool_call_buffer.items():
-                name = tc["function"]["name"]
-                args_str = tc["function"]["arguments"]
-                try: args = json.loads(args_str)
-                except: args = {}
-                
-                # Unmask tool arguments recursively
-                if masker:
-                    def unmask_val(v):
-                        if isinstance(v, str):
-                            return masker.unmask(v)
-                        elif isinstance(v, dict):
-                            return {k: unmask_val(val) for k, val in v.items()}
-                        elif isinstance(v, list):
-                            return [unmask_val(val) for val in v]
-                        return v
-                    args = unmask_val(args)
-                
-                # ---- GOVERNANCE CHECK ----
-                gman = gov.get_governance_manager()
-                is_approved = False
+            if isinstance(response, str):
+                yield f'data: {{"choices": [{{"delta": {{"content": "{response}"}}}}]}}\n\n'.encode('utf-8')
+                break
+            
+            loop = asyncio.get_running_loop()
+            raw_queue = asyncio.Queue()
+            
+            reader_thread = threading.Thread(
+                target=stream_reader_thread,
+                args=(response, raw_queue, loop, masker),
+                daemon=True
+            )
+            reader_thread.start()
+            
+            pending_outputs = []
+            stream_finished = False
+            is_tool_call = False
+            tool_call_buffer = {}
+            
+            async def process_raw_queue():
+                nonlocal stream_finished, is_tool_call
                 try:
                     is_approved = is_tool_call_approved(name, messages)
                 except Exception as ex:
@@ -838,7 +1120,7 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
         else:
             break
 
-def build_context_and_stream(
+async def build_context_and_stream(
     user_message: Union[str, list], 
     persona_key: str, 
     username: str, 
@@ -864,7 +1146,14 @@ def build_context_and_stream(
     **kwargs
 ):
     """Assembles RAG, Observational Memory, and ON-DEMAND modules before streaming response."""
+    import time
+    t_start = time.time()
+    t_checkpoint = t_start
+    print(f"[PROFILE] 0. Entrance reached", flush=True)
     db_conn = db.UserManager()
+    if expert_model_id and expert_model_id.lower() == "none":
+        expert_model_id = None
+    print(f"[CHAT_STREAM] Request received: model_id={model_id}, expert_model_id={expert_model_id}", flush=True)
 
     # ---- RICK'S "YOU'RE AN IDIOT, MORTY" PROTOCOL ----
     # Evaluate if this is a stupid design choice or flawed premise if the setting is active
@@ -894,14 +1183,16 @@ def build_context_and_stream(
                 else:
                     eval_model = model_id
                     
-            eval_res = call_llm(
+            eval_res = await asyncio.to_thread(
+                call_llm,
                 model_id=eval_model,
                 system_prompt="You evaluate architectural design flaws. Answer strictly with '1' or '0'.",
                 messages=[{"role": "user", "content": eval_prompt}],
                 api_keys=api_keys,
                 stream=False,
                 temperature=0.0,
-                max_tokens=1
+                max_tokens=1,
+                max_retries=1
             )
             
             eval_text = ""
@@ -924,9 +1215,10 @@ def build_context_and_stream(
                 f"Flawed Premise: {text_only_message}"
             )
             
-            def critique_generator():
+            async def critique_generator():
                 print("[MORTY FILTER] Generating streamed critique...")
-                response = call_llm(
+                response = await asyncio.to_thread(
+                    call_llm,
                     model_id=model_id,
                     system_prompt="You are Rick Sanchez. Respond to the stupid premise with extreme sarcasm and architectural breakdown.",
                     messages=[{"role": "user", "content": critique_prompt}],
@@ -943,6 +1235,9 @@ def build_context_and_stream(
                             yield line + b'\n'
             
             return critique_generator()
+    
+    print(f"[PROFILE] 1. Morty Filter/Stupidity Check completed in {time.time() - t_checkpoint:.4f}s", flush=True)
+    t_checkpoint = time.time()
     
     # DEV_BYPASS: Force bypass_firewall = True if dev bypass is active in the inversion engine
     try:
@@ -964,8 +1259,7 @@ def build_context_and_stream(
     active_mode = mode_data["active_mode"]
     
     if expert_model_id and active_mode in ["technical_utility", "creative_writer"]:
-        print(f"[MODEL ROUTING] Mode Shift Detected: {active_mode.upper()}. Swapping from Base ({model_id}) to Expert ({expert_model_id}).")
-        model_id = expert_model_id
+        print(f"[MODEL ROUTING] Mode Shift Detected: {active_mode.upper()}. Model swapping disabled to preserve parent-child second brain loop. Using Base Model ({model_id}).")
     else:
         print(f"[MODEL ROUTING] Standard Operation: {active_mode.upper()}. Using Base Model ({model_id}).")
 
@@ -978,11 +1272,16 @@ def build_context_and_stream(
         if blocked:
             # We return a generic failure to the generator to drop the connection
             class FirewallDropStream:
-                def __iter__(self):
+                async def __aiter__(self):
                     yield f'data: {{"choices": [{{"delta": {{"content": "⚠️ [SECURITY_GATE] Intent violation detected. Connection dropped."}}}}]}}\n\n'.encode('utf-8')
                     yield b'data: [DONE]\n\n'
-                def iter_lines(self): yield from self.__iter__()
+                async def iter_lines(self):
+                    async for chunk in self:
+                        yield chunk
             return FirewallDropStream()
+ 
+    print(f"[PROFILE] 2. Mode Detection & Bouncer Gatekeepers completed in {time.time() - t_checkpoint:.4f}s", flush=True)
+    t_checkpoint = time.time()
 
     system_prompt = persona_data.get("system_prompt", "You are a helpful assistant.")
     if not persona_data.get("is_custom"):
@@ -1003,6 +1302,8 @@ def build_context_and_stream(
         print(f"[SECURITY_WARNING] Failed to load global_rules.txt: {e}")
         pass
     # ---------------------------
+    print(f"[PROFILE] 3. System Prompt & Global Rules load completed in {time.time() - t_checkpoint:.4f}s", flush=True)
+    t_checkpoint = time.time()
 
     # --- TEMPORAL AWARENESS LAYER ---
     now = datetime.now()
@@ -1207,12 +1508,23 @@ def build_context_and_stream(
         daemon=True
     ).start()
 
+    print(f"[PROFILE] 4. Temporal Awareness & Observers start completed in {time.time() - t_checkpoint:.4f}s", flush=True)
+    t_checkpoint = time.time()
+ 
     # ---- LAYER 5: DYNAMIC TOOL DISCOVERY (SKILL TREES / MCP) ----
     active_tools = []
     print("\n[TOOL DISCOVERY START]")
     try:
         if mcp_client:
-            tools = mcp_client.sync_get_mcp_tools()
+            global _MCP_TOOLS_CACHE, _MCP_TOOLS_CACHE_TIME
+            now_time = time.time()
+            if _MCP_TOOLS_CACHE is not None and (now_time - _MCP_TOOLS_CACHE_TIME) < 30.0:
+                tools = _MCP_TOOLS_CACHE
+            else:
+                mgr = await mcp_client.get_mcp_manager()
+                tools = await mgr.get_tools()
+                _MCP_TOOLS_CACHE = tools
+                _MCP_TOOLS_CACHE_TIME = now_time
             if tools:
                 active_tools.extend(tools)
                 print(f"[TOOL DISCOVERY] Successfully loaded {len(tools)} MCP tools.")
@@ -1247,6 +1559,23 @@ def build_context_and_stream(
                 }
             }
         })
+        
+        # Add Second Brain Delegation Skill
+        if expert_model_id:
+            active_tools.append({
+                "type": "function",
+                "function": {
+                    "name": "query_second_brain",
+                    "description": "Delegate a complex mathematical, logical, or deep analysis query to the secondary high-cognition brain. Returns raw formulas and proofs for you to digest.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {"type": "string", "description": "The complex query or math problem that requires deep reasoning."}
+                        },
+                        "required": ["prompt"]
+                    }
+                }
+            })
         
         # ---- RICK'S GARAGE PROTOCOL: DYNAMIC TOOLS ----
         try:
@@ -1283,6 +1612,8 @@ def build_context_and_stream(
     active_tools = deduped_tools
 
     print(f"[TOOL DISCOVERY COMPLETE] Total tools bound to payload: {len(active_tools)}\n")
+    print(f"[PROFILE] 5. MCP & Dynamic Tool Discovery completed in {time.time() - t_checkpoint:.4f}s", flush=True)
+    t_checkpoint = time.time()
 
     kwargs_dict = {
         "temperature": temperature,
@@ -1298,6 +1629,13 @@ def build_context_and_stream(
         "custom_auth_prefix": custom_auth_prefix,
         "max_tool_output": max_tool_output
     }
+    
+    # Force Second Brain delegation for technical/logical modes
+    if expert_model_id and active_mode in ["technical_utility", "creative_writer"]:
+        kwargs_dict["tool_choice"] = {
+            "type": "function",
+            "function": {"name": "query_second_brain"}
+        }
 
     # Build dynamic self-awareness envelope containing active cognitive parameters, tool belts, container environments, and pool settings
     try:
@@ -1337,6 +1675,16 @@ def build_context_and_stream(
     )
     
     full_system_prompt = self_awareness_envelope + full_system_prompt
+    if expert_model_id:
+        tool_instruction = (
+            f"\n[SYSTEM INSTRUCTION: SECOND BRAIN DELEGATION]\n"
+            f"You have access to a high-cognition secondary model via the 'query_second_brain' tool.\n"
+            f"For any complex, mathematical, logical, scientific, or academic questions (especially regarding topics like latent space topology or advanced calculations), "
+            f"you MUST delegate the core analysis to the second brain using the 'query_second_brain' tool instead of attempting to answer it yourself. "
+            f"Once the tool returns the logic, present the findings to the operator in your own persona's voice.\n"
+            f"[/SYSTEM INSTRUCTION]\n"
+        )
+        full_system_prompt = tool_instruction + full_system_prompt
 
     # Instantiate the PromptMasker for client-side privacy sanitization
     masker = PromptMasker()
@@ -1360,10 +1708,13 @@ def build_context_and_stream(
         
     # 3. Mask the pre-fill
     masked_pre_fill = masker.mask(pre_fill) if pre_fill else ""
-
+ 
+    print(f"[PROFILE] 6. Self-Awareness, Translation & Masking completed in {time.time() - t_checkpoint:.4f}s", flush=True)
+    print(f"[PROFILE-TOTAL] Total pre-flight duration: {time.time() - t_start:.4f}s", flush=True)
+ 
     # Pass everything to the streaming tool interceptor
     class ToolInterceptStream:
-        def __iter__(self):
+        async def __aiter__(self):
             # Check if reflection was triggered to inject the UI signal
             # We fetch the exact same log count logic the Reflector uses
             current_logs = db_conn.get_observation_log(username, persona_key, limit=100)
@@ -1373,7 +1724,7 @@ def build_context_and_stream(
                  # Yield a custom frontend control signal before the LLM starts streaming
                  yield f'data: {{"control": "reflection_started"}}\n\n'.encode('utf-8')
                  
-            yield from intercepting_stream_generator(
+            async for chunk in intercepting_stream_generator(
                 model_id, 
                 masked_system_prompt, 
                 masked_messages, 
@@ -1386,10 +1737,14 @@ def build_context_and_stream(
                 pre_fill=masked_pre_fill,
                 max_tool_output=max_tool_output,
                 masker=masker,
-                workspace_context=workspace_context
-            )
+                workspace_context=workspace_context,
+                bypass_firewall=bypass_firewall,
+                expert_model_id=expert_model_id
+            ):
+                yield chunk
             
-        def iter_lines(self):
-            yield from self.__iter__()
+        async def iter_lines(self):
+            async for chunk in self:
+                yield chunk
             
     return ToolInterceptStream()
