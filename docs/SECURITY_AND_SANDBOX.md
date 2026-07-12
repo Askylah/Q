@@ -9,7 +9,7 @@ Q employs a rigorous three-layer filtering system to neutralize prompt injection
 ### Layer A: Data Isolation (The Padded Room)
 The `workspace_engine.py` and `secure_runner.py` enforce kernel-level limits to ensure untrusted code cannot escape or exhaust system resources.
 *   **Resource Clamping:** Hard caps on RAM (512MB), CPU (1.0), and PIDs (64) to prevent exhaustion and fork-bombs. All containers use `--network none` for absolute isolation.
-*   **Temporal Guillotine:** Every process has a hard 30-second window. If it fails to complete, it is hit with a SIGKILL.
+*   **Temporal Guillotine:** Every process has a hard 15-second window. If it fails to complete, it is hit with a SIGKILL.
 *   **Dynamic Truncation:** To prevent context flooding, execution output is hard-capped (default 8KB). Anything larger is cleanly sliced.
 *   **Source Envelope:** Raw outputs from the sandbox are immediately wrapped in `<untrusted_tool_output>` XML tags at the source.
 
