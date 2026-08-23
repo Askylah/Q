@@ -25,7 +25,7 @@ import os
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from datetime import datetime, timezone, timedelta
-from rag_engine import get_shared_model
+from embedding_model import get_shared_model
 
 # ═══════════════════════════════════════════════════════════
 # CONSTANTS
@@ -121,6 +121,14 @@ def _ensure_table():
     columns = [row[1] for row in c.fetchall()]
     if 'embedding' not in columns:
         c.execute("ALTER TABLE deep_memories ADD COLUMN embedding BLOB")
+    # FIX(compounding-decay): watermark for incremental decay. Without it,
+    # decay_cycle() re-applied decay computed from TOTAL AGE on every call —
+    # and it is called on every interaction, so a 60-day-old memory lost ~2
+    # importance PER MESSAGE and any unprotected memory died within one
+    # conversation. Decay now applies only for full 30-day cycles elapsed
+    # since the last application.
+    if 'last_decay_at' not in columns:
+        c.execute("ALTER TABLE deep_memories ADD COLUMN last_decay_at TEXT")
         
     conn.commit()
     conn.close()
@@ -366,8 +374,12 @@ class DeepMemory:
                     mem_vec = np.frombuffer(am["embedding"], dtype=np.float32).reshape(1, -1)
                     sim = float(cosine_similarity(query_vec, mem_vec)[0][0])
                     
-                    # If high semantic overlap (Spark), reactivate
-                    if sim >= 0.4:
+                    # If high semantic overlap (Spark), reactivate.
+                    # FIX(zombie-memories): the spark bar sits ABOVE the retrieval
+                    # threshold (0.4). At 0.4 any archived memory near a common
+                    # topic was re-sparked (+2 importance) every time it was
+                    # brushed, so archiving could never stick.
+                    if sim >= 0.55:
                         print(f"[DEEP ECHO] Semantic reactivation: {am['id']} (sim: {sim:.2f})")
                         c.execute("""
                             UPDATE deep_memories 
@@ -427,7 +439,7 @@ class DeepMemory:
         c = conn.cursor()
         c.execute("""
             SELECT id, content, memory_type, importance, tags, 
-                   access_count, active, created_at
+                   access_count, active, created_at, last_decay_at
             FROM deep_memories
             WHERE username=? AND persona=? AND active=1
         """, (self.username, self.persona))
@@ -439,7 +451,7 @@ class DeepMemory:
         protected = 0
         
         for row in rows:
-            mem_id, content, mem_type, importance, tags_json, access_count, active, created_at = row
+            mem_id, content, mem_type, importance, tags_json, access_count, active, created_at, last_decay_at = row
             
             tags = json.loads(tags_json) if tags_json else []
             tag_set = {t.lower() for t in tags}
@@ -449,20 +461,24 @@ class DeepMemory:
                 protected += 1
                 continue
             
-            # Age check
+            # FIX(compounding-decay): measure elapsed time from the decay
+            # WATERMARK (falling back to created_at), not from birth. Only
+            # whole 30-day cycles are applied; the watermark advances by the
+            # cycles consumed so partial time is never lost or double-counted.
+            anchor_str = last_decay_at or created_at
             try:
-                created = datetime.fromisoformat(created_at)
-                if created.tzinfo is None:
-                    created = created.replace(tzinfo=timezone.utc)
-                age_days = (now - created).days
+                anchor = datetime.fromisoformat(anchor_str)
+                if anchor.tzinfo is None:
+                    anchor = anchor.replace(tzinfo=timezone.utc)
+                elapsed_days = (now - anchor).days
             except (ValueError, TypeError):
                 continue
             
-            if age_days < 30:
+            cycles = int(elapsed_days // 30)
+            if cycles < 1:
                 continue
             
-            # Calculate decay
-            cycles = age_days / 30
+            # Calculate decay for the elapsed whole cycles
             if mem_type in SLOW_DECAY_TYPES:
                 decay_amount = cycles * DECAY_RATE_SLOW
             else:
@@ -472,13 +488,20 @@ class DeepMemory:
             decay_amount = max(0, decay_amount - (access_count * 0.2))
             new_importance = max(0, round(importance - decay_amount))
             
+            # Advance the watermark by the cycles actually consumed (even if
+            # access resistance zeroed the decay), so resistance is applied
+            # per-cycle instead of letting elapsed cycles pile up forever.
+            new_anchor = (anchor + timedelta(days=cycles * 30)).isoformat()
+            
             if new_importance < importance:
                 if new_importance <= 0:
-                    c.execute("UPDATE deep_memories SET active=0, importance=0 WHERE id=?", (mem_id,))
+                    c.execute("UPDATE deep_memories SET active=0, importance=0, last_decay_at=? WHERE id=?", (new_anchor, mem_id))
                     archived += 1
                 else:
-                    c.execute("UPDATE deep_memories SET importance=? WHERE id=?", (new_importance, mem_id))
+                    c.execute("UPDATE deep_memories SET importance=?, last_decay_at=? WHERE id=?", (new_importance, new_anchor, mem_id))
                     decayed += 1
+            else:
+                c.execute("UPDATE deep_memories SET last_decay_at=? WHERE id=?", (new_anchor, mem_id))
         
         conn.commit()
         conn.close()
@@ -574,6 +597,15 @@ class DeepMemory:
         rows = c.fetchall()
         
         new_tags = set(new_memory.get("tags", []))
+        # FIX(reflection-clique): bookkeeping tags carry no content signal.
+        # Every Reflector bridge memory shares ["observation","auto-generated"]
+        # (+6) plus type match (+1), domain match (+2) and importance
+        # proximity (+1) = 10 points before a single word is compared, so all
+        # auto-generated observations wired into a near-complete clique that
+        # depth-2 involuntary recall then traversed as a firehose. Score
+        # associations on real content only.
+        SYSTEM_TAGS = {"observation", "auto-generated", "auto_generated", "system", "bridge"}
+        new_tags = {t for t in new_tags if t.lower() not in SYSTEM_TAGS}
         new_emotions = new_memory.get("emotions", {})
         new_domain = new_memory.get("domain", "")
         new_type = new_memory.get("memory_type", "")
@@ -586,6 +618,7 @@ class DeepMemory:
             mem_id, content, mem_type, domain, emo_json, tags_json, importance, conn_json = row
             
             mem_tags = set(json.loads(tags_json)) if tags_json else set()
+            mem_tags = {t for t in mem_tags if t.lower() not in SYSTEM_TAGS}
             mem_emotions = json.loads(emo_json) if emo_json else {}
             
             score = 0

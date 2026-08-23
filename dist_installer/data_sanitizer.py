@@ -1,11 +1,13 @@
 import re
 import uuid
+import os
+import json
 from typing import Dict, List, Tuple
 
-class PromptMasker:
+class DataSanitizer:
     """
-    Bidirectional entity masking utility.
-    Scans prompts for sensitive project assets, system paths, and emails,
+    Bidirectional data sanitization utility.
+    Scans inputs for sensitive project assets, system paths, and emails,
     replacing them with semantic placeholders before transmission to hosted APIs.
     """
     def __init__(self):
@@ -24,9 +26,6 @@ class PromptMasker:
 
         # Static mapping for core Project Sleeper components
         self.static_mappings = {
-            "users.db": "data_store_omega",
-            "inversion_engine.py": "narrative_module_x",
-            "inversion_engine": "narrative_module_x",
             "alignment_engine.py": "policy_visitor_y",
             "alignment_engine": "policy_visitor_y",
             "governance_manager.py": "state_arbiter_z",
@@ -46,6 +45,16 @@ class PromptMasker:
             "output_validator.py": "egress_filter_g",
             "output_validator": "egress_filter_g"
         }
+
+        # Load optional private mappings from gitignored config
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sanitizer_config.json")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    private_mappings = json.load(f)
+                    self.static_mappings.update(private_mappings)
+            except Exception:
+                pass
 
         # Compile regexes for sensitive entity detection
         # Matches typical Windows and Unix absolute/relative file paths
@@ -82,10 +91,10 @@ class PromptMasker:
         self.placeholder_to_original[placeholder] = original
         return placeholder
 
-    def mask(self, text: str) -> str:
+    def sanitize(self, text: str) -> str:
         """
         Scans the text, replaces detected targets with placeholders,
-        and saves the state for unmasking.
+        and saves the state for desanitization.
         """
         if not text or not isinstance(text, str):
             return text
@@ -122,7 +131,7 @@ class PromptMasker:
 
         return text
 
-    def unmask(self, text: str) -> str:
+    def desanitize(self, text: str) -> str:
         """Replaces placeholders back with their original values."""
         if not text or not isinstance(text, str):
             return text

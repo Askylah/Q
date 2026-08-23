@@ -25,7 +25,14 @@ import os
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from datetime import datetime, timezone, timedelta
-from rag_engine import get_shared_model
+from embedding_model import get_shared_model
+
+# Global neuromodulator coupling (optional — brain runs fine without it)
+try:
+    import dopamine_state
+    _DA_AVAILABLE = True
+except ImportError:
+    _DA_AVAILABLE = False
 
 # ═══════════════════════════════════════════════════════════
 # CONSTANTS
@@ -121,6 +128,14 @@ def _ensure_table():
     columns = [row[1] for row in c.fetchall()]
     if 'embedding' not in columns:
         c.execute("ALTER TABLE deep_memories ADD COLUMN embedding BLOB")
+    # FIX(compounding-decay): watermark for incremental decay. Without it,
+    # decay_cycle() re-applied decay computed from TOTAL AGE on every call —
+    # and it is called on every interaction, so a 60-day-old memory lost ~2
+    # importance PER MESSAGE and any unprotected memory died within one
+    # conversation. Decay now applies only for full 30-day cycles elapsed
+    # since the last application.
+    if 'last_decay_at' not in columns:
+        c.execute("ALTER TABLE deep_memories ADD COLUMN last_decay_at TEXT")
         
     conn.commit()
     conn.close()
@@ -255,6 +270,15 @@ class DeepMemory:
         if importance is None:
             importance = metrics["auto_importance"]
         
+        # Dopaminergic stamping: memories born during a phasic spike are
+        # written in hotter (LTP-style). Capped by the clamp below.
+        if _DA_AVAILABLE:
+            try:
+                _da_state = dopamine_state.get_state(self.username, self.persona)
+                importance += dopamine_state.stamp_bonus(_da_state["phasic"])
+            except Exception:
+                pass
+        
         mem_id = _generate_id()
         now = _now_iso()
         
@@ -326,7 +350,6 @@ class DeepMemory:
             ORDER BY importance DESC, created_at DESC
         """, (self.username, self.persona))
         rows = c.fetchall()
-        conn.close()
         
         memories = [self._row_to_dict(r) for r in rows]
         
@@ -366,8 +389,12 @@ class DeepMemory:
                     mem_vec = np.frombuffer(am["embedding"], dtype=np.float32).reshape(1, -1)
                     sim = float(cosine_similarity(query_vec, mem_vec)[0][0])
                     
-                    # If high semantic overlap (Spark), reactivate
-                    if sim >= 0.4:
+                    # If high semantic overlap (Spark), reactivate.
+                    # FIX(zombie-memories): the spark bar sits ABOVE the retrieval
+                    # threshold (0.4). At 0.4 any archived memory near a common
+                    # topic was re-sparked (+2 importance) every time it was
+                    # brushed, so archiving could never stick.
+                    if sim >= 0.55:
                         print(f"[DEEP ECHO] Semantic reactivation: {am['id']} (sim: {sim:.2f})")
                         c.execute("""
                             UPDATE deep_memories 
@@ -395,6 +422,11 @@ class DeepMemory:
             memories = [s[0] for s in scored[:limit]]
         else:
             memories = memories[:limit]
+        
+        # FIX(use-after-close): close moved here — it previously ran right after
+        # the first fetchall, while the Deep Echo archive scan below still used
+        # the connection (ProgrammingError on any query reaching that branch).
+        conn.close()
         
         # Bump access count for recalled memories
         self._bump_access(memories)
@@ -427,19 +459,31 @@ class DeepMemory:
         c = conn.cursor()
         c.execute("""
             SELECT id, content, memory_type, importance, tags, 
-                   access_count, active, created_at
+                   access_count, active, created_at, last_decay_at
             FROM deep_memories
             WHERE username=? AND persona=? AND active=1
         """, (self.username, self.persona))
         rows = c.fetchall()
         
         now = datetime.now(timezone.utc)
+        
+        # Tonic dopamine modulates forgetting speed: engaged posture protects
+        # memories (0.6x), bored posture accelerates the leak (1.4x).
+        da_mult = 1.0
+        if _DA_AVAILABLE:
+            try:
+                da_mult = dopamine_state.decay_modulator(
+                    dopamine_state.get_state(self.username, self.persona)["tonic"]
+                )
+            except Exception:
+                da_mult = 1.0
+        
         decayed = 0
         archived = 0
         protected = 0
         
         for row in rows:
-            mem_id, content, mem_type, importance, tags_json, access_count, active, created_at = row
+            mem_id, content, mem_type, importance, tags_json, access_count, active, created_at, last_decay_at = row
             
             tags = json.loads(tags_json) if tags_json else []
             tag_set = {t.lower() for t in tags}
@@ -449,36 +493,48 @@ class DeepMemory:
                 protected += 1
                 continue
             
-            # Age check
+            # FIX(compounding-decay): measure elapsed time from the decay
+            # WATERMARK (falling back to created_at), not from birth. Only
+            # whole 30-day cycles are applied; the watermark advances by the
+            # cycles consumed so partial time is never lost or double-counted.
+            anchor_str = last_decay_at or created_at
             try:
-                created = datetime.fromisoformat(created_at)
-                if created.tzinfo is None:
-                    created = created.replace(tzinfo=timezone.utc)
-                age_days = (now - created).days
+                anchor = datetime.fromisoformat(anchor_str)
+                if anchor.tzinfo is None:
+                    anchor = anchor.replace(tzinfo=timezone.utc)
+                elapsed_days = (now - anchor).days
             except (ValueError, TypeError):
                 continue
             
-            if age_days < 30:
+            cycles = int(elapsed_days // 30)
+            if cycles < 1:
                 continue
             
-            # Calculate decay
-            cycles = age_days / 30
+            # Calculate decay for the elapsed whole cycles
             if mem_type in SLOW_DECAY_TYPES:
                 decay_amount = cycles * DECAY_RATE_SLOW
             else:
                 decay_amount = cycles * DECAY_RATE_NORMAL
+            decay_amount *= da_mult
             
             # Access resistance
             decay_amount = max(0, decay_amount - (access_count * 0.2))
             new_importance = max(0, round(importance - decay_amount))
             
+            # Advance the watermark by the cycles actually consumed (even if
+            # access resistance zeroed the decay), so resistance is applied
+            # per-cycle instead of letting elapsed cycles pile up forever.
+            new_anchor = (anchor + timedelta(days=cycles * 30)).isoformat()
+            
             if new_importance < importance:
                 if new_importance <= 0:
-                    c.execute("UPDATE deep_memories SET active=0, importance=0 WHERE id=?", (mem_id,))
+                    c.execute("UPDATE deep_memories SET active=0, importance=0, last_decay_at=? WHERE id=?", (new_anchor, mem_id))
                     archived += 1
                 else:
-                    c.execute("UPDATE deep_memories SET importance=? WHERE id=?", (new_importance, mem_id))
+                    c.execute("UPDATE deep_memories SET importance=?, last_decay_at=? WHERE id=?", (new_importance, new_anchor, mem_id))
                     decayed += 1
+            else:
+                c.execute("UPDATE deep_memories SET last_decay_at=? WHERE id=?", (new_anchor, mem_id))
         
         conn.commit()
         conn.close()
@@ -508,12 +564,16 @@ class DeepMemory:
         
         return f"[{day_name} {time_of_day}. Last spoke with user: {delta}.]"
     
-    def get_context_block(self, max_memories: int = 8) -> str:
+    def get_context_block(self, max_memories: int = 8, query: str = None) -> str:
         """
         Build the full context injection block for the LLM.
         
         Includes temporal anchor + top memories with associations.
         Formatted as a quiet contextual block, not a directive.
+        
+        When query is provided, recall uses semantic hybrid scoring instead of
+        the importance leaderboard, and the Deep Echo archive-reactivation
+        branch becomes reachable.
         """
         parts = []
         
@@ -521,8 +581,8 @@ class DeepMemory:
         anchor = self.get_temporal_anchor()
         parts.append(anchor)
         
-        # Recall top memories
-        recalled = self.recall(limit=max_memories)
+        # Recall top memories (semantic if query given, else importance-ranked)
+        recalled = self.recall(query=query, limit=max_memories)
         
         if recalled:
             parts.append("[DEEP_MEMORY]")
@@ -574,6 +634,15 @@ class DeepMemory:
         rows = c.fetchall()
         
         new_tags = set(new_memory.get("tags", []))
+        # FIX(reflection-clique): bookkeeping tags carry no content signal.
+        # Every Reflector bridge memory shares ["observation","auto-generated"]
+        # (+6) plus type match (+1), domain match (+2) and importance
+        # proximity (+1) = 10 points before a single word is compared, so all
+        # auto-generated observations wired into a near-complete clique that
+        # depth-2 involuntary recall then traversed as a firehose. Score
+        # associations on real content only.
+        SYSTEM_TAGS = {"observation", "auto-generated", "auto_generated", "system", "bridge"}
+        new_tags = {t for t in new_tags if t.lower() not in SYSTEM_TAGS}
         new_emotions = new_memory.get("emotions", {})
         new_domain = new_memory.get("domain", "")
         new_type = new_memory.get("memory_type", "")
@@ -586,6 +655,7 @@ class DeepMemory:
             mem_id, content, mem_type, domain, emo_json, tags_json, importance, conn_json = row
             
             mem_tags = set(json.loads(tags_json)) if tags_json else set()
+            mem_tags = {t for t in mem_tags if t.lower() not in SYSTEM_TAGS}
             mem_emotions = json.loads(emo_json) if emo_json else {}
             
             score = 0

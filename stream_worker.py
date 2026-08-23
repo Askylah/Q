@@ -14,11 +14,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("stream_worker")
 
 class ConsciousnessWorker:
+    # How long (in seconds) to wait before re-flagging the same entropic gap node.
+    # Default: 86400s (24 hours). Set env var DAEMON_GAP_COOLDOWN_SECS to override.
+    GAP_COOLDOWN_SECS = int(os.getenv("DAEMON_GAP_COOLDOWN_SECS", 86400))
+
     def __init__(self):
         self.db_manager = db.UserManager()
         self.running = True
         self.last_monologue_time = {}  # (username, persona) -> timestamp string
         self.idle_threshold = int(os.getenv("DAEMON_IDLE_THRESHOLD", 300))
+        # Cooldown registry: (username, persona, node_id) -> last_flagged_timestamp (float)
+        self._gap_cooldowns = {}
 
     def get_db_connection(self):
         conn = sqlite3.connect(db.DB_PATH)
@@ -174,7 +180,7 @@ class ConsciousnessWorker:
         c = conn.cursor()
         
         try:
-            c.execute("SELECT node_id, title, content FROM zettel_nodes WHERE username=? AND persona=?", (username, persona))
+            c.execute("SELECT id, node_id, title, content FROM zettel_nodes WHERE username=? AND persona=?", (username, persona))
             nodes = [dict(row) for row in c.fetchall()]
             
             if len(nodes) < 3:
@@ -230,7 +236,7 @@ class ConsciousnessWorker:
         c = conn.cursor()
         
         try:
-            c.execute("SELECT node_id, title, content FROM zettel_nodes WHERE username=? AND persona=?", (username, persona))
+            c.execute("SELECT id, node_id, title, content FROM zettel_nodes WHERE username=? AND persona=?", (username, persona))
             nodes = [dict(row) for row in c.fetchall()]
             conn.close()
             
@@ -303,7 +309,8 @@ class ConsciousnessWorker:
                 api_keys=env_keys,
                 stream=False,
                 temperature=0.0,
-                max_tokens=10
+                max_tokens=10,
+                disable_vpn_rotation=True
             )
             
             if isinstance(res, dict):
@@ -316,10 +323,30 @@ class ConsciousnessWorker:
             return "NEUTRAL"
 
     def resolve_entropic_gap(self, username: str, persona: str, gap: dict):
-        """Formulates an integrating question/observation to bridge the entropic gap."""
-        node = gap["node"]
-        logger.info(f"[CONSCIOUSNESS_DAEMON] Resolving entropic gap for '{node['title']}'...")
+        """Formulates an integrating question/observation to bridge the entropic gap.
         
+        Cooldown guard: the same node is only flagged once per GAP_COOLDOWN_SECS
+        (default 24h). This prevents the homeostasis livelock where an isolated
+        node is detected → observation inserted → node still isolated → repeat.
+        """
+        node = gap["node"]
+        node_id = node.get("node_id", node.get("title", ""))
+        cooldown_key = (username, persona, node_id)
+        now = time.time()
+
+        last_flagged = self._gap_cooldowns.get(cooldown_key)
+        if last_flagged is not None and (now - last_flagged) < self.GAP_COOLDOWN_SECS:
+            remaining_h = (self.GAP_COOLDOWN_SECS - (now - last_flagged)) / 3600
+            logger.info(
+                f"[CONSCIOUSNESS_DAEMON] Skipping entropic gap for '{node['title']}' "
+                f"(cooldown active, {remaining_h:.1f}h remaining)."
+            )
+            return
+
+        # Record the flag timestamp before inserting
+        self._gap_cooldowns[cooldown_key] = now
+        logger.info(f"[CONSCIOUSNESS_DAEMON] Resolving entropic gap for '{node['title']}'...")
+
         # Insert a dynamic observation of type 'entropic_gap' to trigger active cognitive synthesis on next chat
         alert_content = (
             f"[INTERNAL COGNITIVE DISSONANCE: ENTROPIC GAP DETECTED]\n"
@@ -419,7 +446,8 @@ class ConsciousnessWorker:
                 api_keys=env_keys,
                 stream=False,
                 temperature=0.8,
-                max_tokens=512
+                max_tokens=512,
+                disable_vpn_rotation=True
             )
             
             if isinstance(res, dict):

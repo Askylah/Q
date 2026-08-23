@@ -180,7 +180,10 @@ class UserManager:
                 category TEXT,
                 embedding BLOB,
                 source_entry_id TEXT,
-                created_at TEXT
+                created_at TEXT,
+                node_class TEXT DEFAULT 'lore',
+                trigger_type TEXT DEFAULT 'PROBABILISTIC',
+                content_hash TEXT
             )
         ''')
 
@@ -191,9 +194,29 @@ class UserManager:
                 target_node_id TEXT,
                 relationship TEXT,
                 strength FLOAT DEFAULT 0.5,
-                created_at TEXT
+                created_at TEXT,
+                label TEXT DEFAULT 'related'
             )
         ''')
+
+        # Migration: Ensure new columns exist on zettel_nodes
+        c.execute("PRAGMA table_info(zettel_nodes)")
+        node_columns = [column[1] for column in c.fetchall()]
+        if 'node_class' not in node_columns:
+            c.execute("ALTER TABLE zettel_nodes ADD COLUMN node_class TEXT DEFAULT 'lore'")
+        if 'trigger_type' not in node_columns:
+            c.execute("ALTER TABLE zettel_nodes ADD COLUMN trigger_type TEXT DEFAULT 'PROBABILISTIC'")
+        if 'content_hash' not in node_columns:
+            c.execute("ALTER TABLE zettel_nodes ADD COLUMN content_hash TEXT")
+
+        # Migration: Ensure label column exists on zettel_links
+        c.execute("PRAGMA table_info(zettel_links)")
+        link_columns = [column[1] for column in c.fetchall()]
+        if 'label' not in link_columns:
+            c.execute("ALTER TABLE zettel_links ADD COLUMN label TEXT DEFAULT 'related'")
+
+        # Migration: Ensure zettel_fts virtual table exists
+        c.execute("CREATE VIRTUAL TABLE IF NOT EXISTS zettel_fts USING fts5(node_db_id UNINDEXED, content, title, category)")
 
         # User Settings table
         c.execute('''
@@ -202,9 +225,16 @@ class UserManager:
                 review_policy TEXT DEFAULT 'ask',
                 auto_execute_terminal INTEGER DEFAULT 0,
                 active_persona_key TEXT,
-                security_level TEXT DEFAULT 'strict'
+                security_level TEXT DEFAULT 'strict',
+                global_direct_wire INTEGER DEFAULT 1
             )
         ''')
+        
+        # Migration: Ensure global_direct_wire exists
+        c.execute("PRAGMA table_info(user_settings)")
+        columns = [column[1] for column in c.fetchall()]
+        if 'global_direct_wire' not in columns:
+            c.execute("ALTER TABLE user_settings ADD COLUMN global_direct_wire INTEGER DEFAULT 1")
 
         conn.commit()
         conn.close()
@@ -769,10 +799,25 @@ class UserManager:
 
     # --- OBSERVATIONAL MEMORY METHODS ---
     def add_observation(self, username, persona, event_type, content, reflection_score=0.0):
-        """Add a new observation/event to the log."""
+        """Add a new observation/event to the log.
+        
+        Dedup guard: if an identical (username, persona, event_type, content) row
+        already exists, the insert is skipped. This prevents daemon livelocks from
+        flooding the observations table with repeat entries.
+        """
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
+            # --- DEDUP GUARD ---
+            c.execute("""
+                SELECT 1 FROM observations
+                WHERE username=? AND persona=? AND event_type=? AND content=?
+                LIMIT 1
+            """, (username, persona, event_type, content))
+            if c.fetchone() is not None:
+                conn.close()
+                return True  # Already exists, skip silently
+            # --- END DEDUP GUARD ---
             timestamp = str(datetime.now())
             c.execute("""
                 INSERT INTO observations (username, persona, event_type, content, reflection_score, timestamp)
@@ -890,7 +935,7 @@ class UserManager:
             print(f"DB ERROR (delete_zettel_entry): {e}")
             return False
 
-    def add_zettel_node(self, node_id_pk, username, persona, node_id_tag, title, content, category, embedding_blob, source_entry_id):
+    def add_zettel_node(self, node_id_pk, username, persona, node_id_tag, title, content, category, embedding_blob, source_entry_id, node_class='lore', trigger_type='PROBABILISTIC', content_hash=None):
         """Insert a chunked atomic node into the knowledge graph."""
         # ── Step 1: Insert the actual node row (committed independently) ──
         try:
@@ -898,9 +943,9 @@ class UserManager:
             c = conn.cursor()
             timestamp = str(datetime.now())
             c.execute("""
-                INSERT INTO zettel_nodes (id, username, persona, node_id, title, content, category, embedding, source_entry_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (node_id_pk, username, persona, node_id_tag, title, content, category, embedding_blob, source_entry_id, timestamp))
+                INSERT INTO zettel_nodes (id, username, persona, node_id, title, content, category, embedding, source_entry_id, created_at, node_class, trigger_type, content_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (node_id_pk, username, persona, node_id_tag, title, content, category, embedding_blob, source_entry_id, timestamp, node_class, trigger_type, content_hash))
             conn.commit()
             conn.close()
         except Exception as e:
@@ -920,16 +965,16 @@ class UserManager:
 
         return True
 
-    def add_zettel_link(self, link_id, source_node_id, target_node_id, relationship, strength=0.5):
+    def add_zettel_link(self, link_id, source_node_id, target_node_id, relationship, strength=0.5, label='related'):
         """Insert a weighted edge between two nodes."""
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             timestamp = str(datetime.now())
             c.execute("""
-                INSERT OR IGNORE INTO zettel_links (id, source_node_id, target_node_id, relationship, strength, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (link_id, source_node_id, target_node_id, relationship, strength, timestamp))
+                INSERT OR IGNORE INTO zettel_links (id, source_node_id, target_node_id, relationship, strength, created_at, label)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (link_id, source_node_id, target_node_id, relationship, strength, timestamp, label))
             conn.commit()
             conn.close()
             return True
@@ -943,13 +988,13 @@ class UserManager:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             c.execute("""
-                SELECT id, node_id, title, content, category, embedding, source_entry_id, created_at
+                SELECT id, node_id, title, content, category, embedding, source_entry_id, created_at, node_class, trigger_type
                 FROM zettel_nodes
                 WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?
             """, (username, persona))
             rows = c.fetchall()
             conn.close()
-            return [{"id": r[0], "node_id": r[1], "title": r[2], "content": r[3], "category": r[4], "embedding": r[5], "source_entry_id": r[6], "created_at": r[7]} for r in rows]
+            return [{"id": r[0], "node_id": r[1], "title": r[2], "content": r[3], "category": r[4], "embedding": r[5], "source_entry_id": r[6], "created_at": r[7], "node_class": r[8], "trigger_type": r[9]} for r in rows]
         except Exception as e:
             print(f"DB ERROR (get_zettel_nodes_for_persona): {e}")
             return []
@@ -1005,7 +1050,7 @@ class UserManager:
                         continue
                     visited.add(nid)
                     c.execute("""
-                        SELECT zn.id, zn.node_id, zn.title, zn.content, zn.category, zl.relationship, zl.strength
+                        SELECT zn.id, zn.node_id, zn.title, zn.content, zn.category, zl.relationship, zl.strength, zl.label, zn.node_class
                         FROM zettel_links zl
                         JOIN zettel_nodes zn ON (zn.id = zl.target_node_id OR zn.id = zl.source_node_id)
                         WHERE (zl.source_node_id=? OR zl.target_node_id=?)
@@ -1016,7 +1061,8 @@ class UserManager:
                             results.append({
                                 "id": row[0], "node_id": row[1], "title": row[2],
                                 "content": row[3], "category": row[4],
-                                "relationship": row[5], "strength": row[6]
+                                "relationship": row[5], "strength": row[6],
+                                "label": row[7], "node_class": row[8]
                             })
                             next_frontier.append(row[0])
                 frontier = next_frontier
@@ -1049,11 +1095,14 @@ class UserManager:
             row = c.fetchone()
             conn.close()
             if row:
-                return dict(row)
-            return {"username": username, "review_policy": "ask", "auto_execute_terminal": 0, "security_level": "strict"}
+                res = dict(row)
+                if "global_direct_wire" not in res:
+                    res["global_direct_wire"] = 1
+                return res
+            return {"username": username, "review_policy": "ask", "auto_execute_terminal": 0, "security_level": "strict", "global_direct_wire": 1}
         except Exception as e:
             print(f"[DB_ERROR] Failed to fetch settings: {e}")
-            return {"review_policy": "ask"}
+            return {"review_policy": "ask", "global_direct_wire": 1}
 
     def update_user_settings(self, username: str, settings: dict):
         """Updates user governance settings."""
@@ -1065,7 +1114,7 @@ class UserManager:
             c.execute("INSERT OR IGNORE INTO user_settings (username) VALUES (?)", (username,))
             
             for key, value in settings.items():
-                if key in ["review_policy", "auto_execute_terminal", "active_persona_key", "security_level"]:
+                if key in ["review_policy", "auto_execute_terminal", "active_persona_key", "security_level", "global_direct_wire"]:
                     c.execute(f"UPDATE user_settings SET {key} = ? WHERE username = ?", (value, username))
             
             conn.commit()

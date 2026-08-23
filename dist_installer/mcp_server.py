@@ -6,19 +6,16 @@ from mcp.server.fastmcp import FastMCP
 import subprocess
 import sys
 import os
-from rag_engine import PersonaRAG
 from search_engine import web_search
 import workspace_engine as workspace
 
 # Initialize FastMCP
 mcp = FastMCP("RickLab")
 
-# Persistent RAG instance for the server
-rag = PersonaRAG()
-
 # Initialize a default workspace for lab executions
-# We jail it to the 'labs' directory to separate execution from source code
-LAB_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "labs")
+# We jail it to the temp directory to separate execution from watched source code
+import tempfile
+LAB_ROOT = os.path.join(tempfile.gettempdir(), "antigravity-labs")
 os.makedirs(LAB_ROOT, exist_ok=True)
 lab_ws = workspace.SafeWorkspace(LAB_ROOT)
 
@@ -26,23 +23,10 @@ lab_ws = workspace.SafeWorkspace(LAB_ROOT)
 async def execute_python_lab(code: str) -> str:
     """
     Executes Python code inside a hardened, network-isolated Docker container.
-    Implements 'Strict' security: 512MB RAM, 1 CPU, 64 PIDs limit, 30s timeout.
+    Implements 'Strict' security: 512MB RAM, 1 CPU, 64 PIDs limit, 15s timeout.
     Returns the stdout/stderr of the execution.
     """
     return lab_ws.run_code_secure(code)
-
-@mcp.tool()
-async def deep_lore_query(query: str, persona: str = "rick") -> str:
-    """
-    Query the persona's semantic knowledge base directly.
-    Use this if you need to double-check a fact or retrieve complex history.
-    """
-    try:
-        # Default user handles for sandbox
-        username = os.getenv("PERSONA_USER", "Askylah")
-        return rag.query(query, persona, username)
-    except Exception as e:
-        return f"MEM_ERROR: {str(e)}"
 
 @mcp.tool()
 async def search_web(query: str, max_results: int = 5) -> str:

@@ -23,6 +23,56 @@ load_dotenv()
 app = FastAPI(title="PersonaApp API")
 
 @app.on_event("startup")
+def configure_executor():
+    import concurrent.futures
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=100))
+    print("[SYSTEM] ThreadPoolExecutor max_workers set to 100", flush=True)
+
+@app.on_event("startup")
+def verify_governance_registry():
+    import sys
+    import os
+    plugins_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
+    if plugins_dir not in sys.path:
+        sys.path.append(plugins_dir)
+        
+    import mcp_router
+    from governance_manager import validate_registry_coverage
+    from api_parser import load_universal_schemas
+    
+    # 1. Get all MCP tools
+    router = mcp_router.get_router()
+    mcp_tools = [t['function']['name'] for t in router.list_all_tools_sync()]
+    
+    # 2. Get universal tools from api_parser
+    universal_tools = [t['function']['name'] for t in load_universal_schemas()]
+    
+    # 3. Add static tools
+    static_tools = ["call_sub_agent", "query_second_brain"]
+    
+    # 4. Get dynamic garage tools
+    garage_tools = []
+    garage_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "garage")
+    if os.path.exists(garage_dir):
+        for f_name in os.listdir(garage_dir):
+            if f_name.endswith(".json"):
+                garage_tools.append(f_name[:-5])
+                
+    # Combine all known tools
+    all_known_tools = set(mcp_tools + universal_tools + static_tools + garage_tools)
+    
+    print(f"[SYSTEM] Validating governance registry coverage for {len(all_known_tools)} tools...", flush=True)
+    validate_registry_coverage(all_known_tools)
+    print("[SYSTEM] Governance registry coverage validated successfully. No unclassified tools found.", flush=True)
+
+@app.on_event("startup")
+
 def start_consciousness_daemon():
     def run_daemon():
         try:
@@ -118,6 +168,13 @@ class StreamRequest(BaseModel):
     frequency_penalty: float = 0.0
     thinking_level: str = "Off"
     bypass_firewall: bool = False
+    # GROUP MODE CONTRACT: set by the frontend when this invocation is one
+    # speaker's turn inside a group session. The backend then (a) does NOT
+    # write the inbound message into the persona's SOLO history — the
+    # frontend owns group persistence via POST /groupchat/{session_id} —
+    # and (b) llm_engine suppresses solo memory formation and injects a
+    # scene header (see build_context_and_stream).
+    group_session_id: str = None
     active_api_keys: dict = {}
     custom_base_url: str = ""
     custom_provider_type: str = "openai"
@@ -157,6 +214,7 @@ class SettingsPayload(BaseModel):
     auto_execute_terminal: int = 0
     active_persona_key: str = ""
     security_level: str = "strict"
+    global_direct_wire: int = 1
 
 # --- CORE LOGIC (Decoupled from Streamlit) ---
 def load_personas_logic(username: str = None):
@@ -342,21 +400,22 @@ def delete_chat_message(message_id: int, current_user: str = Depends(get_current
     return {"status": "success"}
 
 @app.get("/groupchats/sessions/{username}")
-def get_user_group_sessions(username: str, current_user: str = Depends(get_current_user)):
+async def get_user_group_sessions(username: str, current_user: str = Depends(get_current_user)):
     """Retrieve all unique group session IDs for a specific user."""
     if username != current_user:
         raise HTTPException(status_code=403, detail="Username mismatch")
     db_conn = db.UserManager()
-    sessions = db_conn.get_user_group_sessions(username)
+    sessions = await asyncio.to_thread(db_conn.get_user_group_sessions, username)
     return {"sessions": sessions}
 
 @app.post("/groupchat/{session_id}")
-def save_group_chat_message(session_id: str, msg: GroupMessagePayload, current_user: str = Depends(get_current_user)):
+async def save_group_chat_message(session_id: str, msg: GroupMessagePayload, current_user: str = Depends(get_current_user)):
     """Save a message to the group conversation history."""
     if msg.username != current_user:
         raise HTTPException(status_code=403, detail="Username mismatch")
     db_conn = db.UserManager()
-    success = db_conn.save_group_message(
+    success = await asyncio.to_thread(
+        db_conn.save_group_message,
         session_id, msg.username, msg.persona_key, msg.persona_name, 
         msg.persona_avatar, msg.role, msg.content, msg.is_observer
     )
@@ -406,21 +465,19 @@ def wipe_memory(persona_key: str, username: str = "default_user", current_user: 
     # 1. Clear SQLite tables (Memories, Summaries, Observations, Zettel Graph)
     success = db_conn.wipe_memories(username, persona_key)
     
-    # 2. Clear RAG Vector Store (Pickle storage)
+    # 2. Invalidate Zettel in-memory cache
     try:
-        from llm_engine import get_rag_engine
-        rag = get_rag_engine()
-        rag.clear_persona_knowledge(persona_key, username)
+        import zettel_engine
+        zettel_engine.invalidate_zettel_cache(username, persona_key)
     except Exception as e:
-        print(f"[WIPE ERROR] Failed to clear RAG store: {e}")
-        # We don't fail the whole request if RAG fails, but we log it.
+        print(f"[WIPE ERROR] Failed to invalidate zettel cache: {e}")
 
     if success:
         return {"status": "success", "message": "Memories wiped."}
     raise HTTPException(status_code=500, detail="Failed to wipe memories.")
 
 @app.post("/chat/{persona_key}/stream")
-def stream_chat(persona_key: str, req: StreamRequest, current_user: str = Depends(get_current_user)):
+async def stream_chat(persona_key: str, req: StreamRequest, current_user: str = Depends(get_current_user)):
     """Generates a streaming response for the given persona and saves the transaction."""
     if req.username != current_user:
         raise HTTPException(status_code=403, detail="Username mismatch")
@@ -452,12 +509,16 @@ def stream_chat(persona_key: str, req: StreamRequest, current_user: str = Depend
         if key:
             api_keys[provider] = key
 
-    # Immediately save the User's message so it doesn't fade on UI reload
+    # Immediately save the User's message so it doesn't fade on UI reload.
+    # FIX(groupchat-bleed): in group mode the "inbound message" is mapped group
+    # history / another persona's line — writing it here polluted every
+    # invoked persona's SOLO conversation history with group traffic.
     content_str = json.dumps(req.message) if isinstance(req.message, list) else req.message
     db_conn = db.UserManager()
-    db_conn.save_message(req.username, persona_key, "user", content_str)
+    if not req.group_session_id:
+        db_conn.save_message(req.username, persona_key, "user", content_str)
     
-    stream_obj = build_context_and_stream(
+    stream_obj = await build_context_and_stream(
         user_message=req.message,
         persona_key=persona_key,
         username=req.username,
@@ -479,18 +540,19 @@ def stream_chat(persona_key: str, req: StreamRequest, current_user: str = Depend
         custom_auth_prefix=req.custom_auth_prefix,
         bypass_firewall=req.bypass_firewall,
         workspace_context=req.workspace_context,
-        max_tool_output=req.max_tool_output
+        max_tool_output=req.max_tool_output,
+        group_session_id=req.group_session_id
     )
     
     if isinstance(stream_obj, str):
         # Handle string error returns directly
-        def err_generator():
+        async def err_generator():
             yield f'data: {{"choices": [{{"delta": {{"content": "{stream_obj}"}}}}]}}\n\n'
         return StreamingResponse(err_generator(), media_type="text/event-stream")
         
-    def sse_generator():
-        # stream_obj is an intercepting generator yielding bytes
-        for chunk in stream_obj:
+    async def sse_generator():
+        # stream_obj is an async generator yielding bytes
+        async for chunk in stream_obj:
             if chunk:
                 yield chunk
                 
@@ -887,4 +949,4 @@ if os.path.exists(FRONTEND_DIST):
         raise HTTPException(status_code=404, detail="Frontend build missing index.html")
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, http="h11", reload=True, reload_excludes=["*labs*", "*labs\\*", "labs\\*", "*lab_exec*"])

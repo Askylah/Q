@@ -1,3 +1,6 @@
+# DEPRECATED — superseded by mcp_router.py (multi-server MCP router).
+# This file is kept for backward compatibility only. Do not extend it.
+# All new MCP tool integrations should be registered via mcp_router.get_router().register_server().
 import asyncio
 import os
 import sys

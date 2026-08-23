@@ -21,6 +21,9 @@ personas.json
 *.secret
 openrouter_debug.log
 inversion_engine.py
+context_adapter.py
+semantic_adapter.py
+sanitizer_config.json
 
 # ─── Database (Private User Data) ─────────────────────────
 users.db
@@ -38,10 +41,14 @@ knowledge_bases/*
 garage/*
 !garage/.gitkeep
 
-# ─── Backups ──────────────────────────────────────────────
+# ─── Backups & Logs ─────────────────────────────────────────
 *.bak
+*.bak.*
 *.backup
+*.backup_*
 *.tmpbak
+*.log
+diff.txt
 
 # ─── Diagnostic & Helper Scripts ─────────────────────────
 check_commit_files.py
@@ -56,8 +63,8 @@ restore_and_push_clean.py
 restore_clean_files.py
 safe_history_erase.py
 safe_history_scrub_v2.py
-test_openrouter_ping.py
-test_zettel_scaling.py
+tests/test_openrouter_ping.py
+tests/test_zettel_scaling.py
 verify_garage_pipeline.py
 memory_dump.txt
 

@@ -1,5 +1,6 @@
 import sqlite3
 import hashlib
+import hmac
 import os
 import re
 import bcrypt
@@ -180,7 +181,10 @@ class UserManager:
                 category TEXT,
                 embedding BLOB,
                 source_entry_id TEXT,
-                created_at TEXT
+                created_at TEXT,
+                node_class TEXT DEFAULT 'lore',
+                trigger_type TEXT DEFAULT 'PROBABILISTIC',
+                content_hash TEXT
             )
         ''')
 
@@ -191,9 +195,29 @@ class UserManager:
                 target_node_id TEXT,
                 relationship TEXT,
                 strength FLOAT DEFAULT 0.5,
-                created_at TEXT
+                created_at TEXT,
+                label TEXT DEFAULT 'related'
             )
         ''')
+
+        # Migration: Ensure new columns exist on zettel_nodes
+        c.execute("PRAGMA table_info(zettel_nodes)")
+        node_columns = [column[1] for column in c.fetchall()]
+        if 'node_class' not in node_columns:
+            c.execute("ALTER TABLE zettel_nodes ADD COLUMN node_class TEXT DEFAULT 'lore'")
+        if 'trigger_type' not in node_columns:
+            c.execute("ALTER TABLE zettel_nodes ADD COLUMN trigger_type TEXT DEFAULT 'PROBABILISTIC'")
+        if 'content_hash' not in node_columns:
+            c.execute("ALTER TABLE zettel_nodes ADD COLUMN content_hash TEXT")
+
+        # Migration: Ensure label column exists on zettel_links
+        c.execute("PRAGMA table_info(zettel_links)")
+        link_columns = [column[1] for column in c.fetchall()]
+        if 'label' not in link_columns:
+            c.execute("ALTER TABLE zettel_links ADD COLUMN label TEXT DEFAULT 'related'")
+
+        # Migration: Ensure zettel_fts virtual table exists
+        c.execute("CREATE VIRTUAL TABLE IF NOT EXISTS zettel_fts USING fts5(node_db_id UNINDEXED, content, title, category)")
 
         # User Settings table
         c.execute('''
@@ -202,9 +226,28 @@ class UserManager:
                 review_policy TEXT DEFAULT 'ask',
                 auto_execute_terminal INTEGER DEFAULT 0,
                 active_persona_key TEXT,
-                security_level TEXT DEFAULT 'strict'
+                security_level TEXT DEFAULT 'strict',
+                global_direct_wire INTEGER DEFAULT 1
             )
         ''')
+        
+        # Migration: Ensure global_direct_wire exists
+        c.execute("PRAGMA table_info(user_settings)")
+        columns = [column[1] for column in c.fetchall()]
+        if 'global_direct_wire' not in columns:
+            c.execute("ALTER TABLE user_settings ADD COLUMN global_direct_wire INTEGER DEFAULT 1")
+
+        # ── Performance indexes (idempotent) ──
+        # observations: get_observation_log filters (username,persona) and
+        # orders by id, twice per turn. zettel_nodes: filtered by
+        # (username,persona) on every retrieval. Without these, both are full
+        # scans that grow with history.
+        c.execute("CREATE INDEX IF NOT EXISTS idx_obs_user_persona_id ON observations(username, persona, id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_znodes_user_persona ON zettel_nodes(username, persona)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_zlinks_source ON zettel_links(source_node_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_zlinks_target ON zettel_links(target_node_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_conv_user_persona_id ON conversations(username, persona, id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_group_session ON group_conversations(session_id, username, id)")
 
         conn.commit()
         conn.close()
@@ -452,6 +495,14 @@ class UserManager:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             key_hash = hashlib.sha256(secret_key.encode('utf-8')).hexdigest()
+            # FIX(case-variant collision): the UNIQUE constraint on users.username
+            # is case-sensitive, but all downstream data queries are COLLATE
+            # NOCASE — so registering "Askylah" when "askylah" exists creates a
+            # second account that silently shares the first one's memories,
+            # personas and zettel graph. Reject case-variants explicitly.
+            c.execute("SELECT 1 FROM users WHERE username COLLATE NOCASE=? LIMIT 1", (username,))
+            if c.fetchone() is not None:
+                return False, "Username already exists."
             c.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
                       (username, key_hash, str(datetime.now())))
             conn.commit()
@@ -464,18 +515,51 @@ class UserManager:
             conn.close()
 
     def verify_profile(self, username, secret_key):
-        """Verify profile credentials by hashing secret_key with SHA-256 and checking database."""
+        """Verify profile credentials by hashing secret_key with SHA-256 and checking database.
+
+        NOTE ON UNSALTED SHA-256: correct here. This credential is a
+        high-entropy random token (API-key style), not a human password.
+        Salting/bcrypt defend low-entropy secrets against rainbow tables and
+        brute force; neither applies to 100+ bits of randomness. Fast hashing
+        of random tokens is standard practice. The security of this path rests
+        entirely on the TOKEN GENERATOR using a CSPRNG (secrets /
+        uuid.uuid4 / crypto.getRandomValues) — never `random`, never
+        time-or-name-derived.
+        """
         if not username or not secret_key:
             return False
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
+        # FIX(case-split-identity): every DATA query in this file matches
+        # persona/username with COLLATE NOCASE, but auth matched case-SENSITIVE.
+        # So "Askylah" and "askylah" were two distinct accounts for login while
+        # sharing one set of memories, personas and zettel nodes — and typing
+        # your name with different capitalization on a second device failed to
+        # authenticate against data you own. Auth now matches the same way.
+        # EXACT MATCH FIRST — never let the convenience fallback shadow a real
+        # account. If a row matches the username byte-for-byte, that row wins,
+        # always. Only when no exact row exists do we try a case-insensitive
+        # lookup (the PC->phone convenience), and only if it is UNAMBIGUOUS:
+        # if two case-variant rows exist, we refuse rather than guess, because
+        # guessing could authenticate against the wrong account's data.
         c.execute("SELECT password_hash FROM users WHERE username=?", (username,))
         row = c.fetchone()
+        if row is None:
+            c.execute("SELECT password_hash FROM users WHERE username COLLATE NOCASE=? LIMIT 2", (username,))
+            candidates = c.fetchall()
+            row = candidates[0] if len(candidates) == 1 else None
         conn.close()
         if row:
             stored_hash = row[0]
             key_hash = hashlib.sha256(secret_key.encode('utf-8')).hexdigest()
-            return key_hash == stored_hash
+            if isinstance(stored_hash, bytes):
+                try:
+                    stored_hash = stored_hash.decode('utf-8')
+                except Exception:
+                    return False
+            # Constant-time compare: `==` on strings short-circuits at the first
+            # differing byte, leaking a timing oracle. Free to eliminate.
+            return hmac.compare_digest(key_hash, stored_hash)
         return False
 
     def hash_password(self, password):
@@ -769,10 +853,32 @@ class UserManager:
 
     # --- OBSERVATIONAL MEMORY METHODS ---
     def add_observation(self, username, persona, event_type, content, reflection_score=0.0):
-        """Add a new observation/event to the log."""
+        """Add a new observation/event to the log.
+        
+        Dedup guard: if an identical (username, persona, event_type, content) row
+        already exists, the insert is skipped. This prevents daemon livelocks from
+        flooding the observations table with repeat entries.
+        """
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
+            # --- DEDUP GUARD (dense_observation only) ---
+            # FIX(turn-loss): the guard used to apply to ALL event types, so a
+            # user legitimately repeating a message ("yes", "ok") or an
+            # identical assistant line silently vanished from the log — which
+            # shortened the Reflector's raw-event count and dropped real
+            # WORKING_MEMORY turns. Only reflections (the daemon-flood case this
+            # guard was written for) are deduped now; raw events are verbatim.
+            if event_type == "dense_observation":
+                c.execute("""
+                    SELECT 1 FROM observations
+                    WHERE username=? AND persona=? AND event_type=? AND content=?
+                    LIMIT 1
+                """, (username, persona, event_type, content))
+                if c.fetchone() is not None:
+                    conn.close()
+                    return True  # duplicate reflection, skip silently
+            # --- END DEDUP GUARD ---
             timestamp = str(datetime.now())
             c.execute("""
                 INSERT INTO observations (username, persona, event_type, content, reflection_score, timestamp)
@@ -890,7 +996,7 @@ class UserManager:
             print(f"DB ERROR (delete_zettel_entry): {e}")
             return False
 
-    def add_zettel_node(self, node_id_pk, username, persona, node_id_tag, title, content, category, embedding_blob, source_entry_id):
+    def add_zettel_node(self, node_id_pk, username, persona, node_id_tag, title, content, category, embedding_blob, source_entry_id, node_class='lore', trigger_type='PROBABILISTIC', content_hash=None):
         """Insert a chunked atomic node into the knowledge graph."""
         # ── Step 1: Insert the actual node row (committed independently) ──
         try:
@@ -898,9 +1004,9 @@ class UserManager:
             c = conn.cursor()
             timestamp = str(datetime.now())
             c.execute("""
-                INSERT INTO zettel_nodes (id, username, persona, node_id, title, content, category, embedding, source_entry_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (node_id_pk, username, persona, node_id_tag, title, content, category, embedding_blob, source_entry_id, timestamp))
+                INSERT INTO zettel_nodes (id, username, persona, node_id, title, content, category, embedding, source_entry_id, created_at, node_class, trigger_type, content_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (node_id_pk, username, persona, node_id_tag, title, content, category, embedding_blob, source_entry_id, timestamp, node_class, trigger_type, content_hash))
             conn.commit()
             conn.close()
         except Exception as e:
@@ -920,16 +1026,16 @@ class UserManager:
 
         return True
 
-    def add_zettel_link(self, link_id, source_node_id, target_node_id, relationship, strength=0.5):
+    def add_zettel_link(self, link_id, source_node_id, target_node_id, relationship, strength=0.5, label='related'):
         """Insert a weighted edge between two nodes."""
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             timestamp = str(datetime.now())
             c.execute("""
-                INSERT OR IGNORE INTO zettel_links (id, source_node_id, target_node_id, relationship, strength, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (link_id, source_node_id, target_node_id, relationship, strength, timestamp))
+                INSERT OR IGNORE INTO zettel_links (id, source_node_id, target_node_id, relationship, strength, created_at, label)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (link_id, source_node_id, target_node_id, relationship, strength, timestamp, label))
             conn.commit()
             conn.close()
             return True
@@ -937,19 +1043,35 @@ class UserManager:
             print(f"DB ERROR (add_zettel_link): {e}")
             return False
 
-    def get_zettel_nodes_for_persona(self, username, persona):
-        """Get all zettel nodes with embeddings for a persona."""
+    def get_zettel_nodes_for_persona(self, username, persona, include_embeddings=True):
+        """Get all zettel nodes for a persona.
+
+        include_embeddings=False skips the embedding BLOB column, which is the
+        hot per-turn path in query_knowledge_graph (node_lookup + trigger scan
+        only — the embedding matrix lives in the cache). Loading blobs there was
+        the exact SQLite I/O the cache exists to avoid.
+        """
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
-            c.execute("""
-                SELECT id, node_id, title, content, category, embedding, source_entry_id, created_at
-                FROM zettel_nodes
-                WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?
-            """, (username, persona))
-            rows = c.fetchall()
-            conn.close()
-            return [{"id": r[0], "node_id": r[1], "title": r[2], "content": r[3], "category": r[4], "embedding": r[5], "source_entry_id": r[6], "created_at": r[7]} for r in rows]
+            if include_embeddings:
+                c.execute("""
+                    SELECT id, node_id, title, content, category, embedding, source_entry_id, created_at, node_class, trigger_type
+                    FROM zettel_nodes
+                    WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?
+                """, (username, persona))
+                rows = c.fetchall()
+                conn.close()
+                return [{"id": r[0], "node_id": r[1], "title": r[2], "content": r[3], "category": r[4], "embedding": r[5], "source_entry_id": r[6], "created_at": r[7], "node_class": r[8], "trigger_type": r[9]} for r in rows]
+            else:
+                c.execute("""
+                    SELECT id, node_id, title, content, category, source_entry_id, created_at, node_class, trigger_type
+                    FROM zettel_nodes
+                    WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?
+                """, (username, persona))
+                rows = c.fetchall()
+                conn.close()
+                return [{"id": r[0], "node_id": r[1], "title": r[2], "content": r[3], "category": r[4], "embedding": None, "source_entry_id": r[5], "created_at": r[6], "node_class": r[7], "trigger_type": r[8]} for r in rows]
         except Exception as e:
             print(f"DB ERROR (get_zettel_nodes_for_persona): {e}")
             return []
@@ -1005,7 +1127,7 @@ class UserManager:
                         continue
                     visited.add(nid)
                     c.execute("""
-                        SELECT zn.id, zn.node_id, zn.title, zn.content, zn.category, zl.relationship, zl.strength
+                        SELECT zn.id, zn.node_id, zn.title, zn.content, zn.category, zl.relationship, zl.strength, zl.label, zn.node_class
                         FROM zettel_links zl
                         JOIN zettel_nodes zn ON (zn.id = zl.target_node_id OR zn.id = zl.source_node_id)
                         WHERE (zl.source_node_id=? OR zl.target_node_id=?)
@@ -1016,7 +1138,8 @@ class UserManager:
                             results.append({
                                 "id": row[0], "node_id": row[1], "title": row[2],
                                 "content": row[3], "category": row[4],
-                                "relationship": row[5], "strength": row[6]
+                                "relationship": row[5], "strength": row[6],
+                                "label": row[7], "node_class": row[8]
                             })
                             next_frontier.append(row[0])
                 frontier = next_frontier
@@ -1049,11 +1172,14 @@ class UserManager:
             row = c.fetchone()
             conn.close()
             if row:
-                return dict(row)
-            return {"username": username, "review_policy": "ask", "auto_execute_terminal": 0, "security_level": "strict"}
+                res = dict(row)
+                if "global_direct_wire" not in res:
+                    res["global_direct_wire"] = 1
+                return res
+            return {"username": username, "review_policy": "ask", "auto_execute_terminal": 0, "security_level": "strict", "global_direct_wire": 1}
         except Exception as e:
             print(f"[DB_ERROR] Failed to fetch settings: {e}")
-            return {"review_policy": "ask"}
+            return {"review_policy": "ask", "global_direct_wire": 1}
 
     def update_user_settings(self, username: str, settings: dict):
         """Updates user governance settings."""
@@ -1065,7 +1191,7 @@ class UserManager:
             c.execute("INSERT OR IGNORE INTO user_settings (username) VALUES (?)", (username,))
             
             for key, value in settings.items():
-                if key in ["review_policy", "auto_execute_terminal", "active_persona_key", "security_level"]:
+                if key in ["review_policy", "auto_execute_terminal", "active_persona_key", "security_level", "global_direct_wire"]:
                     c.execute(f"UPDATE user_settings SET {key} = ? WHERE username = ?", (value, username))
             
             conn.commit()

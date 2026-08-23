@@ -10,6 +10,13 @@ try:
 except ImportError:
     _DEEP_MEMORY_AVAILABLE = False
 
+# Neuromodulator coupling (optional)
+try:
+    import dopamine_state
+    _DA_AVAILABLE = True
+except ImportError:
+    _DA_AVAILABLE = False
+
 class Observer:
     def __init__(self, db: UserManager, username: str, persona: str):
         self.db = db
@@ -52,9 +59,28 @@ class Reflector:
         4. Compress this into a single, high-density paragraph (the 'Dense Observation').
         
         OUTPUT FORMAT:
-        Return ONLY the raw paragraph. No titles, no intro.
+        Return the raw paragraph, then on the FINAL line output exactly:
+        VALENCE: <a float between 0.0 and 1.0 rating the user's emotional tone across this transcript, where 0.0 is very negative and 1.0 is very positive>
         """
         dense_observation = self.llm_callback(reflection_prompt)
+        
+        # ---- SOCIAL RPE: extract valence rating from the reflection ----
+        valence_observed = None
+        if dense_observation:
+            import re as _re
+            _match = _re.search(r"VALENCE:\s*([0-9.]+)\s*$", dense_observation.strip())
+            if _match:
+                try:
+                    valence_observed = float(_match.group(1))
+                except ValueError:
+                    valence_observed = None
+                dense_observation = _re.sub(r"\s*VALENCE:\s*[0-9.]+\s*$", "", dense_observation).strip()
+        
+        if _DA_AVAILABLE and valence_observed is not None:
+            try:
+                dopamine_state.social_reward(self.username, self.persona, valence_observed)
+            except Exception as e:
+                print(f"[DA] social_reward failed (non-fatal): {e}")
         
         if dense_observation and len(dense_observation.strip()) > 10:
             self.db.add_observation(

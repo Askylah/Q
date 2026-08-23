@@ -3,8 +3,16 @@ from typing import List, Tuple
 
 class CodeAlignmentVisitor(ast.NodeVisitor):
     """
-    AST Visitor that scans code for violations of the sovereignty and 
-    security guidelines of the Persona/Q architecture.
+    AST linter for sandbox code. Enforces the execute(args) calling convention
+    and catches the COMMON MISTAKES (importing os/subprocess, eval/exec) that
+    indicate code written for the wrong execution context.
+
+    SECURITY NOTE — this is NOT a security boundary and must never be trusted as
+    one. It is an AST blocklist, and blocklists are bypassable by construction:
+    __import__('o'+'s'), sys.modules[...], getattr chains, and encoded names all
+    evade name-based checks (verified). The ACTUAL containment is the Docker
+    padded room (network none, non-root, read-only rootfs, memory/PID caps).
+    Treat a pass here as "well-formed", never as "safe to run unsandboxed".
     """
     def __init__(self):
         self.errors: List[str] = []

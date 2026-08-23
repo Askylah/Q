@@ -9,7 +9,7 @@
 ### 1. Strict Physics (Sandboxed Security)
 Q is engineered around the principle of zero-trust agent execution. Autonomous agents run inside a root-jailed, network-isolated "Padded Room" container to prevent arbitrary host execution.
 *   **Docker Containment:** Hard limits on compute resources (512MB RAM, 1 CPU, 64 PIDs limit).
-*   **Temporal Guillotine:** Automatic SIGKILL enforcement for runaway processes (30s execution cap).
+*   **Temporal Guillotine:** Automatic SIGKILL enforcement for runaway processes (15s execution cap).
 *   **Governance Gates:** Human-in-the-loop approval routing for sensitive tool calls (e.g., file writes, system edits) with live environmental diff analysis before permission is granted.
 *   **Layer A/B Firewalls:** Real-time syntax and semantic classifiers checking inputs for role-jacking or prompt injection vectors before the payload is sent to cloud APIs.
 

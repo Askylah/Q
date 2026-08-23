@@ -139,17 +139,64 @@ def cycle_wireguard_tunnel() -> bool:
 
     return False
 
+def rotate_windscribe_ip() -> bool:
+    """Rotates Windscribe VPN IP if installed and logged in."""
+    cli_path = r"C:\Program Files\Windscribe\windscribe-cli.exe"
+    if not os.path.exists(cli_path):
+        return False
+    
+    logger.info("[VPN_ROTATOR] Windscribe detected. Attempting IP rotation...")
+    try:
+        # Check connection status first
+        res = subprocess.run([cli_path, "status"], capture_output=True, text=True, timeout=10)
+        if "Logged in" not in res.stdout:
+            logger.warning("[VPN_ROTATOR] Windscribe is installed but not logged in.")
+            return False
+            
+        if "Connected" not in res.stdout:
+            # If not connected, connect to best location
+            logger.info("[VPN_ROTATOR] Windscribe not connected. Connecting to best location...")
+            res_conn = subprocess.run([cli_path, "connect", "best"], capture_output=True, text=True, timeout=30)
+            if res_conn.returncode == 0:
+                logger.info("[VPN_ROTATOR] Windscribe successfully connected to best location.")
+                return True
+            else:
+                logger.error(f"[VPN_ROTATOR] Windscribe connect best failed: {res_conn.stderr}")
+                return False
+        
+        # Already connected, rotate IP
+        logger.info("[VPN_ROTATOR] Windscribe connected. Rotating IP...")
+        res_rot = subprocess.run([cli_path, "ip", "rotate"], capture_output=True, text=True, timeout=30)
+        if res_rot.returncode == 0:
+            logger.info("[VPN_ROTATOR] Windscribe IP successfully rotated.")
+            return True
+        else:
+            # Fallback to reconnecting to best location if rotate fails
+            logger.warning(f"[VPN_ROTATOR] Windscribe IP rotate failed, attempting reconnect to best...")
+            res_conn = subprocess.run([cli_path, "connect", "best"], capture_output=True, text=True, timeout=30)
+            return res_conn.returncode == 0
+            
+    except Exception as e:
+        logger.error(f"[VPN_ROTATOR ERROR] Windscribe rotation failed: {e}")
+        return False
+
 def rotate_egress_route() -> bool:
-    """Trigger rotation across Tailscale mesh exit nodes, falling back to WireGuard interfaces."""
+    """Trigger rotation across Windscribe, Tailscale mesh exit nodes, falling back to WireGuard interfaces."""
     logger.warning("[VPN_ROTATOR] Connection failures detected. Initiating egress path rotation...")
     
-    # 1. Cycle Tailscale exit nodes first
+    # 1. Try Windscribe rotation first
+    if rotate_windscribe_ip():
+        logger.info("[VPN_ROTATOR] Stabilizing new connection (3s delay)...")
+        time.sleep(3.0)
+        return True
+        
+    # 2. Cycle Tailscale exit nodes if Windscribe not active/installed
     if cycle_tailscale_exit_node():
         logger.info("[VPN_ROTATOR] Stabilizing new connection (3s delay)...")
         time.sleep(3.0)
         return True
 
-    # 2. Fallback to WireGuard profiles if Tailscale fails
+    # 3. Fallback to WireGuard profiles if Tailscale/Windscribe fails
     if cycle_wireguard_tunnel():
         logger.info("[VPN_ROTATOR] Stabilizing new connection (3s delay)...")
         time.sleep(3.0)
@@ -162,4 +209,10 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "rotate":
         rotate_egress_route()
     else:
+        cli_path = r"C:\Program Files\Windscribe\windscribe-cli.exe"
+        if os.path.exists(cli_path):
+            print("Windscribe found! Status:")
+            subprocess.run([cli_path, "status"])
+        else:
+            print("Windscribe not found.")
         print("Tailscale exit nodes found:", get_tailscale_exit_nodes())

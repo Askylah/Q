@@ -1,6 +1,16 @@
 import os
 from rag_engine import PersonaRAG
 
+# ⚠️ LEGACY + BROKEN — DO NOT RUN AS-IS.
+# 1. This targets the rag_engine pickle store, which the zettel engine has
+#    superseded. Persona knowledge should be ingested via zettel process_entry.
+# 2. The calls below are arity-mismatched against the current rag_engine:
+#      clear_persona_knowledge(persona_name)          # missing active_username
+#      add_document(chunk, persona_name, source=...)  # missing username
+#    Both raise TypeError on first run. Left unfixed intentionally — fixing a
+#    deprecated path invites reintroducing the third retrieval system. If you
+#    still need it short-term, pass a username (e.g. "System") to both calls.
+
 def chunk_text(text, chunk_size=1000, overlap=100):
     """Simple chunking with overlap."""
     chunks = []

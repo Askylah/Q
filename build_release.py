@@ -33,11 +33,12 @@ def build_release():
     core_files = [
         "main.py", "llm_engine.py", "workspace_engine.py", "secure_runner.py", 
         "firewall.py", "database.py", "rag_engine.py", "mode_engine.py", 
-        "memory_engine.py", "observational_memory.py", "zettel_engine.py", 
-        "on_demand_loader.py", "plugin_manager.py", "mcp_client.py", 
+        "memory_engine.py", "dopamine_state.py", "zettel_engine.py", 
+        "plugin_manager.py", "mcp_client.py", 
         "mcp_server.py", "skill_orchestrator.py", "governance_manager.py",
-        "ingest.py", "output_validator.py", "inversion_engine.py", "redis_client.py",
-        "alignment_engine.py", "redis_pool.py", "vpn_rotator.py", "stream_worker.py"
+        "ingest.py", "output_validator.py", "context_adapter.py", "redis_client.py",
+        "alignment_engine.py", "redis_pool.py", "vpn_rotator.py", "stream_worker.py",
+        "data_sanitizer.py", "semantic_adapter.py"
     ]
     for f in core_files:
         src = os.path.join(root_dir, f)

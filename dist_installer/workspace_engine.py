@@ -137,7 +137,7 @@ class SafeWorkspace:
     #  Execution API (The Lab Bench)                                      #
     # ------------------------------------------------------------------ #
 
-    def run_code_secure(self, code: str, timeout: int = 30, max_output: int = 8192) -> str:
+    def run_code_secure(self, code: str, timeout: int = 15, max_output: int = 8192) -> str:
         """
         Executes code inside a hardened Docker container with 'Strict' constraints.
         - Memory: 512MB
@@ -145,7 +145,7 @@ class SafeWorkspace:
         - PIDs: 64 (Fork bomb protection)
         - Network: None
         - User: persona-user (Non-root)
-        - Temporal Guillotine: 30s
+        - Temporal Guillotine: 15s
         - Output Cap: max_output chars (default 8192)
         """
         temp_id = str(uuid.uuid4())[:8]

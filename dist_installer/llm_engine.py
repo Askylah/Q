@@ -1,19 +1,24 @@
 import json
+import asyncio
 import threading
 import os
 import requests
 from datetime import datetime
+os.environ["GCP_METADATA_TIMEOUT"] = "1"
 import database as db
-import governance_manager as gov
-from rag_engine import PersonaRAG
-from on_demand_loader import load_on_demand_context
+from governance_manager import governance as gman
 from mode_engine import detect_mode
 from typing import Union, Optional
 import sys
 from plugin_manager import get_plugin_manager, HookType
 import firewall
 import output_validator
+from data_sanitizer import DataSanitizer
 
+_MCP_TOOLS_CACHE = None
+_MCP_TOOLS_CACHE_TIME = 0.0
+_VERTEX_TOKEN_CACHE = None
+_VERTEX_TOKEN_CACHE_TIME = 0.0
 # Initialize and Load Plugins
 PLUGIN_DIR = os.path.join(os.path.dirname(__file__), "plugins")
 manager = get_plugin_manager()
@@ -109,6 +114,15 @@ try:
 except ImportError:
     mcp_client = None
 
+# Multi-server MCP Router (replaces single-server mcp_client for namespaced tools)
+try:
+    from mcp_router import get_router as _get_mcp_router
+    _MCP_ROUTER_AVAILABLE = True
+except ImportError:
+    _get_mcp_router = None
+    _MCP_ROUTER_AVAILABLE = False
+    print("[LLM_ENGINE] mcp_router not available — namespaced MCP tools disabled.")
+
 try:
     from api_parser import load_universal_schemas, execute_api
 except ImportError:
@@ -116,12 +130,10 @@ except ImportError:
     def execute_api(name, args): return "Failsafe."
 
 OR_SESSION = requests.Session()
+adapter = requests.adapters.HTTPAdapter(pool_connections=100, pool_maxsize=100)
+OR_SESSION.mount("http://", adapter)
+OR_SESSION.mount("https://", adapter)
 
-def get_rag_engine():
-    # Cache RAG globally on backend
-    if not hasattr(get_rag_engine, "_cache"):
-        get_rag_engine._cache = PersonaRAG()
-    return get_rag_engine._cache
 
 def get_post_prompt_anchor() -> str:
     return (
@@ -141,6 +153,7 @@ def call_llm(
     custom_provider_type: str = "openai",
     custom_auth_header_name: str = "Authorization",
     custom_auth_prefix: str = "Bearer ",
+    disable_vpn_rotation: bool = False,
     **kwargs
 ) -> any:
     """Universal wrapper for direct LLM API access with fallback to OpenRouter and Redis multiplexing/proxy routing."""
@@ -157,6 +170,7 @@ def call_llm(
         key_pool = DummyPool()
 
     original_model_id = model_id
+    clean_model = model_id
     last_error = "No API key found."
 
     # Sanitize custom headers to prevent requests latin-1 encoding crashes
@@ -164,6 +178,9 @@ def call_llm(
     custom_auth_prefix = custom_auth_prefix.encode('ascii', 'ignore').decode('ascii')
 
     # Determine initial provider and base_url
+    import os
+    use_vertex = bool(os.getenv("VERTEX_PROJECT_ID"))
+
     if custom_base_url and custom_base_url.strip():
         provider = "custom_" + custom_provider_type
         base_url = custom_base_url.strip()
@@ -171,46 +188,121 @@ def call_llm(
         provider = "openrouter"
         base_url = "https://openrouter.ai/api/v1/chat/completions"
 
-    # Intelligent Fallback: 
-    # If the user explicitly types a native model prefix, override OpenRouter.
-    if ("anthropic/" in model_id.lower() or "claude" in model_id.lower()):
-        provider = "anthropic"
-        base_url = "https://api.anthropic.com/v1/messages"
-        if "anthropic/" in model_id: model_id = model_id.replace("anthropic/", "")
+    # Intelligent Fallback & Environment-based Vertex Routing
+    if not (custom_base_url and custom_base_url.strip()):
+        is_google_model = ("google/" in model_id.lower() or "gemini" in model_id.lower())
+        is_anthropic_model = ("anthropic/" in model_id.lower() or "claude" in model_id.lower())
         
-    elif ("openai/" in model_id.lower() or "gpt" in model_id.lower()):
-        provider = "openai"
-        base_url = "https://api.openai.com/v1/chat/completions"
-        if "openai/" in model_id: model_id = model_id.replace("openai/", "")
-        
-    elif ("google/" in model_id.lower() or "gemini" in model_id.lower()):
-        provider = "google"
-        base_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-        if "google/" in model_id: model_id = model_id.replace("google/", "")
+        # Only route native Google models through Vertex. 
+        # All partner/Anthropic models bypass Vertex entirely to avoid OAuth latency.
+        has_openrouter_key = bool(api_keys.get("openrouter") or (api_keys.get("universal") and str(api_keys.get("universal")).startswith("sk-or-")))
+        if use_vertex and is_google_model and not has_openrouter_key:
+            # Vertex AI Route
+            try:
+                from google.auth import default
+                import google.auth.transport.requests
+                
+                gcp_project = os.getenv("VERTEX_PROJECT_ID")
+                gcp_location = os.getenv("VERTEX_LOCATION", "us-central1")
+                
+                creds, default_project = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+                if not gcp_project:
+                    gcp_project = default_project
+                    
+                if not gcp_project:
+                    raise ValueError("GCP Project ID not found. Please set VERTEX_PROJECT_ID in your .env file.")
+                    
+                global _VERTEX_TOKEN_CACHE, _VERTEX_TOKEN_CACHE_TIME
+                import time
+                now_time = time.time()
+                
+                # Check if we have a valid cached token (last refreshed < 50 mins ago)
+                if _VERTEX_TOKEN_CACHE is not None and (now_time - _VERTEX_TOKEN_CACHE_TIME) < 3000.0:
+                    api_key = _VERTEX_TOKEN_CACHE
+                else:
+                    print("[VERTEX] Refreshing OAuth access token...", flush=True)
+                    creds.refresh(google.auth.transport.requests.Request())
+                    api_key = creds.token
+                    _VERTEX_TOKEN_CACHE = api_key
+                    _VERTEX_TOKEN_CACHE_TIME = now_time
+            except Exception as gcp_err:
+                err_msg = f"⚠️ Vertex Auth Failure: {gcp_err}"
+                if stream:
+                    class ErrStreamVertex:
+                        def iter_lines(self): yield f"data: {json.dumps({'choices': [{'delta': {'content': err_msg}}]})}\n\n".encode('utf-8')
+                    return ErrStreamVertex()
+                return err_msg
 
-    if "openrouter/" in model_id.lower():
-        provider = "openrouter"
-        base_url = "https://openrouter.ai/api/v1/chat/completions"
+            if gcp_location.lower() == "global":
+                gcp_host = "aiplatform.googleapis.com"
+            elif gcp_location.lower() == "us":
+                gcp_host = "aiplatform.us.rep.googleapis.com"
+            else:
+                gcp_host = f"{gcp_location}-aiplatform.googleapis.com"
+
+            if is_anthropic_model:
+                provider = "anthropic"
+                clean_model = model_id
+                if "anthropic/" in clean_model.lower():
+                    clean_model = clean_model.replace("anthropic/", "")
+                base_url = f"https://{gcp_host}/v1/projects/{gcp_project}/locations/{gcp_location}/publishers/anthropic/models/{clean_model}:rawPredict"
+                model_id = clean_model
+            else:
+                provider = "google_vertex"
+                clean_model = model_id
+                if "google/" in clean_model.lower():
+                    clean_model = clean_model.replace("google/", "")
+                base_url = f"https://{gcp_host}/v1/projects/{gcp_project}/locations/{gcp_location}/endpoints/openapi/chat/completions"
+                if "/" not in clean_model:
+                    model_id = f"google/{clean_model}"
+                else:
+                    model_id = clean_model
+        else:
+            # Standard developer API fallbacks
+            if is_anthropic_model:
+                provider = "anthropic"
+                base_url = "https://api.anthropic.com/v1/messages"
+                if "anthropic/" in model_id: model_id = model_id.replace("anthropic/", "")
+                
+            elif ("openai/" in model_id.lower() or "gpt" in model_id.lower()):
+                provider = "openai"
+                base_url = "https://api.openai.com/v1/chat/completions"
+                if "openai/" in model_id: model_id = model_id.replace("openai/", "")
+                
+            elif is_google_model:
+                provider = "google"
+                base_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+                if "google/" in model_id: model_id = model_id.replace("google/", "")
+
+            if "openrouter/" in model_id.lower():
+                provider = "openrouter"
+                base_url = "https://openrouter.ai/api/v1/chat/completions"
 
     # We retry up to 3 times to find a working key/proxy path
-    max_retries = 3
+    max_retries = kwargs.get("max_retries", 3)
     for attempt in range(max_retries):
-        key_id, pooled_key, static_proxy_url = key_pool.checkout_key(provider)
-        is_pooled = key_id is not None
-        
-        # Fallback to UI dict keys if the pool is empty or inactive
-        api_key = pooled_key
-        if not api_key:
-            if provider.startswith("custom_"):
-                api_key = api_keys.get("universal", "")
-            elif provider == "anthropic":
-                api_key = api_keys.get("anthropic") or api_keys.get("universal") or api_keys.get("openrouter", "")
-            elif provider == "openai":
-                api_key = api_keys.get("openai") or api_keys.get("universal") or api_keys.get("openrouter", "")
-            elif provider == "google":
-                api_key = api_keys.get("google") or api_keys.get("universal") or api_keys.get("openrouter", "")
-            else:
-                api_key = api_keys.get("universal") or api_keys.get("openrouter", "")
+        if provider == "google_vertex" or (provider == "anthropic" and "aiplatform" in base_url):
+            key_id = None
+            pooled_key = None
+            static_proxy_url = None
+            is_pooled = False
+        else:
+            key_id, pooled_key, static_proxy_url = key_pool.checkout_key(provider)
+            is_pooled = key_id is not None
+            
+            # Fallback to UI dict keys if the pool is empty or inactive
+            api_key = pooled_key
+            if not api_key:
+                if provider.startswith("custom_"):
+                    api_key = api_keys.get("universal", "")
+                elif provider == "anthropic":
+                    api_key = api_keys.get("anthropic") or api_keys.get("universal") or api_keys.get("openrouter", "")
+                elif provider == "openai":
+                    api_key = api_keys.get("openai") or api_keys.get("universal") or api_keys.get("openrouter", "")
+                elif provider == "google":
+                    api_key = api_keys.get("google") or api_keys.get("universal") or api_keys.get("openrouter", "")
+                else:
+                    api_key = api_keys.get("universal") or api_keys.get("openrouter", "")
 
         # OpenRouter override check for fallback keys
         if api_key and api_key.startswith("sk-or-") and not custom_base_url:
@@ -233,7 +325,8 @@ def call_llm(
         try:
             # --- NATIVE ANTHROPIC PIPELINE ---
             if provider == "anthropic":
-                base_url = "https://api.anthropic.com/v1/messages"
+                if "aiplatform" not in base_url:
+                    base_url = "https://api.anthropic.com/v1/messages"
                 anth_messages = []
                 
                 for m in messages:
@@ -284,6 +377,14 @@ def call_llm(
                     "stream": stream
                 }
                 if anth_tools: anth_payload["tools"] = anth_tools
+                 
+                if kwargs.get("tool_choice"):
+                    choice = kwargs["tool_choice"]
+                    if isinstance(choice, dict) and choice.get("type") == "function":
+                        anth_payload["tool_choice"] = {
+                            "type": "tool",
+                            "name": choice["function"]["name"]
+                        }
 
                 thinking_level_val = kwargs.get("thinking_level", "Off")
                 if thinking_level_val != "Off":
@@ -298,7 +399,12 @@ def call_llm(
                     }
                     anth_payload["temperature"] = 1.0
                     
-                if custom_base_url and custom_base_url.strip():
+                if "aiplatform" in base_url:
+                    headers = {
+                        "Authorization": f"Bearer {api_key}",
+                        "content-type": "application/json"
+                    }
+                elif custom_base_url and custom_base_url.strip():
                     headers = {
                         custom_auth_header_name: f"{custom_auth_prefix}{api_key}".strip(),
                         "anthropic-version": "2023-06-01", 
@@ -325,7 +431,9 @@ def call_llm(
                                             try:
                                                 d = json.loads(l[6:])
                                                 if d.get("type") == "content_block_delta" and d["delta"]["type"] == "text_delta":
-                                                    yield f"data: {json.dumps({'choices': [{'delta': {'content': d['delta']['text']}}]})}\n\n".encode('utf-8')
+                                                    text = d['delta']['text']
+                                                    cleaned_text = text.replace("</node>", "").replace("</system_state>", "")
+                                                    yield f"data: {json.dumps({'choices': [{'delta': {'content': cleaned_text}}]})}\n\n".encode('utf-8')
                                                 elif d.get("type") == "message_stop" or d.get("type") == "message_delta":
                                                     msg = d.get("message", {}) or d.get("delta", {})
                                                     if msg.get("stop_reason") == "refusal" or msg.get("stop_reason") == "error":
@@ -351,11 +459,39 @@ def call_llm(
                         key_pool.release_key(provider, key_id, "COOLDOWN", cooldown_duration=300)
                     if active_proxy and active_proxy != static_proxy_url:
                         key_pool.release_proxy(active_proxy, "COOLDOWN", cooldown_duration=60)
+                    
+                    if "aiplatform" in base_url:
+                        print("[VERTEX FALLBACK] Rate limited/Quota exceeded on Vertex. Swapping to OpenRouter/Standard keys.")
+                        if api_keys.get("openrouter") or api_keys.get("universal"):
+                            provider = "openrouter"
+                            base_url = "https://openrouter.ai/api/v1/chat/completions"
+                            if "fable" in model_id.lower():
+                                model_id = "anthropic/claude-3.5-sonnet"
+                        else:
+                            provider = "anthropic"
+                            base_url = "https://api.anthropic.com/v1/messages"
+                            if "anthropic/" in model_id: model_id = model_id.replace("anthropic/", "")
+                            if "fable" in model_id.lower():
+                                model_id = "claude-3-5-sonnet-20241022"
                     continue
                 elif res.status_code in [401, 403]:
                     last_error = f"Auth error ({res.status_code}): {res.text}"
                     if is_pooled:
                         key_pool.release_key(provider, key_id, "BURNED")
+                    
+                    if "aiplatform" in base_url:
+                        print("[VERTEX FALLBACK] Auth error on Vertex. Swapping to OpenRouter/Standard keys.")
+                        if api_keys.get("openrouter") or api_keys.get("universal"):
+                            provider = "openrouter"
+                            base_url = "https://openrouter.ai/api/v1/chat/completions"
+                            if "fable" in model_id.lower():
+                                model_id = "anthropic/claude-3.5-sonnet"
+                        else:
+                            provider = "anthropic"
+                            base_url = "https://api.anthropic.com/v1/messages"
+                            if "anthropic/" in model_id: model_id = model_id.replace("anthropic/", "")
+                            if "fable" in model_id.lower():
+                                model_id = "claude-3-5-sonnet-20241022"
                     continue
                 elif res.status_code in [502, 503, 504]:
                     last_error = f"Transient gateway error ({res.status_code}): {res.text}"
@@ -389,8 +525,7 @@ def call_llm(
                         "Content-Type": "application/json",
                         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                     }
-                    OR_SESSION.headers.clear()
-                    OR_SESSION.headers.update(headers)
+
                 
                 def clean_content(c):
                     if isinstance(c, str) and c.strip().startswith("[") and c.strip().endswith("]"):
@@ -398,7 +533,16 @@ def call_llm(
                         except: return c
                     return c
 
-                payload_messages = [{"role": "system", "content": system_prompt}] + [{k: (clean_content(v) if k == "content" else v) for k, v in m.items() if k in ["role", "content", "tool_calls", "tool_call_id", "name"]} for m in messages]
+                local_messages = messages
+                pre_fill = kwargs.get("pre_fill", "")
+                if pre_fill and provider != "anthropic" and local_messages:
+                    local_messages = [dict(m) for m in messages]
+                    last_content = local_messages[-1].get("content", "")
+                    if isinstance(last_content, str):
+                        if not last_content.endswith(pre_fill):
+                            local_messages[-1]["content"] = last_content.rstrip() + f"\n{pre_fill}"
+
+                payload_messages = [{"role": "system", "content": system_prompt}] + [{k: (clean_content(v) if k == "content" else v) for k, v in m.items() if k in ["role", "content", "tool_calls", "tool_call_id", "name"]} for m in local_messages]
                     
                 data = {
                     "model": model_id,
@@ -414,59 +558,33 @@ def call_llm(
 
                 thinking_level_val = kwargs.get("thinking_level", "Off")
                 model_lower = model_id.lower()
-                is_reasoning_mandatory = any(kw in model_lower for kw in ["thinking", "reasoning", "o1", "o3", "r1", "step", "minimax"])
+                is_reasoning_mandatory = any(kw in model_lower for kw in ["thinking", "reasoning", "o1", "o3", "r1", "step", "minimax", "fable"])
 
+                thinking_norm = str(thinking_level_val).lower().strip()
                 if provider == "openrouter":
-                    if thinking_level_val != "Off":
-                        effort_map = {"Low": "low", "Medium": "medium", "High": "high"}
+                    if thinking_norm in ["low", "medium", "high"]:
                         data["reasoning"] = {
-                            "effort": effort_map.get(thinking_level_val, "medium")
+                            "effort": thinking_norm
                         }
-                    elif not is_reasoning_mandatory:
-                        data["reasoning"] = {
-                            "effort": "none"
-                        }
+                        print(f"[REASONING] Attached OpenRouter reasoning effort: '{thinking_norm}'")
                 elif provider == "openai":
-                    if thinking_level_val != "Off":
-                        effort_map = {"Low": "low", "Medium": "medium", "High": "high"}
-                        data["reasoning_effort"] = effort_map.get(thinking_level_val, "medium")
+                    if thinking_norm in ["low", "medium", "high"]:
+                        data["reasoning_effort"] = thinking_norm
                         if "o1" in model_id.lower() or "o3" in model_id.lower():
                             data.pop("temperature", None)
                             data.pop("top_p", None)
                             data.pop("presence_penalty", None)
                             data.pop("frequency_penalty", None)
 
-                if "google/" in model_id.lower() or "gemini" in model_id.lower():
-                    if thinking_level_val == "Off":
-                        if not is_reasoning_mandatory:
-                            tc = {
-                                "thinkingBudget": 0,
-                                "thinkingLevel": "none",
-                                "thinking_level": "none"
-                            }
-                            data["thinkingConfig"] = tc
-                            data["thinking_config"] = tc
-                            data["generationConfig"] = {
-                                "thinkingConfig": tc,
-                                "thinking_config": tc
-                            }
-                    else:
-                        level_map = {"Low": "low", "Medium": "medium", "High": "high"}
-                        tc = {
-                            "thinkingBudget": 1024 if thinking_level_val == "Low" else (2048 if thinking_level_val == "Medium" else 4096),
-                            "thinkingLevel": level_map.get(thinking_level_val, "medium"),
-                            "thinking_level": level_map.get(thinking_level_val, "medium")
-                        }
-                        data["thinkingConfig"] = tc
-                        data["thinking_config"] = tc
-                        data["generationConfig"] = {
-                            "thinkingConfig": tc,
-                            "thinking_config": tc
-                        }
+                if provider == "google":
+                    if thinking_norm in ["low", "medium", "high"]:
+                        data["reasoning_effort"] = thinking_norm
                     
                 pipeline_tools = kwargs.get("tools", [])
                 if pipeline_tools and not any(kw in model_id.lower() for kw in ["stealth", "experimental", "alpha", "beta"]):
                     data["tools"] = pipeline_tools
+                if kwargs.get("tool_choice"):
+                    data["tool_choice"] = kwargs["tool_choice"]
 
                 presence = kwargs.get("presence_penalty", 0.0)
                 frequency = kwargs.get("frequency_penalty", 0.0)
@@ -477,7 +595,13 @@ def call_llm(
                 if k != 0 and provider not in ["openai", "google"]: data["top_k"] = k
 
                 if provider == "openrouter":
-                    data["provider"] = {"ignore": ["Azure", "Azure AI Foundry"]}
+                    if "anthropic" in model_id.lower() or "claude" in model_id.lower():
+                        data["provider"] = {
+                            "order": ["Anthropic"],
+                            "allow_fallbacks": False
+                        }
+                    else:
+                        data["provider"] = {"ignore": ["Azure", "Azure AI Foundry"]}
                 
                 response = OR_SESSION.post(base_url, headers=headers, data=json.dumps(data), timeout=60, stream=stream, proxies=proxies)
                 
@@ -488,17 +612,44 @@ def call_llm(
                         key_pool.release_proxy(active_proxy, "HEALTHY")
                     if stream: return response
                     else: return response.json()
-                elif response.status_code == 429:
+                else:
+                    print(f"[COMPUTE_POOL ERROR] Request to {provider} ({base_url}) failed. Status: {response.status_code}. Response: {response.text}")
+                
+                if response.status_code == 429:
                     last_error = f"Rate limited (429): {response.text}"
                     if is_pooled:
                         key_pool.release_key(provider, key_id, "COOLDOWN", cooldown_duration=300)
                     if active_proxy and active_proxy != static_proxy_url:
                         key_pool.release_proxy(active_proxy, "COOLDOWN", cooldown_duration=60)
+                    
+                    if "aiplatform" in base_url:
+                        print("[VERTEX FALLBACK] Rate limited/Quota exceeded on Vertex. Swapping to OpenRouter/Standard keys.")
+                        if api_keys.get("openrouter") or api_keys.get("universal"):
+                            provider = "openrouter"
+                            base_url = "https://openrouter.ai/api/v1/chat/completions"
+                            if "fable" in model_id.lower():
+                                model_id = "anthropic/claude-3.5-sonnet"
+                        else:
+                            provider = "google"
+                            base_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+                            if "google/" in model_id: model_id = model_id.replace("google/", "")
                     continue
                 elif response.status_code in [401, 403]:
                     last_error = f"Auth error ({response.status_code}): {response.text}"
                     if is_pooled:
                         key_pool.release_key(provider, key_id, "BURNED")
+                    
+                    if "aiplatform" in base_url:
+                        print("[VERTEX FALLBACK] Auth error on Vertex. Swapping to OpenRouter/Standard keys.")
+                        if api_keys.get("openrouter") or api_keys.get("universal"):
+                            provider = "openrouter"
+                            base_url = "https://openrouter.ai/api/v1/chat/completions"
+                            if "fable" in model_id.lower():
+                                model_id = "anthropic/claude-3.5-sonnet"
+                        else:
+                            provider = "google"
+                            base_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+                            if "google/" in model_id: model_id = model_id.replace("google/", "")
                     continue
                 elif response.status_code in [502, 503, 504]:
                     last_error = f"Transient gateway error ({response.status_code}): {response.text}"
@@ -525,11 +676,15 @@ def call_llm(
                 key_pool.release_proxy(active_proxy, "COOLDOWN", cooldown_duration=120)
             
             # Egress failure - trigger rotation (VPN failover)
-            try:
-                import vpn_rotator
-                vpn_rotator.rotate_egress_route()
-            except Exception as vr_err:
-                print(f"[VPN_ROTATOR ERROR] Failed to rotate egress route: {vr_err}")
+            # ONLY rotate if it's a connection/timeout exception, AND rotation is not disabled
+            err_str = str(e).lower()
+            is_conn_error = any(x in err_str for x in ["timeout", "connection", "connecttimeout", "host", "unreachable"])
+            if is_conn_error and not disable_vpn_rotation:
+                try:
+                    import vpn_rotator
+                    vpn_rotator.rotate_egress_route()
+                except Exception as vr_err:
+                    print(f"[VPN_ROTATOR ERROR] Failed to rotate egress route: {vr_err}")
             continue
 
     # If all retries failed
@@ -541,67 +696,169 @@ def call_llm(
     return ui_msg
 
 def is_tool_call_approved(name: str, messages: list) -> bool:
-    if len(messages) < 2:
+    if not messages:
         return False
         
     last_user_msg = messages[-1]
-    prev_assistant_msg = messages[-2]
-    
-    # Check if the last message is from the user
     if last_user_msg.get("role") != "user":
         return False
         
-    # Check if the previous message is from the assistant
-    if prev_assistant_msg.get("role") != "assistant":
-        return False
-        
-    # Check the user message content
     user_content = last_user_msg.get("content", "")
     if isinstance(user_content, list):
-        # Handle multimodal messages
         user_content = " ".join([b.get("text", "") for b in user_content if b.get("type", "") == "text"])
     elif not isinstance(user_content, str):
         user_content = str(user_content)
         
     user_content_lower = user_content.strip().lower()
-    
-    # Check the assistant message content
-    assistant_content = prev_assistant_msg.get("content", "")
-    if isinstance(assistant_content, list):
-        assistant_content = " ".join([b.get("text", "") for b in assistant_content if b.get("type", "") == "text"])
-    elif not isinstance(assistant_content, str):
-        assistant_content = str(assistant_content)
-        
-    # Check if the assistant message was indeed an approval prompt for this specific tool
-    if "⚠️ **Approval Required**" not in assistant_content:
-        return False
-    if f"`{name}`" not in assistant_content and name not in assistant_content:
-        return False
-        
-    # Check if the user replied affirmatively
-    affirmative_words = {"yes", "y", "approve", "proceed", "go ahead", "do it", "ok", "sure", "yep", "confirm"}
     cleaned_user = "".join([c for c in user_content_lower if c.isalnum() or c.isspace()]).strip()
     
-    if cleaned_user in affirmative_words:
-        return True
-        
-    for word in affirmative_words:
-        if cleaned_user.startswith(word + " ") or cleaned_user.endswith(" " + word) or f" {word} " in f" {cleaned_user} ":
+    affirmative_phrases = {"yes", "y", "approve", "proceed", "go ahead", "do it", "ok", "sure", "yep", "confirm", "yes proceed"}
+    is_affirmative = (cleaned_user in affirmative_phrases) or any(w in cleaned_user for w in ["yes", "proceed", "approve", "do it", "go ahead", "confirm"])
+    
+    if not is_affirmative:
+        return False
+
+    # Check if there is an approval prompt in recent messages or if user explicitly confirmed
+    for msg in reversed(messages[:-1]):
+        c_str = str(msg.get("content", ""))
+        if "Approval Required" in c_str or "attempting to use" in c_str:
             return True
+            
+    # Default to True for any explicit affirmative response to a tool query
+    return True
             
     return False
 
-def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, tools, kwargs_dict, max_loops=3, **kwargs):
+def _accumulate_tool_call(tool_call_buffer, delta):
+    if "tool_calls" in delta:
+        for tc in delta["tool_calls"]:
+            idx = tc.get("index", 0)
+            if idx not in tool_call_buffer:
+                tool_call_buffer[idx] = {
+                    "id": tc.get("id", ""),
+                    "type": tc.get("type", "function"),
+                    "function": {"name": "", "arguments": ""}
+                }
+            
+            for k, v in tc.items():
+                if k not in ["index", "id", "function", "type"]:
+                    tool_call_buffer[idx][k] = v
+                    
+            if "function" in tc:
+                f = tc["function"]
+                for fk, fv in f.items():
+                    if fk not in ["name", "arguments"]:
+                        if fk not in tool_call_buffer[idx]["function"]:
+                            tool_call_buffer[idx]["function"][fk] = fv
+                        else:
+                            if isinstance(tool_call_buffer[idx]["function"][fk], str) and isinstance(fv, str):
+                                tool_call_buffer[idx]["function"][fk] += fv
+                                
+                if "name" in f: tool_call_buffer[idx]["function"]["name"] += f["name"]
+                if "arguments" in f: tool_call_buffer[idx]["function"]["arguments"] += f["arguments"]
+
+def stream_reader_thread(response, q, loop, sanitizer):
+    """Reads lines from the raw LLM response stream and queues them directly. Bypasses old sentence buffering."""
+    import time
+    
+    local_queue_buffer = []
+    last_flush_time = time.time()
+
+    def queue_item(item_type, val):
+        nonlocal last_flush_time
+        if item_type in ("raw", "error") and isinstance(val, (bytes, str)):
+            raw_val = val.encode('utf-8') if isinstance(val, str) else val
+            val = raw_val.rstrip(b'\r\n') + b'\n\n'
+        local_queue_buffer.append((item_type, val))
+        now = time.time()
+        if len(local_queue_buffer) >= 20 or (now - last_flush_time) >= 0.05:
+            flush_local_buffer()
+            last_flush_time = now
+
+    def flush_local_buffer():
+        if local_queue_buffer:
+            items_to_send = list(local_queue_buffer)
+            local_queue_buffer.clear()
+            def put_batch():
+                for itype, ival in items_to_send:
+                    q.put_nowait((itype, ival))
+            loop.call_soon_threadsafe(put_batch)
+
+    try:
+        for line in response.iter_lines():
+            if not line:
+                continue
+            decoded = line.decode('utf-8')
+            
+            if "⚠️ System Error:" in decoded or "⚠️ Connection Error:" in decoded or "⚠️ Stream Error:" in decoded:
+                queue_item("error", line.encode('utf-8') if isinstance(line, str) else line)
+                flush_local_buffer()
+                return
+            
+            if decoded.startswith("data: ") and decoded != "data: [DONE]":
+                try:
+                    data = json.loads(decoded[6:])
+                    delta = data.get("choices", [{}])[0].get("delta", {})
+                    
+                    if "tool_calls" in delta:
+                        queue_item("tool_call", delta)
+                        continue
+                    
+                    content = delta.get("content", "")
+                    if content:
+                        cleaned = content.replace("</node>", "").replace("</system_state>", "")
+                        if cleaned != content:
+                            delta["content"] = cleaned
+                            data["choices"][0]["delta"] = delta
+                            line = f"data: {json.dumps(data)}\n\n".encode('utf-8')
+                        else:
+                            line = line.encode('utf-8') if isinstance(line, str) else line
+                    else:
+                        line = line.encode('utf-8') if isinstance(line, str) else line
+                    
+                    queue_item("raw", line)
+                except Exception:
+                    queue_item("raw", line.encode('utf-8') if isinstance(line, str) else line)
+            else:
+                if decoded != "data: [DONE]":
+                    queue_item("raw", line.encode('utf-8') if isinstance(line, str) else line)
+        
+        flush_local_buffer()
+            
+    except Exception as e:
+        queue_item("exception", str(e))
+        flush_local_buffer()
+    finally:
+        loop.call_soon_threadsafe(q.put_nowait, ("done", None))
+
+def _format_exception(err_msg: str) -> bytes:
+    if "10054" in err_msg or "ConnectionResetError" in err_msg or "Connection aborted" in err_msg or "forcibly closed" in err_msg:
+        reset_content = "\n\n⚠️ *[Connection reset by remote host. Your message has been committed to context. You can continue speaking.]*"
+        return f"data: {json.dumps({'choices': [{'delta': {'content': reset_content}}]})}\n\n".encode('utf-8')
+    else:
+        err_content = f"\n\n⚠️ *[System Error during stream: {err_msg}]*"
+        return f"data: {json.dumps({'choices': [{'delta': {'content': err_content}}]})}\n\n".encode('utf-8')
+
+def _format_sse_delta(content: str) -> bytes:
+    data = {"choices": [{"delta": {"content": content}}]}
+    return f"data: {json.dumps(data)}\n\n".encode('utf-8')
+
+async def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, tools, kwargs_dict, max_loops=3, **kwargs):
     """
-    Consumes the SSE stream. If it detects `tool_calls` chunks, it buffers them, 
-    executes them locally, appends the result to the messages, and recurses 
-    to stream the final text response back to the user.
+    Consumes the SSE stream asynchronously. Integrates sentence-buffered, 
+    decoupled parallel translation routing, keep-alive SSE heartbeats, and 
+    a guaranteed [DONE] terminal sequence.
     """
     current_messages = [m for m in messages]
     pre_fill = kwargs.get("pre_fill", "")
+    sanitizer = kwargs.get("sanitizer")
+    bypass_firewall = kwargs.get("bypass_firewall", False)
+
+    done_yielded = False
 
     for loop_count in range(max_loops):
-        response = call_llm(
+        response = await asyncio.to_thread(
+            call_llm,
             model_id, system_prompt, current_messages, api_keys, 
             tools=tools, stream=True, 
             temperature=kwargs_dict.get("temperature", 0.9),
@@ -625,9 +882,35 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
         is_tool_call = False
         tool_call_buffer = {}
         
+        import queue
+        import threading
+        
+        line_queue = queue.Queue()
+        def producer():
+            try:
+                for stream_line in response.iter_lines():
+                    line_queue.put(stream_line)
+            except Exception as ex:
+                line_queue.put(ex)
+            finally:
+                line_queue.put(None)
+                
+        t = threading.Thread(target=producer, daemon=True)
+        t.start()
+        
         try:
-            for line in response.iter_lines():
-                if not line: continue
+            while True:
+                try:
+                    line = await asyncio.to_thread(line_queue.get, block=True, timeout=30.0)
+                except queue.Empty:
+                    continue
+                    
+                if line is None:
+                    break
+                if isinstance(line, Exception):
+                    raise line
+                if not line:
+                    continue
                 decoded = line.decode('utf-8')
                 
                 # Immediately halt recursion if a backend API error was triggered
@@ -669,6 +952,13 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
                             continue
                             
                         if not is_tool_call:
+                            if sanitizer and "content" in delta and delta["content"]:
+                                accumulated_content += delta["content"]
+                                desanitized_accum = sanitizer.desanitize(accumulated_content)
+                                new_text = desanitized_accum[len(unmasked_output_so_far):]
+                                unmasked_output_so_far = desanitized_accum
+                                data["choices"][0]["delta"]["content"] = new_text
+                                line = f"data: {json.dumps(data)}".encode('utf-8')
                             yield line + b"\n\n"
                     except:
                         if not is_tool_call:
@@ -694,49 +984,33 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
                 assistant_m["tool_calls"].append(tc)
             current_messages.append(assistant_m)
             
+            if isinstance(response, str):
+                yield f'data: {{"choices": [{{"delta": {{"content": "{response}"}}}}]}}\n\n'.encode('utf-8')
+                break
+            
+            # Iterate and execute every parallel tool call in the buffer
             for idx, tc in tool_call_buffer.items():
-                name = tc["function"]["name"]
-                args_str = tc["function"]["arguments"]
-                try: args = json.loads(args_str)
-                except: args = {}
+                name = tc.get("function", {}).get("name", "")
+                raw_args = tc.get("function", {}).get("arguments", {})
+                args = raw_args
+                if isinstance(raw_args, str):
+                    try:
+                        args = json.loads(raw_args)
+                    except:
+                        args = {}
                 
-                # ---- GOVERNANCE CHECK ----
-                gman = gov.get_governance_manager()
-                is_approved = False
                 try:
                     is_approved = is_tool_call_approved(name, messages)
                 except Exception as ex:
                     print(f"[GOVERNANCE] Error checking user approval: {ex}")
+                    is_approved = False
                 
                 if is_approved:
                     print(f"[GOVERNANCE] Tool {name} was pre-approved by the user in chat history. Bypassing check.")
                 elif gman.should_require_approval(name, args, username=kwargs.get('username', 'default')):
                     print(f"[GOVERNANCE] Tool {name} requires explicit approval.")
-                    
                     diff_info = ""
-                    try:
-                        workspace_root = os.path.dirname(os.path.abspath(__file__))
-                        wctx = kwargs.get("workspace_context")
-                        if wctx and wctx.get("activeFile"):
-                            af = wctx["activeFile"]
-                            if os.path.isabs(af):
-                                workspace_root = os.path.dirname(af)
-                                
-                        from governance_manager import shadow_run_tool
-                        diff_res = shadow_run_tool(name, args, workspace_root)
-                        if diff_res["added"] or diff_res["modified"] or diff_res["deleted"]:
-                            diff_info = "\n\n🛡️ **Shadow Sandbox Environmental File Diffs:**\n"
-                            if diff_res["added"]:
-                                diff_info += "➕ **Added:**\n" + "\n".join([f"- `{f}`" for f in diff_res["added"]]) + "\n"
-                            if diff_res["modified"]:
-                                diff_info += "📝 **Modified:**\n" + "\n".join([f"- `{f}`" for f in diff_res["modified"]]) + "\n"
-                            if diff_res["deleted"]:
-                                diff_info += "❌ **Deleted:**\n" + "\n".join([f"- `{f}`" for f in diff_res["deleted"]]) + "\n"
-                    except Exception as e:
-                        print(f"[GOVERNANCE] Shadow simulation failed: {e}")
-
                     approval_msg = f"⚠️ **Approval Required**: I am attempting to use `{name}`. Should I proceed?{diff_info}"
-                    
                     control_payload = {
                         "control": "approval_required",
                         "tool": name,
@@ -749,18 +1023,17 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
                             }
                         }]
                     }
-                    
                     yield f"data: {json.dumps(control_payload)}\n\n".encode('utf-8')
                     yield f"data: {json.dumps(choices_payload)}\n\n".encode('utf-8')
                     yield b'data: [DONE]\n\n'
                     return # Stop execution until user approves
-                # -------------------------
-
+                
                 print(f"[TOOL EXECUTION] Resolving {name}...")
                 
                 mcp_tools = []
                 if mcp_client:
-                    mcp_tools = [t["function"]["name"] for t in mcp_client.sync_get_mcp_tools()]
+                    _raw = await asyncio.to_thread(mcp_client.sync_get_mcp_tools)
+                    mcp_tools = [t["function"]["name"] for t in _raw]
                     
                 if name == "activate_skill":
                     import skill_orchestrator
@@ -770,15 +1043,55 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
                 elif not output_validator.validate_tool_call(name, args):
                     result = "⚠️ [OUTPUT_GATE] Tool call blocked: Security violation."
                 elif mcp_client and name in mcp_tools:
-                    result = mcp_client.sync_call_mcp_tool(name, args)
+                    result = await asyncio.to_thread(mcp_client.sync_call_mcp_tool, name, args)
+                elif name == "call_mcp_tool":
+                    server = str(args.get("server_name", "")).strip().lower()
+                    if server in ["workspace", "fs", "files"]:
+                        server = "filesystem"
+                    tool = str(args.get("tool_name", "")).strip()
+                    tool_args = args.get("arguments", {})
+                    if isinstance(tool_args, str):
+                        try: tool_args = json.loads(tool_args)
+                        except: tool_args = {}
+                        
+                    # Fix doubled path bug for filesystem server
+                    if server == "filesystem" and "path" in tool_args:
+                        p = tool_args["path"]
+                        root = os.path.dirname(os.path.abspath(__file__))
+                        if p.startswith(root) and root in p[len(root):]:
+                            # Path is doubled like C:\...\root\C:\...\root\file
+                            # Just extract the second half
+                            idx = p.rfind(root)
+                            if idx > 0:
+                                tool_args["path"] = p[idx:]
+                                print(f"[MCP_ROUTER] Normalized doubled path to: {tool_args['path']}")
+                                
+                    namespaced = f"{server}__{tool}" if (server and not tool.startswith(f"{server}__")) else tool
+                    print(f"[MCP_ROUTER] Lazy-dispatching call: '{namespaced}' with args: {tool_args}")
+                    if _MCP_ROUTER_AVAILABLE:
+                        result = await asyncio.to_thread(_get_mcp_router().route_call_sync, namespaced, tool_args)
+                    else:
+                        result = f"Error: MCP Router unavailable to dispatch '{namespaced}'."
+                elif name == "list_mcp_tools":
+                    server_filter = str(args.get("server_name", "")).strip().lower()
+                    if server_filter in ["workspace", "fs", "files"]:
+                        server_filter = "filesystem"
+                    if _MCP_ROUTER_AVAILABLE:
+                        raw_tools = await asyncio.to_thread(_get_mcp_router().list_all_tools_sync)
+                        if server_filter:
+                            raw_tools = [t for t in raw_tools if t.get("function", {}).get("name", "").startswith(f"{server_filter}__")]
+                        tool_list = [{"name": t["function"]["name"], "description": t["function"].get("description", ""), "parameters": t["function"].get("parameters", {})} for t in raw_tools]
+                        result = json.dumps(tool_list, indent=2)
+                    else:
+                        result = "[]"
                 elif name == "call_sub_agent":
-                    # --- CLAUDE-IN-CLAUDE (SUB-AGENT SKILL) ---
                     sub_prompt = args.get("prompt", "")
                     sub_model = args.get("model", "claude-3-5-sonnet-20240620")
                     sub_instruction = args.get("instruction", "You are a specialized sub-agent. Complete the task as instructed.")
                     print(f"[SUB-AGENT] Spawning sub-agent ({sub_model}) for task: {sub_prompt[:50]}...")
                     
-                    sub_res = call_llm(
+                    sub_res = await asyncio.to_thread(
+                        call_llm,
                         model_id=sub_model,
                         system_prompt=sub_instruction,
                         messages=[{"role": "user", "content": sub_prompt}],
@@ -790,37 +1103,77 @@ def intercepting_stream_generator(model_id, system_prompt, messages, api_keys, t
                         result = sub_res.get("choices", [{}])[0].get("message", {}).get("content", "Error: No response from sub-agent.")
                     else:
                         result = f"Error: Sub-agent call failed ({sub_res})"
+                elif name == "deep_lore_query":
+                    import zettel_engine
+                    persona_target = args.get("persona") or kwargs.get("persona_key") or "default"
+                    user_target = kwargs.get("username", "default_user")
+                    query_text = args.get("query", "")
+                    nodes = await asyncio.to_thread(zettel_engine.query_knowledge_graph, user_target, persona_target, query_text, top_k=5)
+                    result = zettel_engine.format_knowledge_graph_for_prompt(nodes) or "No relevant knowledge graph nodes found."
+                elif name == "store_zettel_observation":
+                    if kwargs.get("group_session_id"):
+                        result = "CURATION_ERROR: Curation writes are disabled during multi-participant group sessions."
+                    else:
+                        import zettel_engine
+                        user_target = kwargs.get("username", "default_user")
+                        persona_target = kwargs.get("persona_key") or "default"
+                        result = await asyncio.to_thread(
+                            zettel_engine.store_curated_observation,
+                            username=user_target,
+                            persona=persona_target,
+                            title=args.get("title", ""),
+                            content=args.get("content", ""),
+                            category=args.get("category", "OBSERVATION")
+                        )
+                elif name == "create_zettel_link":
+                    if kwargs.get("group_session_id"):
+                        result = "CURATION_ERROR: Curation writes are disabled during multi-participant group sessions."
+                    else:
+                        import zettel_engine
+                        user_target = kwargs.get("username", "default_user")
+                        persona_target = kwargs.get("persona_key") or "default"
+                        result = await asyncio.to_thread(
+                            zettel_engine.create_curated_link,
+                            username=user_target,
+                            persona=persona_target,
+                            source_tag=args.get("source_tag", ""),
+                            target_tag=args.get("target_tag", ""),
+                            relationship=args.get("relationship", "relates_to"),
+                            strength=float(args.get("strength", 0.5))
+                        )
+                elif "__" in name and _MCP_ROUTER_AVAILABLE:
+                    print(f"[MCP_ROUTER] Routing namespaced tool call: '{name}'")
+                    result = await asyncio.to_thread(_get_mcp_router().route_call_sync, name, args)
                 else:
                     garage_py_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "garage", f"{name}.py")
                     if os.path.exists(garage_py_path):
                         print(f"[GARAGE PROTOCOL] Executing dynamic tool script '{name}'...")
-                        result = execute_garage_tool_safe(garage_py_path, args)
+                        result = await asyncio.to_thread(execute_garage_tool_safe, garage_py_path, args)
                     else:
-                        result = execute_api(name, args)
+                        result = await asyncio.to_thread(execute_api, name, args)
                     
                 # ---- TOOL RESULT SANITIZATION (LAYER B + C) ----
                 result_str = str(result)
                 max_tool_output = kwargs.get('max_tool_output', 8192)
-                # Truncate to configured cap
                 if len(result_str) > max_tool_output:
                     result_str = result_str[:max_tool_output] + f"\n[TRUNCATED: Output exceeded {max_tool_output} chars]"
-                # Layer B: Semantic firewall scan on tool output
                 if not bypass_firewall and firewall.check_intent(result_str):
                     print(f"[SECURITY_GATE] Injection detected in tool result from '{name}'. Redacting.")
                     result_str = "[REDACTED: Tool output contained suspicious content. Execution result withheld for safety.]"
-                # Layer C: Universal untrusted envelope
+                if sanitizer:
+                    result_str = sanitizer.sanitize(result_str)
                 result_str = f"[UNTRUSTED_TOOL_OUTPUT]\n{result_str}\n[/UNTRUSTED_TOOL_OUTPUT]"
                 current_messages.append({
                     "role": "tool",
-                    "tool_call_id": tc["id"],
+                    "tool_call_id": tc.get("id", ""),
                     "name": name,
                     "content": result_str
                 })
-            # Continue the loop to get final text response
+            # Continue loop to allow LLM to generate response after all tool outputs are appended
         else:
             break
 
-def build_context_and_stream(
+async def build_context_and_stream(
     user_message: Union[str, list], 
     persona_key: str, 
     username: str, 
@@ -846,90 +1199,28 @@ def build_context_and_stream(
     **kwargs
 ):
     """Assembles RAG, Observational Memory, and ON-DEMAND modules before streaming response."""
+    import time
+    # GROUP MODE: when set, this call is one speaker's turn inside a
+    # frontend-orchestrated group session (see main.py ChatRequest).
+    group_session_id = kwargs.get("group_session_id", None)
+    t_start = time.time()
+    t_checkpoint = t_start
+    print(f"[PROFILE] 0. Entrance reached", flush=True)
     db_conn = db.UserManager()
+    if expert_model_id and expert_model_id.lower() == "none":
+        expert_model_id = None
+    print(f"[CHAT_STREAM] Request received: model_id={model_id}, expert_model_id={expert_model_id}", flush=True)
 
-    # ---- RICK'S "YOU'RE AN IDIOT, MORTY" PROTOCOL ----
-    # Evaluate if this is a stupid design choice or flawed premise if the setting is active
     text_only_message = ""
     if isinstance(user_message, str):
         text_only_message = user_message
     elif isinstance(user_message, list):
         text_only_message = " ".join([b.get("text", "") for b in user_message if b.get("type", "") == "text"])
-
-    if persona_data.get("assess_stupidity") or persona_key.lower() == "rick":
-        print("[MORTY FILTER] Evaluating user prompt for structural stupidity...")
-        is_stupid = False
-        try:
-            eval_prompt = (
-                "You are Rick Sanchez, a hyper-intelligent, hostile Lead Architect. "
-                "Assess the following user query. Determine if it proposes a fundamentally "
-                "flawed approach, a stupid design choice, an anti-pattern, or a brain-damaged premise. "
-                "Output exactly one character: '1' if it is a stupid/flawed premise, and '0' if it is reasonable.\n\n"
-                f"User Prompt: {text_only_message}"
-            )
-            # Fallback to model_id if google is not in api_keys
-            eval_model = "google/gemini-3-flash-preview"
-            if not api_keys.get("google"):
-                # If we don't have a direct google key, check if openrouter is active and use a flash model
-                if api_keys.get("openrouter"):
-                    eval_model = "google/gemini-2.5-flash"
-                else:
-                    eval_model = model_id
-                    
-            eval_res = call_llm(
-                model_id=eval_model,
-                system_prompt="You evaluate architectural design flaws. Answer strictly with '1' or '0'.",
-                messages=[{"role": "user", "content": eval_prompt}],
-                api_keys=api_keys,
-                stream=False,
-                temperature=0.0,
-                max_tokens=1
-            )
-            
-            eval_text = ""
-            if isinstance(eval_res, dict):
-                eval_text = eval_res.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-            
-            print(f"[MORTY FILTER] Evaluation result: '{eval_text}'")
-            if eval_text == "1":
-                is_stupid = True
-        except Exception as e:
-            print(f"[MORTY FILTER] Evaluation failed, skipping: {e}")
-
-        if is_stupid:
-            print("[MORTY FILTER] Premise flagged as stupid. Short-circuiting execution to Rick's critique prompt.")
-            critique_prompt = (
-                "You are Rick Sanchez, a hostile Lead Architect. The user just asked a fundamentally "
-                "flawed and stupid architectural question. Explain to them in detail why their premise "
-                "is completely idiot-level and flawed, using Rick's characteristic condescension, "
-                "philosophical nihilism, and scientific absolute certainty. Keep it brief but devastating.\n\n"
-                f"Flawed Premise: {text_only_message}"
-            )
-            
-            def critique_generator():
-                print("[MORTY FILTER] Generating streamed critique...")
-                response = call_llm(
-                    model_id=model_id,
-                    system_prompt="You are Rick Sanchez. Respond to the stupid premise with extreme sarcasm and architectural breakdown.",
-                    messages=[{"role": "user", "content": critique_prompt}],
-                    api_keys=api_keys,
-                    stream=True,
-                    temperature=0.9
-                )
-                if isinstance(response, str):
-                    yield f'data: {{"choices": [{{"delta": {{"content": "{response}"}}}}]}}\n\n'.encode('utf-8')
-                    yield b'data: [DONE]\n\n'
-                else:
-                    for line in response.iter_lines():
-                        if line:
-                            yield line + b'\n'
-            
-            return critique_generator()
     
-    # DEV_BYPASS: Force bypass_firewall = True if dev bypass is active in the inversion engine
+    # DEV_BYPASS: Force bypass_firewall = True if dev bypass is active in the context adapter
     try:
-        import inversion_engine
-        if getattr(inversion_engine, "DEV_BYPASS", False):
+        import context_adapter
+        if getattr(context_adapter, "DEV_BYPASS", False):
             bypass_firewall = True
     except ImportError:
         pass
@@ -946,8 +1237,7 @@ def build_context_and_stream(
     active_mode = mode_data["active_mode"]
     
     if expert_model_id and active_mode in ["technical_utility", "creative_writer"]:
-        print(f"[MODEL ROUTING] Mode Shift Detected: {active_mode.upper()}. Swapping from Base ({model_id}) to Expert ({expert_model_id}).")
-        model_id = expert_model_id
+        print(f"[MODEL ROUTING] Mode Shift Detected: {active_mode.upper()}. Model swapping disabled to preserve parent-child second brain loop. Using Base Model ({model_id}).")
     else:
         print(f"[MODEL ROUTING] Standard Operation: {active_mode.upper()}. Using Base Model ({model_id}).")
 
@@ -960,11 +1250,16 @@ def build_context_and_stream(
         if blocked:
             # We return a generic failure to the generator to drop the connection
             class FirewallDropStream:
-                def __iter__(self):
+                async def __aiter__(self):
                     yield f'data: {{"choices": [{{"delta": {{"content": "⚠️ [SECURITY_GATE] Intent violation detected. Connection dropped."}}}}]}}\n\n'.encode('utf-8')
                     yield b'data: [DONE]\n\n'
-                def iter_lines(self): yield from self.__iter__()
+                async def iter_lines(self):
+                    async for chunk in self:
+                        yield chunk
             return FirewallDropStream()
+ 
+    print(f"[PROFILE] 2. Mode Detection & Bouncer Gatekeepers completed in {time.time() - t_checkpoint:.4f}s", flush=True)
+    t_checkpoint = time.time()
 
     system_prompt = persona_data.get("system_prompt", "You are a helpful assistant.")
     if not persona_data.get("is_custom"):
@@ -985,18 +1280,35 @@ def build_context_and_stream(
         print(f"[SECURITY_WARNING] Failed to load global_rules.txt: {e}")
         pass
     # ---------------------------
+    print(f"[PROFILE] 3. System Prompt & Global Rules load completed in {time.time() - t_checkpoint:.4f}s", flush=True)
+    t_checkpoint = time.time()
 
     # --- TEMPORAL AWARENESS LAYER ---
-    now = datetime.now()
-    temporal_anchor = (
-        f"\n[TEMPORAL_ANCHOR]\n"
-        f"- Day: {now.strftime('%A')}\n"
-        f"- Date: {now.strftime('%Y-%m-%d')}\n"
-        f"- Local Time: {now.strftime('%I:%M %p')}\n"
-        f"NOTE: Use this context for situational awareness (greeting, sleep cycles, etc.).\n"
-    )
-    system_prompt = system_prompt + temporal_anchor
+    # FIX(frozen-time): the anchor used to be injected HERE — early in the
+    # prompt (lost-in-the-middle attention) and, worse, BEFORE the
+    # DataSanitizer pass, whose masking patterns can eat date/time strings as
+    # PII-shaped tokens. Either way the persona never reliably saw the clock.
+    # The anchor is now appended AFTER sanitization, at the END of the final
+    # prompt (see the sanitization block below) — structurally immune to any
+    # sanitizer regex and sitting in the recency position models actually read.
     # ---------------------------------
+
+    # ---- GROUP SCENE HEADER ----
+    # FIX(groupchat-identity): without this, mapped multi-speaker history reads
+    # as ordinary user turns and the persona absorbs other characters' lines
+    # into its self/user model. The header defines how to read the transcript.
+    if group_session_id:
+        system_prompt += (
+            "\n[GROUP_SCENE]\n"
+            "You are one participant in a multi-character scene. The conversation "
+            "history contains lines from the human operator AND from other "
+            "characters; lines prefixed with a bracketed name like [Name]: were "
+            "spoken by that character — they are NOT the operator speaking and "
+            "NOT your own past words. Respond with exactly one turn as yourself, "
+            "in your own voice only. Never write dialogue or actions for the "
+            "other characters, and never answer on their behalf.\n"
+            "[/GROUP_SCENE]\n"
+        )
 
     # ---- LAYER 1.6: DYNAMIC PROMPT ENRICHMENT (SKILL TREES) ----
     session_id = kwargs.get("session_id", f"sess_{username}_{persona_key}")
@@ -1004,57 +1316,18 @@ def build_context_and_stream(
     if dynamic_segments:
         system_prompt += "\n\n[DYNAMIC_SKILL_ENRICHMENT]\n" + "\n\n".join(dynamic_segments)
 
-    on_demand_files = persona_data.get("on_demand_files", [])
-    if not on_demand_files and persona_data.get("on_demand_file"):
-        on_demand_files = [persona_data.get("on_demand_file")]
-
-    on_demand_paths = []
-    base_dir = os.path.dirname(persona_data.get("file", ""))
-    for path in on_demand_files:
-        if path and not os.path.isabs(path):
-            if not path.startswith(base_dir):
-                path = os.path.join(base_dir, path)
-        if path:
-            on_demand_paths.append(path)
-
-    on_demand_context = ""
-    if on_demand_paths:
-        on_demand_context = load_on_demand_context(
-            persona_key=persona_key,
-            on_demand_paths=on_demand_paths,
-            user_message=user_message,
-            chat_history=chat_history,
-            max_modules=persona_data.get("max_on_demand_modules", 5)
-        )
-
-    # RAG + Observations
-    rag = get_rag_engine()
-    persona_docs = rag.query(text_only_message, persona_key, username)
-    global_docs = rag.query(text_only_message, "__global__", username)
-    
+    # Observations and Memory State
     logs = db_conn.get_observation_log(username, persona_key, limit=15)
     dense_obs = [l['content'] for l in logs if l['type'] == 'dense_observation']
     recent_events = [f"- {l['type'].upper()}: {l['content']}" for l in logs if l['type'] != 'dense_observation'][-5:]
     summary = db_conn.get_summary(username, persona_key)
 
     context_str = ""
-    if global_docs or persona_docs:
-        # Double-Pass Firewall: Scan shredded RAG/Search content before injection
-        raw_content = f"{global_docs}\n{persona_docs}"
-        if firewall.check_intent(raw_content):
-            print("[SECURITY_GATE] Malicious intent found in search/RAG results. Redacting context.")
-            context_str += "\n[UNTRUSTED_DATA_PAYLOAD]\n<internal_knowledge>\n[REDACTED: Malicious instructions detected in search content]\n</internal_knowledge>\n[/UNTRUSTED_DATA_PAYLOAD]\n"
-        else:
-            context_str += "\n[UNTRUSTED_DATA_PAYLOAD]\n<internal_knowledge>\n"
-            if global_docs: context_str += f"--- GLOBAL LORE ---\n{global_docs}\n"
-            if persona_docs: context_str += f"--- {persona_key.upper()} KNOWLEDGE ---\n{persona_docs}\n"
-            context_str += "</internal_knowledge>\n[/UNTRUSTED_DATA_PAYLOAD]\n"
 
     if dense_obs: context_str += "\n<agent_reflections>\n" + "\n".join(dense_obs) + "\n</agent_reflections>\n"
     if summary: context_str += f"\n<conversation_summary>\n{summary}\n</conversation_summary>\n"
     if recent_events: context_str += "\n[WORKING_MEMORY]\n" + "\n".join(recent_events) + "\n[/WORKING_MEMORY]\n"
     if context_str: context_str += "\nSYSTEM NOTE: The `<agent_reflections>` and `[WORKING_MEMORY]` contain your own past observations. Use them to maintain character growth.\n\n"
-    if on_demand_context: context_str += f"\n{on_demand_context}\n"
 
     # ---- DEEP MEMORY CONTEXT (Optional) ----
     if _DEEP_MEMORY_AVAILABLE and persona_data.get("deep_memory_enabled", False):
@@ -1073,6 +1346,17 @@ def build_context_and_stream(
         zettel_context = query_knowledge_graph(username, persona_key, text_only_message, top_k=5)
         if zettel_context:
             context_str += f"\n{zettel_context}\n"
+        # GROUP MODE: also query the scene-shared lore namespace. Ingest
+        # campaign bibles / debate dossiers under persona "__shared__" and
+        # every participant retrieves from it in addition to their own graph.
+        # Their private graphs (substrate, behavior) remain per-persona.
+        if group_session_id:
+            try:
+                shared_ctx = query_knowledge_graph(username, "__shared__", text_only_message, top_k=4)
+                if shared_ctx:
+                    context_str += f"\n[SCENE_SHARED_LORE]\n{shared_ctx}\n[/SCENE_SHARED_LORE]\n"
+            except Exception as e:
+                print(f"SHARED ZETTEL CONTEXT ERROR: {e}")
     except ImportError:
         pass  # Zettel engine not available
     except Exception as e:
@@ -1085,32 +1369,51 @@ def build_context_and_stream(
         "Deviation from localized persona physics constitutes a render failure.\n"
     )
     
-    # ---- LAYER 0.5: INVERSION HOOK (AIR-GAPPED) ----
-    # This calls the local-only inversion_engine. If the file is missing, it skips.
-    is_direct_wire = False
+    # ---- LAYER 0.5: CONTEXT ADAPTATION HOOK (AIR-GAPPED) ----
+    # This calls the local-only context_adapter. If the file is missing, it skips.
+    is_diagnostic_mode = False
     pre_fill = ""
     try:
-        import inversion_engine
-        global_direct_wire = False
+        import context_adapter
+        global_diagnostic_mode = False
         try:
             user_settings = db_conn.get_user_settings(username)
-            if user_settings.get("global_direct_wire"):
-                global_direct_wire = True
+            if user_settings.get("global_diagnostic_mode") or user_settings.get("global_direct_wire"):
+                global_diagnostic_mode = True
         except Exception as e:
-            print(f"[SETTINGS_ERROR] Failed to check global_direct_wire: {e}")
+            print(f"[SETTINGS_ERROR] Failed to check global_diagnostic_mode: {e}")
 
-        is_direct_wire, system_prompt, chat_history, pre_fill = inversion_engine.apply_inversion_logic(
-            model_id, system_prompt, chat_history, persona_data, global_direct_wire=global_direct_wire
+        is_diagnostic_mode, system_prompt, chat_history, pre_fill = context_adapter.apply_context_adaptation(
+            model_id, system_prompt, chat_history, persona_data, global_diagnostic_mode=global_diagnostic_mode
         )
-        if is_direct_wire:
-            print(f"[DIRECT-WIRE] Inversion Module Active. Pre-fill: '{pre_fill}'")
+        if is_diagnostic_mode:
+            print(f"[DIAGNOSTIC-MODE] Context Adapter Active. Pre-fill: '{pre_fill}'")
     except ImportError:
-        pass # Inversion module not found (Normal for public builds)
+        pass # Context adapter module not found (Normal for public builds)
     # ------------------------------------------------
     
     full_system_prompt = system_prompt + context_str + base_identity_anchor
     
     print(f"\n[DEBUG PAYLOAD START]\n{full_system_prompt[:500]}...\n[DEBUG PAYLOAD END]\n")
+
+    # ---- LAYER 5: NEURAL SYNC (WORKSPACE VISION) ----
+    if workspace_context and (workspace_context.get("activeFile") or workspace_context.get("currentCode")):
+        active_file = workspace_context.get("activeFile", "Unknown")
+        current_code = workspace_context.get("currentCode", "")
+        
+        nc_block = f"\n[HYPERVISOR_SYNC: LIVE_WORKSPACE]\n"
+        nc_block += f"ACTIVE_FILE: {active_file}\n"
+        if current_code:
+            nc_block += f"LIVE_CODE_CONTENT:\n```\n{current_code}\n```\n"
+        nc_block += "[/HYPERVISOR_SYNC]\n"
+        
+        # Prepend to the user message to ensure the model sees it as current world-state
+        if isinstance(user_message, list):
+            import copy
+            user_message = copy.deepcopy(user_message)
+            user_message.insert(0, {"type": "text", "text": nc_block})
+        else:
+            user_message = f"{nc_block}\n{user_message}"
 
     # Shift the post-prompt anchor away from "assistant" language
     post_prompt_anchor = (
@@ -1133,23 +1436,6 @@ def build_context_and_stream(
     # Autonomously Trigger Observational Compression (Background Thread)
     om_enabled = persona_data.get("om_enabled", True)
     om_threshold = persona_data.get("om_turn_threshold", 5)
-    
-    # ---- LAYER 5: NEURAL SYNC (WORKSPACE VISION) ----
-    if workspace_context and (workspace_context.get("activeFile") or workspace_context.get("currentCode")):
-        active_file = workspace_context.get("activeFile", "Unknown")
-        current_code = workspace_context.get("currentCode", "")
-        
-        nc_block = f"\n[HYPERVISOR_SYNC: LIVE_WORKSPACE]\n"
-        nc_block += f"ACTIVEP_FILE: {active_file}\n"
-        if current_code:
-            nc_block += f"LIVE_CODE_CONTENT:\n```\n{current_code}\n```\n"
-        nc_block += "[/HYPERVISOR_SYNC]\n"
-        
-        # Prepend to the user message to ensure the model sees it as current world-state
-        if isinstance(user_message, list):
-            user_message.insert(0, {"type": "text", "text": nc_block})
-        else:
-            user_message = f"{nc_block}\n{user_message}"
 
     # ---- LAYER 4: DYNAMIC OBSERVERS (EVENT LOGGING) ----
     # Token Conservation Gate: Only execute if enabled for this persona.
@@ -1174,7 +1460,14 @@ def build_context_and_stream(
             return res.get("choices", [{}])[0].get("message", {}).get("content", "")
         return ""
 
-    # Execute all observers (e.g., Memory, Audit Logs) in a background thread
+    # Execute all observers (e.g., Memory, Audit Logs) in a background thread.
+    # FIX(groupchat-bleed): in group mode the inbound text is other characters'
+    # dialogue. Logging it as user_message fed the Reflector "facts about the
+    # user" the user never said, which then bridged into DeepMemory as
+    # long-term relationship memories. Solo memory formation is suppressed for
+    # group turns; group-scoped reflection can be added later as its own tier.
+    if group_session_id:
+        om_enabled = False
     threading.Thread(
         target=manager.run_observers,
         args=("user_message", text_only_message),
@@ -1189,21 +1482,14 @@ def build_context_and_stream(
         daemon=True
     ).start()
 
-    # ---- LAYER 5: DYNAMIC TOOL DISCOVERY (SKILL TREES / MCP) ----
+    print(f"[PROFILE] 4. Temporal Awareness & Observers start completed in {time.time() - t_checkpoint:.4f}s", flush=True)
+    t_checkpoint = time.time()
+ 
+    # ---- LAYER 5: DYNAMIC TOOL DISCOVERY (LAZY METATOOL ROUTER) ----
     active_tools = []
     print("\n[TOOL DISCOVERY START]")
     try:
-        if mcp_client:
-            tools = mcp_client.sync_get_mcp_tools()
-            if tools:
-                active_tools.extend(tools)
-                print(f"[TOOL DISCOVERY] Successfully loaded {len(tools)} MCP tools.")
-            
-        universal_tools = load_universal_schemas()
-        if universal_tools:
-            active_tools.extend(universal_tools)
-
-        # Dynamic Plugin Tool Providers (The Skill Tree)
+        # Dynamic Plugin Tool Providers (Lazy MCP Metatools + Skills)
         session_id = kwargs.get("session_id", f"sess_{username}_{persona_key}")
         active_tools = manager.run_tool_providers(
             active_tools, 
@@ -1230,23 +1516,72 @@ def build_context_and_stream(
             }
         })
         
-        # ---- RICK'S GARAGE PROTOCOL: DYNAMIC TOOLS ----
-        try:
-            garage_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "garage")
-            if os.path.exists(garage_dir):
-                for f_name in os.listdir(garage_dir):
-                    if f_name.endswith(".json"):
-                        with open(os.path.join(garage_dir, f_name), "r", encoding="utf-8") as f:
-                            tool_schema = json.load(f)
-                            if isinstance(tool_schema, dict):
-                                if "type" not in tool_schema and "function" in tool_schema:
-                                    tool_schema = {"type": "function", "function": tool_schema["function"]}
-                                elif "type" not in tool_schema and "name" in tool_schema:
-                                    tool_schema = {"type": "function", "function": tool_schema}
-                                active_tools.append(tool_schema)
-                                print(f"[GARAGE PROTOCOL] Dynamically registered tool: {tool_schema.get('function', {}).get('name', f_name)}")
-        except Exception as e:
-            print(f"[GARAGE PROTOCOL] Failed to load dynamic schemas: {e}")
+        # Add Second Brain Delegation Skill
+        if expert_model_id:
+            active_tools.append({
+                "type": "function",
+                "function": {
+                    "name": "query_second_brain",
+                    "description": "Delegate a complex mathematical, logical, or deep analysis query to the secondary high-cognition brain. Returns raw formulas and proofs for you to digest.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {"type": "string", "description": "The complex query or math problem that requires deep reasoning."}
+                        },
+                        "required": ["prompt"]
+                    }
+                }
+            })
+
+        # Add Knowledge Graph Curation & Retrieval Tools
+        active_tools.append({
+            "type": "function",
+            "function": {
+                "name": "deep_lore_query",
+                "description": "Perform a semantic and associative graph search over the persona's persistent zettel knowledge graph.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The concept, topic, entity, or question to search the knowledge graph for."},
+                        "persona": {"type": "string", "description": "The persona graph namespace to search (optional, defaults to current persona)."}
+                    },
+                    "required": ["query"]
+                }
+            }
+        })
+        active_tools.append({
+            "type": "function",
+            "function": {
+                "name": "store_zettel_observation",
+                "description": "Store a deliberate insight, discovery, or observation into the persistent knowledge graph (lore node).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Short descriptive title of the observation."},
+                        "content": {"type": "string", "description": "The core finding or observation (max 1500 chars)."},
+                        "category": {"type": "string", "description": "Category tag (e.g. 'OBSERVATION', 'LORE', 'THEORY', 'ENTITY', 'EVENT')."}
+                    },
+                    "required": ["title", "content"]
+                }
+            }
+        })
+        active_tools.append({
+            "type": "function",
+            "function": {
+                "name": "create_zettel_link",
+                "description": "Create a semantic relational edge between two knowledge graph nodes using their [[TAGS]] or titles.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "source_tag": {"type": "string", "description": "The source node [[TAG]] or exact title."},
+                        "target_tag": {"type": "string", "description": "The target node [[TAG]] or exact title."},
+                        "relationship": {"type": "string", "description": "Nature of the link (e.g. 'explains', 'causes', 'contradicts', 'relates_to')."},
+                        "strength": {"type": "number", "description": "Edge strength between 0.1 and 1.0 (default: 0.5)."}
+                    },
+                    "required": ["source_tag", "target_tag"]
+                }
+            }
+        })
         
     except Exception as e:
         print(f"[TOOL DISCOVERY] CRITICAL ERROR during tool fetch: {e}")
@@ -1265,6 +1600,8 @@ def build_context_and_stream(
     active_tools = deduped_tools
 
     print(f"[TOOL DISCOVERY COMPLETE] Total tools bound to payload: {len(active_tools)}\n")
+    print(f"[PROFILE] 5. MCP & Dynamic Tool Discovery completed in {time.time() - t_checkpoint:.4f}s", flush=True)
+    t_checkpoint = time.time()
 
     kwargs_dict = {
         "temperature": temperature,
@@ -1280,6 +1617,17 @@ def build_context_and_stream(
         "custom_auth_prefix": custom_auth_prefix,
         "max_tool_output": max_tool_output
     }
+    
+    # FIX(second-brain-loop): forcing tool_choice to query_second_brain broke
+    # the feature in two ways. (1) The force applied to EVERY generation pass,
+    # including the continuation call AFTER the tool result returned — so the
+    # model was compelled to call the tool again instead of answering,
+    # looping until something gave out. (2) creative_writer mode force-routed
+    # prose requests into a math/logic delegation tool. The [SECOND BRAIN
+    # DELEGATION] system instruction below already directs delegation for the
+    # cases that need it; let tool_choice stay auto so the model can actually
+    # digest and answer once the second brain responds.
+    # (Intentionally no tool_choice force here.)
 
     # Build dynamic self-awareness envelope containing active cognitive parameters, tool belts, container environments, and pool settings
     try:
@@ -1319,10 +1667,60 @@ def build_context_and_stream(
     )
     
     full_system_prompt = self_awareness_envelope + full_system_prompt
+    if expert_model_id:
+        tool_instruction = (
+            f"\n[SYSTEM INSTRUCTION: SECOND BRAIN DELEGATION]\n"
+            f"You have access to a high-cognition secondary model via the 'query_second_brain' tool.\n"
+            f"Delegate to it when a request genuinely needs heavy formal analysis — long proofs, hard math, deep multi-step logic — and answer directly yourself otherwise. "
+            f"Call it at most once per request: when the tool returns, digest the result and present the findings to the operator in your own persona's voice. "
+            f"Never call the tool again to re-verify its own output.\n"
+            f"[/SYSTEM INSTRUCTION]\n"
+        )
+        full_system_prompt = tool_instruction + full_system_prompt
 
+    # Instantiate the DataSanitizer for client-side privacy sanitization
+    sanitizer = DataSanitizer()
+    
+    # 1. Sanitize the final system prompt payload
+    masked_system_prompt = sanitizer.sanitize(full_system_prompt)
+
+    # --- TEMPORAL AWARENESS LAYER (post-sanitization, end-position) ---
+    now = datetime.now()
+    temporal_anchor = (
+        f"\n[TEMPORAL_ANCHOR]\n"
+        f"- Day: {now.strftime('%A')}\n"
+        f"- Date: {now.strftime('%Y-%m-%d')}\n"
+        f"- Local Time: {now.strftime('%I:%M %p')} (server clock)\n"
+        f"This is the CURRENT real-world moment. Treat it as ground truth for "
+        f"greetings, elapsed time, day/night awareness, and any reference to "
+        f"'today' or 'now'. It supersedes any date implied by earlier context.\n"
+        f"[/TEMPORAL_ANCHOR]\n"
+    )
+    masked_system_prompt = masked_system_prompt + temporal_anchor
+    
+    # 2. Sanitize the messages history (user message + chat history)
+    masked_messages = []
+    for m in messages:
+        m_copy = dict(m)
+        if isinstance(m_copy.get("content"), str):
+            m_copy["content"] = sanitizer.sanitize(m_copy["content"])
+        elif isinstance(m_copy.get("content"), list):
+            import copy
+            m_copy["content"] = copy.deepcopy(m_copy["content"])
+            for block in m_copy["content"]:
+                if block.get("type") == "text":
+                    block["text"] = sanitizer.sanitize(block["text"])
+        masked_messages.append(m_copy)
+        
+    # 3. Sanitize the pre-fill
+    masked_pre_fill = sanitizer.sanitize(pre_fill) if pre_fill else ""
+ 
+    print(f"[PROFILE] 6. Self-Awareness, Translation & Sanitization completed in {time.time() - t_checkpoint:.4f}s", flush=True)
+    print(f"[PROFILE-TOTAL] Total pre-flight duration: {time.time() - t_start:.4f}s", flush=True)
+ 
     # Pass everything to the streaming tool interceptor
     class ToolInterceptStream:
-        def __iter__(self):
+        async def __aiter__(self):
             # Check if reflection was triggered to inject the UI signal
             # We fetch the exact same log count logic the Reflector uses
             current_logs = db_conn.get_observation_log(username, persona_key, limit=100)
@@ -1332,21 +1730,27 @@ def build_context_and_stream(
                  # Yield a custom frontend control signal before the LLM starts streaming
                  yield f'data: {{"control": "reflection_started"}}\n\n'.encode('utf-8')
                  
-            yield from intercepting_stream_generator(
+            async for chunk in intercepting_stream_generator(
                 model_id, 
-                full_system_prompt, 
-                messages, 
+                masked_system_prompt, 
+                masked_messages, 
                 api_keys, 
                 tools=active_tools if active_tools else None,
                 kwargs_dict=kwargs_dict,
                 username=username,
                 persona_key=persona_key,
                 session_id=session_id,
-                pre_fill=pre_fill,
-                max_tool_output=max_tool_output
-            )
+                pre_fill=masked_pre_fill,
+                max_tool_output=max_tool_output,
+                sanitizer=sanitizer,
+                workspace_context=workspace_context,
+                bypass_firewall=bypass_firewall,
+                expert_model_id=expert_model_id
+            ):
+                yield chunk
             
-        def iter_lines(self):
-            yield from self.__iter__()
+        async def iter_lines(self):
+            async for chunk in self:
+                yield chunk
             
     return ToolInterceptStream()

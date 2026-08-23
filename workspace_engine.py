@@ -43,8 +43,13 @@ class SafeWorkspace:
             else:
                 resolved = requested_path.resolve()
 
-            # Strict prefix check
-            if not str(resolved).startswith(str(self.root)):
+            # Strict containment check.
+            # FIX(prefix-escape): plain startswith let sibling directories
+            # through — with root "/srv/workspace", the path
+            # "/srv/workspace2/secrets" passes a string-prefix test. Compare
+            # against root + separator (or exact equality) instead.
+            root_str = str(self.root)
+            if not (str(resolved) == root_str or str(resolved).startswith(root_str + os.sep)):
                 raise SecurityViolation(
                     f"Access denied: '{path}' resolves outside the workspace root '{self.root}'."
                 )
@@ -177,6 +182,9 @@ class SafeWorkspace:
                 "--cpus", "1.0",
                 "--pids-limit", "64",
                 "--security-opt", "no-new-privileges",
+                "--read-only",
+                "--tmpfs", "/tmp:size=32m",
+                "--user", "persona-user",
                 "-v", f"{temp_path.absolute()}:/sandbox/exec.py:ro",
                 image_name,
                 "/sandbox/exec.py"
@@ -293,7 +301,10 @@ class SafeWorkspace:
             workspace_root = pathlib.Path(meta["workspace_root"]).resolve()
 
             # Re-validate target path hasn't drifted outside its original workspace root
-            if not str(target_path.resolve()).startswith(str(workspace_root)):
+            # FIX(prefix-escape): same sibling-directory hole as _resolve — see above.
+            resolved_target = str(target_path.resolve())
+            root_str = str(workspace_root)
+            if not (resolved_target == root_str or resolved_target.startswith(root_str + os.sep)):
                 return {"success": False, "error": "Security violation: target path outside workspace root."}
 
             # N=1 backup — copy current file to .bak, overwriting any previous .bak
