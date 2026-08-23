@@ -10,6 +10,12 @@ from datetime import datetime
 import database as db
 import llm_engine
 
+# Global neuromodulator coupling (optional — degrades to legacy behavior if absent)
+try:
+    import dopamine_state
+except ImportError:
+    dopamine_state = None
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("stream_worker")
 
@@ -115,8 +121,19 @@ class ConsciousnessWorker:
             persona = ctx["persona"]
             logger.info(f"[CONSCIOUSNESS_DAEMON] Scanning {persona} (user: {username}) for cognitive dissonance...")
             
+            # 0. Read dopaminergic posture. Low tonic = consolidation mode:
+            #    the gap picker stands down entirely. If DA state is
+            #    unavailable, default to exploring (legacy behavior).
+            _da_tonic = None
+            if dopamine_state is not None:
+                try:
+                    _da_tonic = dopamine_state.get_state(username, persona)["tonic"]
+                except Exception:
+                    _da_tonic = None
+            _exploring = dopamine_state.should_explore(_da_tonic) if _da_tonic is not None else True
+            
             # 1. Scan for Entropic Gaps (Isolated clusters / lack of link density)
-            gap = self.analyze_entropic_gaps(username, persona)
+            gap = self.analyze_entropic_gaps(username, persona, exploring=_exploring)
             if gap:
                 self.resolve_entropic_gap(username, persona, gap)
 
@@ -171,10 +188,14 @@ class ConsciousnessWorker:
             except Exception as idle_err:
                 logger.error(f"[CONSCIOUSNESS_DAEMON ERROR] Idle coordinator failure: {idle_err}")
 
-    def analyze_entropic_gaps(self, username: str, persona: str) -> dict:
+    def analyze_entropic_gaps(self, username: str, persona: str, exploring: bool = True) -> dict:
         """
         Calculates node-to-link ratio and clustering metrics to identify
         highly detailed but poorly integrated (isolated) knowledge clusters.
+
+        Posture-aware: when exploring=False (low tonic dopamine), the picker
+        stands down — consolidation mode. When exploring, it rotates across
+        all fresh voids instead of always attacking the single largest pocket.
         """
         conn = self.get_db_connection()
         c = conn.cursor()
@@ -211,9 +232,41 @@ class ConsciousnessWorker:
                     isolated_dense_nodes.append((n, content_len))
                     
             if isolated_dense_nodes:
-                # Target the largest isolated pocket as the target entropic gap
-                isolated_dense_nodes.sort(key=lambda x: x[1], reverse=True)
-                target_node = isolated_dense_nodes[0][0]
+                # Consolidation mode: park the voids, let decay do its thing.
+                if not exploring:
+                    logger.info(
+                        f"[CONSCIOUSNESS_DAEMON] Tonic DA below explore threshold "
+                        f"(consolidation mode) — {len(isolated_dense_nodes)} void(s) parked."
+                    )
+                    return None
+                
+                now_ts = time.time()
+                
+                def _under_cooldown(n):
+                    last = self._gap_cooldowns.get((username, persona, n["node_id"]))
+                    return last is not None and (now_ts - last) < self.GAP_COOLDOWN_SECS
+                
+                # Only consider voids whose cooldown has expired, so the picker
+                # rotates to fresh targets instead of re-chewing one pocket.
+                fresh = [(n, l) for (n, l) in isolated_dense_nodes if not _under_cooldown(n)]
+                if not fresh:
+                    logger.info("[CONSCIOUSNESS_DAEMON] All identified gaps are under cooldown. Idling.")
+                    return None
+                
+                # Curiosity rotation: epoch-slot modulo across the sorted
+                # candidates. Same node is only revisited after the full
+                # cooldown window has elapsed for every fresher candidate.
+                fresh.sort(key=lambda x: x[1], reverse=True)
+                epoch_slot = int(now_ts // self.GAP_COOLDOWN_SECS)
+                target_node = fresh[epoch_slot % len(fresh)][0]
+                
+                # Gap discovery is itself arousing: small tonic bump.
+                if dopamine_state is not None:
+                    try:
+                        dopamine_state.boost_tonic(username, persona, 0.04)
+                    except Exception:
+                        pass
+                
                 logger.warning(f"[CONSCIOUSNESS_DAEMON] Identified entropic gap in node: '{target_node['title']}'")
                 return {
                     "type": "isolated_node",

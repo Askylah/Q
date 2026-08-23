@@ -145,7 +145,7 @@ def decay_modulator(tonic: float) -> float:
     return DECAY_MULT_CEIL + (DECAY_MULT_FLOOR - DECAY_MULT_CEIL) * t
 
 
-def stamp_bonus(phasic: int) -> int:
+def stamp_bonus(phasic: float) -> int:
     """
     Importance points added by DeepMemory.store() for memories born during
     a phasic spike. 0 at rest, up to +2 at full spike.
