@@ -166,16 +166,21 @@ def should_explore(tonic: float) -> bool:
 
 _EMA_ALPHA = 0.25          # how fast expectations track reality
 _TOOL_RPE_GAIN = 1.0       # objective task reward, full weight
+_TOOL_TONIC_GAIN = 0.15    # competence must be able to drive exploration
 _SOCIAL_RPE_GAIN = 0.6     # social valence moves the pool less per event
+_SOCIAL_TONIC_GAIN = 0.04  # mood shifts nudge posture gently
 _EMA_TAU_SEC = TONIC_TAU_SEC  # expectations relax toward neutral very slowly
 
 
 def _update_ema_and_fire(username: str, persona: str, kind: str,
                          observed: float, gain: float,
-                         phasic_weight: float = 1.0) -> dict:
+                         phasic_weight: float = 1.0,
+                         tonic_gain: float = 0.05) -> dict:
     """
     Rescorla-Wagner: rpe = observed - expected; expectation then drifts
     toward observed. Positive errors spike phasic DA; negative ones dip it.
+    tonic_gain scales how much positive surprise moves the exploration
+    posture (tool mastery uses a higher gain than social valence).
     Expectations are stored as another state key and time-relaxed.
     """
     with _LOCK:
@@ -190,7 +195,7 @@ def _update_ema_and_fire(username: str, persona: str, kind: str,
         cur_tonic = _decay_toward_baseline(_load("tonic", username, persona), TONIC_BASELINE, TONIC_TAU_SEC)
 
         new_phasic = min(PHASIC_MAX, max(0.0, cur_phasic + max(-0.3, rpe) * phasic_weight))
-        new_tonic = min(1.0, max(0.0, cur_tonic + (0.05 * rpe if rpe > 0 else 0.0)))
+        new_tonic = min(1.0, max(0.0, cur_tonic + (tonic_gain * rpe if rpe > 0 else 0.0)))
 
         new_expected = expected + _EMA_ALPHA * (float(observed) - expected)
 
@@ -202,14 +207,34 @@ def _update_ema_and_fire(username: str, persona: str, kind: str,
             **get_state(username, persona)}
 
 
-def tool_reward(username: str, persona: str, success_ratio: float) -> dict:
+def tool_reward(username: str, persona: str, successes: int,
+                action_failures: int, infra_failures: int) -> dict:
     """
-    Fast objective channel: fraction of agent-loop tool calls that succeeded
-    this pass (0.0..1.0). Fires RPE against the rolling success expectation.
-    Call once per tool-executing pass of intercepting_stream_generator.
+    Fast objective channel, with infra attribution: gateway 5xx / rate limits /
+    connection failures carry ZERO information about the agent's competence.
+    They are excluded from the expectation update and phasic dip entirely —
+    a nervous system should not develop learned helplessness over someone
+    else's server.
+
+    successes:       tool calls that returned usable results
+    action_failures: failures caused by the agent's own choices (bad args,
+                     blocked calls, duplicates, missing files it should have found)
+    infra_failures:  failures caused by the world (upstream 500s, rate limits)
     """
-    ratio = min(1.0, max(0.0, float(success_ratio)))
-    return _update_ema_and_fire(username, persona, "tool_ema", ratio, _TOOL_RPE_GAIN)
+    s, a, i = max(0, int(successes)), max(0, int(action_failures)), max(0, int(infra_failures))
+    total = s + a + i
+    if total <= 0:
+        return {"rpe": 0.0, "expected": None, **get_state(username, persona), "infra_discounted": False}
+    informative = s + a
+    if informative == 0:
+        # Pure infrastructure failure: the world broke, not the agent.
+        return {"rpe": 0.0, "expected": None, **get_state(username, persona), "infra_discounted": True}
+    observed = s / informative
+    res = _update_ema_and_fire(username, persona, "tool_ema", observed, _TOOL_RPE_GAIN,
+                               phasic_weight=informative / total,
+                               tonic_gain=_TOOL_TONIC_GAIN)
+    res["infra_discounted"] = i > 0
+    return res
 
 
 def social_reward(username: str, persona: str, valence_observed: float) -> dict:
@@ -219,7 +244,8 @@ def social_reward(username: str, persona: str, valence_observed: float) -> dict:
     the rolling valence expectation — mood *shifts* are the signal, not mood.
     """
     valence = min(1.0, max(0.0, float(valence_observed)))
-    return _update_ema_and_fire(username, persona, "valence_ema", valence, _SOCIAL_RPE_GAIN)
+    return _update_ema_and_fire(username, persona, "valence_ema", valence,
+                                _SOCIAL_RPE_GAIN, tonic_gain=_SOCIAL_TONIC_GAIN)
 
 
 if __name__ == "__main__":

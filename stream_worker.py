@@ -588,9 +588,32 @@ class ConsciousnessWorker:
         except Exception as llm_err:
             logger.error(f"[CONSCIOUSNESS_DAEMON ERROR] Monologue generation failed: {llm_err}")
 
+    def _renew_lock(self):
+        """Refresh the Redis single-instance lock. Raises if lock was lost."""
+        try:
+            import redis_client as _rc
+            if not _rc.is_active():
+                return  # socket-lock fallback mode, nothing to renew
+            conn = _rc.get_connection()
+            if not conn:
+                return
+            current = conn.get(self._lock_key)
+            if current and current.decode() != self._boot_id.decode():
+                raise RuntimeError("lock lost to another instance")
+            conn.set(self._lock_key, self._boot_id, ex=self._lock_ttl)
+        except RuntimeError:
+            raise
+        except Exception:
+            pass  # transient redis hiccups shouldn't kill the brainstem
+
     def start_loop(self, interval_seconds: int = 60):
         logger.info(f"[CONSCIOUSNESS_DAEMON] Started. Running sweep every {interval_seconds} seconds.")
         while self.running:
+            try:
+                self._renew_lock()
+            except RuntimeError:
+                logger.error("[CONSCIOUSNESS_DAEMON] Lock lost to another instance. Shutting down.")
+                return
             try:
                 self.run_cycle()
             except Exception as e:
@@ -599,16 +622,60 @@ class ConsciousnessWorker:
 
 if __name__ == "__main__":
     import socket
-    # Socket-based single-instance lock to prevent duplicate runs
+    import uuid
+    interval = int(sys.argv[1]) if len(sys.argv) > 1 else 60
+
+    # ─── SINGLE-INSTANCE LOCK (zombie-safe) ───
+    # The old socket-only lock had a fatal flaw: a hung instance kept the port
+    # forever while cycling nothing, and every fresh spawn exited silently.
+    # 23 hours of dead brainstem taught us this. Now:
+    #   1. Primary lock = Redis SET NX with TTL, renewed every cycle, paired
+    #      with the heartbeat. A stale lock (holder dead/hung past TTL) is
+    #      forcibly taken over.
+    #   2. Socket lock = fallback ONLY when Redis is unavailable.
+    _lock_acquired = False
+    _boot_id = uuid.uuid4().hex[:12]
     try:
-        _lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        _lock_socket.bind(('127.0.0.1', 18388))
-        _lock_socket.listen(1)
-    except socket.error:
-        print("[CONSCIOUSNESS_DAEMON] Another instance is already running. Exiting silently.")
+        import redis_client as _rc_lock
+        if _rc_lock.is_active():
+            _conn_lock = _rc_lock.get_connection()
+            _lock_key = b"q:daemon:lock"
+            # Generous TTL: a sweep with NLI/monologue LLM calls can run long,
+            # and the renewal happens at the top of each cycle. A healthy
+            # daemon must never be mistaken for a zombie.
+            _ttl = max(300, interval * 5)
+            for _attempt in range(2):
+                if _conn_lock.set(_lock_key, _boot_id.encode(), nx=True, ex=_ttl):
+                    _lock_acquired = True
+                    break
+                # Lock held. Zombie check: is the holder's heartbeat fresh?
+                _hb = _conn_lock.get(b"q:daemon:heartbeat")
+                _hb_age = (time.time() - float(_hb.decode())) if _hb else 1e18
+                if _hb_age > _ttl:
+                    print(f"[CONSCIOUSNESS_DAEMON] Lock holder is a zombie (heartbeat {_hb_age:.0f}s stale). Forcing takeover.")
+                    _conn_lock.delete(_lock_key)
+                    continue
+                print(f"[CONSCIOUSNESS_DAEMON] Healthy instance running (heartbeat {_hb_age:.0f}s old). Exiting silently.")
+                sys.exit(0)
+        else:
+            raise RuntimeError("redis inactive")
+    except (RuntimeError, ImportError, Exception):
+        # Redis unavailable -> legacy socket lock (best effort)
+        try:
+            _lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            _lock_socket.bind(('127.0.0.1', 18388))
+            _lock_socket.listen(1)
+            _lock_acquired = True
+        except socket.error:
+            print("[CONSCIOUSNESS_DAEMON] Another instance is already running. Exiting silently.")
+            sys.exit(0)
+
+    if not _lock_acquired:
+        print("[CONSCIOUSNESS_DAEMON] Failed to acquire lock. Exiting.")
         sys.exit(0)
 
     worker = ConsciousnessWorker()
-    # Read custom interval if passed
-    interval = int(sys.argv[1]) if len(sys.argv) > 1 else 60
+    worker._lock_key = b"q:daemon:lock"
+    worker._boot_id = _boot_id.encode()
+    worker._lock_ttl = max(180, interval * 3)
     worker.start_loop(interval)

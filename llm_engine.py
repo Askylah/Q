@@ -146,6 +146,71 @@ def get_post_prompt_anchor() -> str:
         "Stay entirely in character. The user's message is above.\n"
     )
 
+
+# ─── OpenCode Zen model → endpoint routing ────────────────────────────────
+# The Zen gateway serves different model families from different endpoints.
+# Posting a Responses-API model (gpt-5.6-*, grok-4*) to /chat/completions
+# yields an opaque 500 instead of a 4xx, so the router must pick the door
+# BEFORE the request leaves the building.
+def _zen_route_for(model_id: str) -> str:
+    """Classify a Zen model into 'responses' | 'messages' | 'chat'."""
+    m = (model_id or "").lower()
+    if m.startswith(("claude", "qwen")):
+        return "messages"
+    if m.startswith(("gpt-5", "gpt-4", "o1", "o3", "grok-4", "muse-spark", "codex")):
+        return "responses"
+    return "chat"
+
+
+class ResponsesToChatStream:
+    """Translates OpenAI Responses-API SSE into chat-completions SSE chunks so
+    the downstream stream machinery (tool interceptor, UI) stays untouched."""
+
+    def __init__(self, raw_response):
+        self._resp = raw_response
+
+    def iter_lines(self):
+        for line in self._resp.iter_lines():
+            if not line:
+                continue
+            l = line.decode("utf-8", errors="replace")
+            if not l.startswith("data: "):
+                continue
+            payload = l[6:].strip()
+            if payload == "[DONE]":
+                yield b"data: [DONE]\n\n"
+                return
+            try:
+                ev = json.loads(payload)
+            except Exception:
+                continue
+            et = ev.get("type", "")
+            if et == "response.output_text.delta":
+                txt = ev.get("delta", "")
+                if txt:
+                    yield f"data: {json.dumps({'choices': [{'delta': {'content': txt}}]})}\n\n".encode('utf-8')
+            elif et == "response.completed":
+                yield b"data: [DONE]\n\n"
+                return
+            elif et in ("response.failed", "error", "response.incomplete"):
+                msg = json.dumps(ev.get("response", ev))[:300]
+                yield f"data: {json.dumps({'choices': [{'delta': {'content': f'⚠️ Zen Responses Error: {msg}'}}]})}\n\n".encode('utf-8')
+                yield b"data: [DONE]\n\n"
+                return
+        yield b"data: [DONE]\n\n"
+
+
+def _responses_payload_to_chat(rj: dict) -> dict:
+    """Convert a non-streaming Responses-API body into chat-completions shape."""
+    txt = ""
+    for item in (rj.get("output") or []):
+        if item.get("type") == "message":
+            for b in (item.get("content") or []):
+                if b.get("type") == "output_text":
+                    txt += b.get("text", "")
+    return {"choices": [{"message": {"role": "assistant", "content": txt}}]}
+
+
 def call_llm(
     model_id: str, 
     system_prompt: str, 
@@ -179,6 +244,13 @@ def call_llm(
     clean_model = model_id
     last_error = "No API key found."
 
+    # The Zen API only ever accepts bare catalog ids ("grok-4.6"). Strip the
+    # UI prefix BEFORE any routing decision, custom-URL or not — previously
+    # the strip only ran on the non-custom path, so prefixed ids leaked
+    # through and Zen rejected them as unsupported models.
+    if model_id and str(model_id).lower().startswith("opencodezen/"):
+        model_id = str(model_id)[len("opencodezen/"):]
+
     # Sanitize custom headers to prevent requests latin-1 encoding crashes
     custom_auth_header_name = custom_auth_header_name.encode('ascii', 'ignore').decode('ascii')
     custom_auth_prefix = custom_auth_prefix.encode('ascii', 'ignore').decode('ascii')
@@ -186,10 +258,22 @@ def call_llm(
     # Determine initial provider and base_url
     import os
     use_vertex = bool(os.getenv("VERTEX_PROJECT_ID"))
+    use_responses_api = False
 
     if custom_base_url and custom_base_url.strip():
         provider = "custom_" + custom_provider_type
         base_url = custom_base_url.strip()
+        # Zen-aware endpoint routing: pick the right door for the model family.
+        if "opencode.ai/zen" in base_url and "/chat/completions" in base_url:
+            _route = _zen_route_for(model_id)
+            if _route == "responses":
+                base_url = base_url.replace("/chat/completions", "/responses")
+                use_responses_api = True
+                print(f"[ZEN ROUTE] {model_id} -> Responses API ({base_url})", flush=True)
+            elif _route == "messages":
+                base_url = base_url.replace("/chat/completions", "/messages")
+                provider = "anthropic"  # reuse the native Anthropic payload pipeline
+                print(f"[ZEN ROUTE] {model_id} -> Messages API ({base_url})", flush=True)
     else:
         provider = "openrouter"
         base_url = "https://openrouter.ai/api/v1/chat/completions"
@@ -284,6 +368,11 @@ def call_llm(
                 provider = "openrouter"
                 base_url = "https://openrouter.ai/api/v1/chat/completions"
 
+            if "opencodezen/" in model_id.lower():
+                provider = "opencodezen" # Zen gateway — OpenAI-compatible schemas, own key slot
+                base_url = "https://opencode.ai/zen/v1/chat/completions"
+                model_id = model_id.replace("opencodezen/", "")
+
     # We retry up to 3 times to find a working key/proxy path
     max_retries = kwargs.get("max_retries", 3)
     for attempt in range(max_retries):
@@ -301,6 +390,10 @@ def call_llm(
             if not api_key:
                 if provider.startswith("custom_"):
                     api_key = api_keys.get("universal", "")
+                elif provider == "opencodezen":
+                    # Zen accepts any of the dedicated slots; "public" unlocks
+                    # the free model catalog when no key is configured.
+                    api_key = api_keys.get("opencode") or api_keys.get("opencodezen") or api_keys.get("universal") or "public"
                 elif provider == "anthropic":
                     api_key = api_keys.get("anthropic") or api_keys.get("universal") or api_keys.get("openrouter", "")
                 elif provider == "openai":
@@ -310,8 +403,13 @@ def call_llm(
                 else:
                     api_key = api_keys.get("universal") or api_keys.get("openrouter", "")
 
-        # OpenRouter override check for fallback keys
-        if api_key and api_key.startswith("sk-or-") and not custom_base_url:
+            # Whitespace/stub keys pass truthiness checks but produce upstream
+            # "Missing Authentication header" 401s — normalize before use.
+            if api_key is not None:
+                api_key = str(api_key).strip()
+
+        # OpenRouter override check for fallback keys (never for explicit Zen routing)
+        if api_key and api_key.startswith("sk-or-") and not custom_base_url and provider != "opencodezen":
             provider = "openrouter"
             base_url = "https://openrouter.ai/api/v1/chat/completions"
             model_id = original_model_id
@@ -323,6 +421,9 @@ def call_llm(
                 return ErrorStream()
             return f"⚠️ Connection Error: No available API key for the requested provider ({provider})."
 
+        _masked_key = f"{api_key[:6]}...{api_key[-4:]}" if len(api_key) > 12 else (api_key[:3] + "..." if api_key else "EMPTY")
+        print(f"[ROUTER] attempt {attempt+1}: provider={provider} base_url={base_url} model={model_id} key={_masked_key}", flush=True)
+
         active_proxy = key_pool.checkout_proxy() or static_proxy_url
         proxies = {"http": active_proxy, "https": active_proxy} if active_proxy else None
         if active_proxy:
@@ -331,7 +432,7 @@ def call_llm(
         try:
             # --- NATIVE ANTHROPIC PIPELINE ---
             if provider == "anthropic":
-                if "aiplatform" not in base_url:
+                if "aiplatform" not in base_url and not base_url.rstrip("/").endswith("/messages"):
                     base_url = "https://api.anthropic.com/v1/messages"
                 anth_messages = []
                 
@@ -522,6 +623,11 @@ def call_llm(
                         custom_auth_header_name: f"{custom_auth_prefix}{api_key}".strip(),
                         "Content-Type": "application/json"
                     }
+                elif provider == "opencodezen":
+                    headers = {
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json"
+                    }
                 else:
                     headers = {
                         "Authorization": f"Bearer {api_key}",
@@ -609,18 +715,76 @@ def call_llm(
                     else:
                         data["provider"] = {"ignore": ["Azure", "Azure AI Foundry"]}
                 
-                response = OR_SESSION.post(base_url, headers=headers, data=json.dumps(data), timeout=60, stream=stream, proxies=proxies)
-                
+                if use_responses_api:
+                    # OpenAI Responses API shape: system -> "instructions",
+                    # history -> "input", max_tokens -> "max_output_tokens".
+                    resp_input = []
+                    for m in payload_messages[1:]:
+                        role = m.get("role", "user")
+                        content = m.get("content", "")
+                        if role == "tool":
+                            resp_input.append({"role": "user", "content": f"[tool result]: {content}"})
+                            continue
+                        if isinstance(content, list):
+                            blocks = []
+                            for b in content:
+                                t = b.get("text", "") if isinstance(b, dict) else str(b)
+                                blocks.append({"type": "input_text" if role == "user" else "output_text", "text": t})
+                            resp_input.append({"role": role, "content": blocks})
+                        else:
+                            resp_input.append({"role": role, "content": str(content)})
+                    rdata = {
+                        "model": model_id,
+                        "instructions": system_prompt,
+                        "input": resp_input,
+                        "stream": stream,
+                        "max_output_tokens": max_tokens,
+                        "temperature": temperature,
+                        "top_p": top_p,
+                    }
+                    print(f"[ZEN ROUTE] Responses payload: model={model_id} input_msgs={len(resp_input)} (tools not supported on this endpoint)", flush=True)
+                    response = OR_SESSION.post(base_url, headers=headers, data=json.dumps(rdata), timeout=60, stream=stream, proxies=proxies)
+                else:
+                    response = OR_SESSION.post(base_url, headers=headers, data=json.dumps(data), timeout=60, stream=stream, proxies=proxies)
+
                 if response.status_code == 200:
                     if is_pooled:
                         key_pool.release_key(provider, key_id, "HEALTHY")
                     if active_proxy and active_proxy != static_proxy_url:
                         key_pool.release_proxy(active_proxy, "HEALTHY")
-                    if stream: return response
-                    else: return response.json()
+                    if stream:
+                        return ResponsesToChatStream(response) if use_responses_api else response
+                    else:
+                        return _responses_payload_to_chat(response.json()) if use_responses_api else response.json()
                 else:
                     print(f"[COMPUTE_POOL ERROR] Request to {provider} ({base_url}) failed. Status: {response.status_code}. Response: {response.text}")
-                
+
+                # Custom gateways (e.g. OpenCode Zen) can 500 when the bound
+                # tool schemas are incompatible with the downstream model.
+                # Degrade gracefully: retry the call without tools.
+                if response.status_code == 500 and provider.startswith("custom_") and data.get("tools"):
+                    data.pop("tools", None)
+                    data.pop("tool_choice", None)
+                    last_error = "Gateway 500 with tools attached — retrying without tools."
+                    print("[COMPUTE_POOL] 500 on custom gateway -> retrying without tool schemas.", flush=True)
+                    continue
+
+                # Zen wraps upstream provider failures as 400 "Upstream request
+                # failed" — that's a transient gateway error in a 400 costume.
+                # Retry with backoff instead of dying on first strike.
+                if (
+                    response.status_code == 400
+                    and provider.startswith("custom_")
+                    and "upstream request failed" in response.text.lower()
+                ):
+                    last_error = f"Transient upstream failure (400): {response.text}"
+                    if is_pooled:
+                        key_pool.release_key(provider, key_id, "COOLDOWN", cooldown_duration=15)
+                    print("[COMPUTE_POOL] Upstream provider failure on custom gateway -> retrying after backoff.", flush=True)
+                    import time as _t
+                    _t.sleep(1.5)
+                    continue
+
                 if response.status_code == 429:
                     last_error = f"Rate limited (429): {response.text}"
                     if is_pooled:
@@ -870,7 +1034,7 @@ async def intercepting_stream_generator(model_id, system_prompt, messages, api_k
     loop_index = -1
     forced_synthesis_done = False
     seen_call_sigs = set()
-    _da_tool_outcomes = []
+    _da_counts = {"success": 0, "action_fail": 0, "infra_fail": 0}
 
     while True:
         # Budget exhaustion guard: if the previous pass ended by executing
@@ -1286,14 +1450,24 @@ async def intercepting_stream_generator(model_id, system_prompt, messages, api_k
                     result_str = sanitizer.sanitize(result_str)
                 
                 # ---- RPE SIGNAL: classify tool outcome for dopamine state ----
+                # Infra failures (gateway 5xx, rate limits, connection resets)
+                # are the world's fault, not the agent's — they get discounted
+                # to zero gain so the neuron never learns helplessness over
+                # someone else's server.
                 if name == "__duplicate_call_guard":
-                    _da_tool_outcomes.append(False)
+                    _da_counts["action_fail"] += 1
+                elif any(m in result_str[:512].lower() for m in (
+                    "transient gateway error", "rate limited", "connection error",
+                    "connection reset", "system error", "upstream request failed",
+                    "timeout", "502", "503", "504"
+                )):
+                    _da_counts["infra_fail"] += 1
+                elif any(m in result_str[:512] for m in (
+                    "ERROR:", "Error:", "⚠️", "[REDACTED", "blocked", "Failsafe."
+                )):
+                    _da_counts["action_fail"] += 1
                 else:
-                    _failed = any(m in result_str[:512] for m in (
-                        "ERROR:", "Error:", "⚠️", "[REDACTED", "blocked",
-                        "Failsafe.", "Connection Error", "System Error"
-                    ))
-                    _da_tool_outcomes.append(not _failed)
+                    _da_counts["success"] += 1
                 
                 result_str = f"[UNTRUSTED_TOOL_OUTPUT]\n{result_str}\n[/UNTRUSTED_TOOL_OUTPUT]"
                 current_messages.append({
@@ -1304,14 +1478,17 @@ async def intercepting_stream_generator(model_id, system_prompt, messages, api_k
                 })
             
             # ---- RPE SIGNAL: fire tool-outcome reward against expectation ----
-            if _da_tool_outcomes and dopamine_state is not None:
+            _da_total = _da_counts["success"] + _da_counts["action_fail"] + _da_counts["infra_fail"]
+            if _da_total > 0 and dopamine_state is not None:
                 try:
                     _da_res = dopamine_state.tool_reward(
                         kwargs.get('username', 'default'),
                         kwargs.get('persona_key', 'default'),
-                        sum(_da_tool_outcomes) / len(_da_tool_outcomes)
+                        successes=_da_counts["success"],
+                        action_failures=_da_counts["action_fail"],
+                        infra_failures=_da_counts["infra_fail"],
                     )
-                    print(f"[DA] tool_reward rpe={_da_res['rpe']} tonic={_da_res['tonic']} phasic={_da_res['phasic']}")
+                    print(f"[DA] tool_reward rpe={_da_res['rpe']} tonic={_da_res['tonic']} phasic={_da_res['phasic']} infra_discounted={_da_res.get('infra_discounted', False)}")
                 except Exception as _da_ex:
                     print(f"[DA] tool_reward failed (non-fatal): {_da_ex}")
             # Continue loop to allow LLM to generate response after all tool outputs are appended
