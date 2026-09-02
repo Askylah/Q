@@ -38,7 +38,13 @@ except ImportError:
 # CONSTANTS
 # ═══════════════════════════════════════════════════════════
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "users.db")
+# Storage location comes from the shared source of truth. This line previously
+# recomputed the path independently of database.py:10 — they agreed only because
+# both files happened to sit in the same directory. Since database.py's global
+# sqlite3.connect wrapper matches on STRING EQUALITY with its own DB_PATH, any
+# divergence would have silently stripped timeout=30.0 from all 11 connections
+# below, surfacing later as random "database is locked" failures. See app_paths.py.
+from app_paths import DB_PATH
 
 # Association scan cap — only scan the N most recent active memories
 ASSOCIATION_SCAN_CAP = 200
@@ -328,9 +334,47 @@ class DeepMemory:
         
         # Auto-associate with existing memories
         self._auto_associate(memory)
+
+        # Novelty channel: how far is this memory from the nearest thing the
+        # persona already holds? Computed here because the embedding is in
+        # hand and _auto_associate scores on keywords/tags, not vectors.
+        # Non-fatal, and only fires when the vector exists.
+        if _DA_AVAILABLE and model:
+            try:
+                max_sim = self._max_similarity_to_existing(vec, exclude_id=mem_id)
+                _nov = dopamine_state.novelty_reward(self.username, self.persona, max_sim)
+                if _nov.get("paid", 0.0) > 0.0:
+                    _near = "none" if max_sim is None else round(max_sim, 3)
+                    print(f"[DA] novelty: nearest={_near} novelty={_nov['novelty']} "
+                          f"paid=+{_nov['paid']} tonic={_nov['tonic']} "
+                          f"budget_left={_nov['budget_left']}", flush=True)
+            except Exception as _nov_err:
+                print(f"[DA] novelty_reward failed (non-fatal): {_nov_err}", flush=True)
         
         return memory
     
+    def _max_similarity_to_existing(self, vec, exclude_id: str = None, cap: int = 500):
+        """Cosine similarity between `vec` (1 x dim) and the nearest active
+        memory this persona already holds. None when there is nothing to
+        compare against (a newborn persona)."""
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("""
+            SELECT embedding FROM deep_memories
+            WHERE username=? AND persona=? AND active=1 AND embedding IS NOT NULL AND id != ?
+            ORDER BY created_at DESC LIMIT ?
+        """, (self.username, self.persona, exclude_id or "", cap))
+        blobs = [r[0] for r in c.fetchall()]
+        conn.close()
+        if not blobs:
+            return None
+        q = np.asarray(vec, dtype=np.float32).reshape(1, -1)
+        dim = q.shape[1]
+        rows = [np.frombuffer(b, dtype=np.float32) for b in blobs if len(b) == dim * 4]
+        if not rows:
+            return None
+        return float(cosine_similarity(q, np.stack(rows)).max())
+
     def recall(self, query: str = None, limit: int = 10) -> list:
         """
         Retrieve memories with association chains.

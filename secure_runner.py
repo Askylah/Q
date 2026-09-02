@@ -84,8 +84,23 @@ def run_in_padded_room(code: str, timeout: int = 20, max_output: int = 8192) -> 
         return f"[UNTRUSTED_TOOL_OUTPUT]\n{output}\n[/UNTRUSTED_TOOL_OUTPUT]"
 
     except subprocess.TimeoutExpired:
-        return "CRITICAL FAILURE: Execution timed out (Possible infinite loop or resource exhaustion)."
+        # Deliberately does NOT say "timed out". This is the agent's own code
+        # failing to terminate, so it must score as an ACTION failure — but
+        # "timed out" is high-confidence infrastructure vocabulary to
+        # dopamine_state.classify_tool_outcome, which was excusing the one
+        # failure here that is unambiguously the agent's fault. Wording is the
+        # attribution signal on this path; keep it free of network vocabulary.
+        return ("Error: submitted code exceeded its execution limit and was killed "
+                "(possible infinite loop or runaway resource use in the code).")
     except Exception as e:
+        # Left alone deliberately: "SECURE RUNNER ERROR:" already contains the
+        # exact marker "ERROR:", so this is detected as a failure today. It is
+        # attributed to the agent, which is wrong when the cause is a missing
+        # docker binary ("[WinError 2] The system cannot find the file
+        # specified") — but that string is indistinguishable from a legitimate
+        # file-not-found action failure, so it cannot be fixed in the shared
+        # vocabulary without wrecking attribution for every file tool. Fixing it
+        # properly means detecting the docker-absent case here, at the source.
         return f"SECURE RUNNER ERROR: {str(e)}"
     finally:
         if os.path.exists(temp_filename):

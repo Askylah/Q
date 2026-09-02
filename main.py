@@ -36,6 +36,43 @@ def configure_executor():
     print("[SYSTEM] ThreadPoolExecutor max_workers set to 100", flush=True)
 
 @app.on_event("startup")
+def backup_database_on_start():
+    """Verified point-in-time backup before the daemon starts writing.
+
+    The 6-hour floor matters here: uvicorn runs with reload=True (see __main__
+    below), so startup hooks re-fire on every source edit. Without the floor this
+    would mint a fresh 7MB file on every file save.
+    """
+    try:
+        import app_paths as _paths
+        import database as _db
+        print(f"[SYSTEM] Storage: {_paths.DB_PATH}", flush=True)
+        _db.backup_database(retain=10, min_interval_hours=6.0)
+    except Exception as exc:
+        print(f"[SYSTEM] Startup backup skipped: {exc}", flush=True)
+
+
+@app.on_event("startup")
+def reap_observations_on_start():
+    """Age off daemon-authored observation rows before the daemon starts writing.
+
+    Ordering is deliberate and this hook must stay between the two neighbours it
+    has: it runs AFTER backup_database_on_start, so a verified full snapshot of
+    the database already exists on disk before anything is deleted, and BEFORE
+    start_consciousness_daemon, so the persona's working-memory window is clean
+    at the moment the daemon begins emitting into it.
+
+    The reaper keeps its own interval floor (filesystem mtime of a stamp file in
+    backups/), so re-firing this hook on every uvicorn source-edit reload is free.
+    """
+    try:
+        import database as _db
+        _db.reap_observations()
+    except Exception as exc:
+        print(f"[SYSTEM] Startup reap skipped: {exc}", flush=True)
+
+
+@app.on_event("startup")
 def verify_governance_registry():
     import sys
     import os
@@ -868,6 +905,27 @@ async def delete_pool_key(username: str, provider: str, key_id: str, current_use
         redis_key = f"q:pool:key:{provider}:{key_id}"
         redis_pool.pool.redis.delete(redis_key)
         return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/settings/{username}/telemetry/keys/{provider}/{key_id}/reset")
+async def reset_pool_key(username: str, provider: str, key_id: str, current_user: str = Depends(get_current_user)):
+    """
+    Return a COOLDOWN/BURNED key to HEALTHY. Exists because a burn used to be
+    terminal and delete-and-re-add was the only way back.
+    """
+    if username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
+    try:
+        import redis_pool
+        if not redis_pool.pool.is_active():
+            raise HTTPException(status_code=400, detail="Redis pool is inactive")
+        restored = redis_pool.pool.unburn_key(provider, key_id)
+        if not restored:
+            raise HTTPException(status_code=404, detail="No such key in the pool")
+        return {"success": True}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

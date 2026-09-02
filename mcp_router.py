@@ -88,10 +88,32 @@ class _ServerEntry:
             result = await self.session.call_tool(raw_name, arguments)
             if hasattr(result, "content") and isinstance(result.content, list):
                 texts = [c.text for c in result.content if hasattr(c, "text")]
-                return "\n".join(texts)
-            return str(result)
+                body = "\n".join(texts)
+            else:
+                body = str(result)
+
+            # FIX(tool-attribution): MCP signals tool failure with isError ON THE
+            # RESULT. It does not raise. Without this check a failed call returns
+            # through the success path as the provider's bare text — "Unknown
+            # tool: git_foo", "Input validation error: 'code' is a required
+            # property", "ENOENT: no such file or directory" — none of which carry
+            # any marker dopamine_state.classify_tool_outcome recognises. Every
+            # one of them scored as a clean SUCCESS, so the agent's competence
+            # signal was being *rewarded* for failed tool calls. Since this router
+            # carries virtually all external tool traffic, this single missing
+            # check accounted for most of the mis-scoring.
+            # isError is a plain bool defaulting to False in the SDK's
+            # CallToolResult, so getattr stays safe against older result shapes.
+            if getattr(result, "isError", False):
+                return f"Error: MCP tool '{self.name}/{raw_name}' failed: {body}"
+            return body
         except Exception as e:
-            return f"Error executing '{self.name}/{raw_name}': {e}"
+            # The colon in "Error:" is load-bearing — it is the exact marker the
+            # dopamine classifier looks for. The previous wording, "Error
+            # executing ...", has no colon after Error and therefore matched no
+            # failure marker at all, so every transport-level exception here was
+            # scored as a success.
+            return f"Error: executing '{self.name}/{raw_name}' failed: {e}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────

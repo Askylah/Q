@@ -286,6 +286,17 @@ function EcosystemHealthPanel({ appTheme, USERNAME, S }) {
     }
   };
 
+  // A COOLDOWN/BURNED key used to be unrecoverable from here -- delete and
+  // re-add was the only way back. Restoring is not destructive, so no confirm.
+  const handleResetKey = async (prov, kid) => {
+    try {
+      await api.resetPoolKey(USERNAME, prov, kid);
+      triggerRefresh();
+    } catch (err) {
+      alert(`Failed to restore key: ${err.message}`);
+    }
+  };
+
   const handleAddProxy = async (e) => {
     e.preventDefault();
     if (!newProxyUrl) return;
@@ -518,11 +529,37 @@ function EcosystemHealthPanel({ appTheme, USERNAME, S }) {
                                 : keyInfo.status === 'COOLDOWN' 
                                 ? '#f0b232' 
                                 : '#f23f42'
-                            }}>
+                            }}
+                            title={keyInfo.last_error ? `Last error - ${keyInfo.last_error}` : undefined}
+                            >
                               {keyInfo.status}
+                              {keyInfo.failures > 0 && keyInfo.status !== 'HEALTHY'
+                                ? ` (${keyInfo.failures})`
+                                : ''}
                             </span>
                           </td>
                           <td style={{ padding: '8px', textAlign: 'center' }}>
+                            {keyInfo.status !== 'HEALTHY' && (
+                              <button
+                                onClick={() => handleResetKey(prov, keyInfo.id)}
+                                title="Restore this key to HEALTHY"
+                                style={{
+                                  background: 'transparent',
+                                  border: 'none',
+                                  color: '#23a55a',
+                                  cursor: 'pointer',
+                                  padding: '4px',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  borderRadius: '4px'
+                                }}
+                                onMouseEnter={e => e.currentTarget.style.background = 'rgba(35,165,90,0.1)'}
+                                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                              >
+                                <span className="material-icons" style={{ fontSize: '16px' }}>restart_alt</span>
+                              </button>
+                            )}
                             <button
                               onClick={() => handleDeleteKey(prov, keyInfo.id)}
                               title="Delete Key"

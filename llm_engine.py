@@ -135,6 +135,14 @@ try:
 except ImportError:
     dopamine_state = None
 
+# Operational world-model: provider reliability. Deliberately separate from
+# dopamine_state — the router learns servers are flaky, the neuron does not
+# learn the agent is incompetent.
+try:
+    import provider_health
+except ImportError:
+    provider_health = None
+
 OR_SESSION = requests.Session()
 adapter = requests.adapters.HTTPAdapter(pool_connections=100, pool_maxsize=100)
 OR_SESSION.mount("http://", adapter)
@@ -238,6 +246,8 @@ def call_llm(
             def is_active(self): return False
             def checkout_key(self, provider): return None, None, None
             def release_key(self, provider, key_id, status, cooldown_duration=0): return False
+            def note_auth_failure(self, provider, key_id, status_code, body="", allow_burn=True): return ""
+            def unburn_key(self, provider, key_id): return False
         key_pool = DummyPool()
 
     original_model_id = model_id
@@ -375,6 +385,9 @@ def call_llm(
 
     # We retry up to 3 times to find a working key/proxy path
     max_retries = kwargs.get("max_retries", 3)
+    # FIX(false-burn): each attempt checks out the NEXT healthy key, so without
+    # this counter one bad request could permanently burn every key in the pool.
+    _auth_burns = 0
     for attempt in range(max_retries):
         if provider == "google_vertex" or (provider == "anthropic" and "aiplatform" in base_url):
             key_id = None
@@ -584,7 +597,19 @@ def call_llm(
                 elif res.status_code in [401, 403]:
                     last_error = f"Auth error ({res.status_code}): {res.text}"
                     if is_pooled:
-                        key_pool.release_key(provider, key_id, "BURNED")
+                        # FIX(false-burn): a 403 is usually about the project, the
+                        # region, the model or the exit IP -- not the credential.
+                        # redis_pool.classify_auth_failure decides; only a body that
+                        # names the key can burn it, and only once per request.
+                        _verdict = key_pool.note_auth_failure(
+                            provider, key_id, res.status_code, res.text,
+                            allow_burn=(_auth_burns == 0))
+                        if _verdict == "BURNED":
+                            _auth_burns += 1
+                    # A blocked proxy exit IP returns 401/403 from every provider at
+                    # once. Cool it, or the pool gets blamed for the tunnel.
+                    if active_proxy and active_proxy != static_proxy_url:
+                        key_pool.release_proxy(active_proxy, "COOLDOWN", cooldown_duration=300)
                     
                     if "aiplatform" in base_url:
                         print("[VERTEX FALLBACK] Auth error on Vertex. Swapping to OpenRouter/Standard keys.")
@@ -752,12 +777,32 @@ def call_llm(
                         key_pool.release_key(provider, key_id, "HEALTHY")
                     if active_proxy and active_proxy != static_proxy_url:
                         key_pool.release_proxy(active_proxy, "HEALTHY")
+                    if provider_health is not None:
+                        try:
+                            provider_health.record_outcome(provider, True)
+                        except Exception:
+                            pass
                     if stream:
                         return ResponsesToChatStream(response) if use_responses_api else response
                     else:
                         return _responses_payload_to_chat(response.json()) if use_responses_api else response.json()
                 else:
                     print(f"[COMPUTE_POOL ERROR] Request to {provider} ({base_url}) failed. Status: {response.status_code}. Response: {response.text}")
+                    # World-model update: transport/gateway failures teach the
+                    # ROUTER that a provider is flaky. Auth failures (401/403)
+                    # and agent-side 4xx say nothing about server reliability,
+                    # so they are excluded. Dopamine is never touched here.
+                    if provider_health is not None and (
+                        response.status_code == 429 or response.status_code >= 500
+                        or (response.status_code == 400 and "upstream request failed" in response.text.lower())
+                    ):
+                        try:
+                            _ph = provider_health.record_outcome(
+                                provider, False, error=f"{response.status_code}: {response.text[:120]}"
+                            )
+                            print(f"[PROVIDER_HEALTH] {provider} reliability={_ph['reliability']} streak={_ph['consecutive_failures']}", flush=True)
+                        except Exception:
+                            pass
 
                 # Custom gateways (e.g. OpenCode Zen) can 500 when the bound
                 # tool schemas are incompatible with the downstream model.
@@ -780,9 +825,15 @@ def call_llm(
                     last_error = f"Transient upstream failure (400): {response.text}"
                     if is_pooled:
                         key_pool.release_key(provider, key_id, "COOLDOWN", cooldown_duration=15)
-                    print("[COMPUTE_POOL] Upstream provider failure on custom gateway -> retrying after backoff.", flush=True)
+                    _wait = 1.5
+                    if provider_health is not None:
+                        try:
+                            _wait = max(1.5, provider_health.suggested_backoff(provider))
+                        except Exception:
+                            pass
+                    print(f"[COMPUTE_POOL] Upstream provider failure on custom gateway -> retrying in {_wait:.1f}s.", flush=True)
                     import time as _t
-                    _t.sleep(1.5)
+                    _t.sleep(_wait)
                     continue
 
                 if response.status_code == 429:
@@ -807,7 +858,19 @@ def call_llm(
                 elif response.status_code in [401, 403]:
                     last_error = f"Auth error ({response.status_code}): {response.text}"
                     if is_pooled:
-                        key_pool.release_key(provider, key_id, "BURNED")
+                        # FIX(false-burn): a 403 is usually about the project, the
+                        # region, the model or the exit IP -- not the credential.
+                        # redis_pool.classify_auth_failure decides; only a body that
+                        # names the key can burn it, and only once per request.
+                        _verdict = key_pool.note_auth_failure(
+                            provider, key_id, response.status_code, response.text,
+                            allow_burn=(_auth_burns == 0))
+                        if _verdict == "BURNED":
+                            _auth_burns += 1
+                    # A blocked proxy exit IP returns 401/403 from every provider at
+                    # once. Cool it, or the pool gets blamed for the tunnel.
+                    if active_proxy and active_proxy != static_proxy_url:
+                        key_pool.release_proxy(active_proxy, "COOLDOWN", cooldown_duration=300)
                     
                     if "aiplatform" in base_url:
                         print("[VERTEX FALLBACK] Auth error on Vertex. Swapping to OpenRouter/Standard keys.")
@@ -844,6 +907,15 @@ def call_llm(
                 key_pool.release_key(provider, key_id, "HEALTHY")
             if active_proxy and active_proxy != static_proxy_url:
                 key_pool.release_proxy(active_proxy, "COOLDOWN", cooldown_duration=120)
+
+            # Transport-level explosions are pure world-failure: teach the
+            # router, never the neuron.
+            if provider_health is not None:
+                try:
+                    _ph = provider_health.record_outcome(provider, False, error=str(e)[:150])
+                    print(f"[PROVIDER_HEALTH] {provider} reliability={_ph['reliability']} streak={_ph['consecutive_failures']} (transport)", flush=True)
+                except Exception:
+                    pass
             
             # Egress failure - trigger rotation (VPN failover)
             # ONLY rotate if it's a connection/timeout exception, AND rotation is not disabled
@@ -1329,9 +1401,47 @@ async def intercepting_stream_generator(model_id, system_prompt, messages, api_k
                         temperature=args.get("temperature", 0.7)
                     )
                     if isinstance(sub_res, dict):
-                        result = sub_res.get("choices", [{}])[0].get("message", {}).get("content", "Error: No response from sub-agent.")
+                        result = sub_res.get("choices", [{}])[0].get("message", {}).get("content", "Error: sub-agent returned an empty completion.")
                     else:
                         result = f"Error: Sub-agent call failed ({sub_res})"
+                elif name == "query_second_brain":
+                    # FIX(second-brain-dispatch): this tool is advertised to the
+                    # model whenever expert_model_id is set, and the system prompt
+                    # explicitly instructs it to delegate hard reasoning here — but
+                    # there was no dispatch branch. Every call fell through to
+                    # execute_api, whose EXECUTION_MAP is empty (plugins/schemas/
+                    # does not exist), returning "Error: API function
+                    # query_second_brain not found in execution map." That string
+                    # scores as an ACTION failure, so the agent took a competence
+                    # penalty every time it obeyed its own instructions. The
+                    # plumbing was already complete — expert_model_id is threaded
+                    # into this generator's **kwargs at the call site — only the
+                    # branch was missing.
+                    expert_id = kwargs.get("expert_model_id")
+                    if not expert_id:
+                        result = "Error: second brain is not configured for this request."
+                    else:
+                        second_prompt = args.get("prompt", "")
+                        print(f"[SECOND_BRAIN] Delegating to {expert_id}: {second_prompt[:60]}...")
+                        expert_res = await asyncio.to_thread(
+                            call_llm,
+                            model_id=expert_id,
+                            system_prompt=(
+                                "You are a high-cognition analysis engine. Answer with rigorous, "
+                                "complete reasoning: show formulas, proofs and intermediate steps. "
+                                "Do not adopt a persona and do not address the operator directly — "
+                                "your output is consumed by another model, not read as-is."
+                            ),
+                            messages=[{"role": "user", "content": second_prompt}],
+                            api_keys=api_keys,
+                            stream=False,
+                            temperature=args.get("temperature", 0.3)
+                        )
+                        if isinstance(expert_res, dict):
+                            result = expert_res.get("choices", [{}])[0].get("message", {}).get(
+                                "content", "Error: second brain returned an empty completion.")
+                        else:
+                            result = f"Error: Second brain call failed ({expert_res})"
                 elif name == "deep_lore_query":
                     import zettel_engine
                     persona_target = args.get("persona") or kwargs.get("persona_key") or "default"
@@ -1450,22 +1560,14 @@ async def intercepting_stream_generator(model_id, system_prompt, messages, api_k
                     result_str = sanitizer.sanitize(result_str)
                 
                 # ---- RPE SIGNAL: classify tool outcome for dopamine state ----
-                # Infra failures (gateway 5xx, rate limits, connection resets)
-                # are the world's fault, not the agent's — they get discounted
-                # to zero gain so the neuron never learns helplessness over
-                # someone else's server.
+                # Attribution matters: infra failures (gateway 5xx, rate limits,
+                # connection resets) are the world's fault and get discounted to
+                # zero learning gain. Classification lives in dopamine_state so
+                # the failure vocabulary is testable in one place.
                 if name == "__duplicate_call_guard":
                     _da_counts["action_fail"] += 1
-                elif any(m in result_str[:512].lower() for m in (
-                    "transient gateway error", "rate limited", "connection error",
-                    "connection reset", "system error", "upstream request failed",
-                    "timeout", "502", "503", "504"
-                )):
-                    _da_counts["infra_fail"] += 1
-                elif any(m in result_str[:512] for m in (
-                    "ERROR:", "Error:", "⚠️", "[REDACTED", "blocked", "Failsafe."
-                )):
-                    _da_counts["action_fail"] += 1
+                elif dopamine_state is not None:
+                    _da_counts[dopamine_state.classify_tool_outcome(result_str)] += 1
                 else:
                     _da_counts["success"] += 1
                 

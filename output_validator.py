@@ -1,3 +1,5 @@
+import fnmatch
+import json
 import re
 from typing import Dict, Any, List, Tuple
 
@@ -14,6 +16,107 @@ _ALLOWED_DOMAINS = [
 ]
 
 _DOMAIN_PATTERN = re.compile(r"https?://(?:www\.)?([^/\s]+)")
+
+# --- PROTECTED PATHS (Layer 4b) ---
+# Files the model must never read, overwrite, move or clobber through filesystem
+# tools. The application's own code reaches these via sqlite3 / open() directly
+# and NEVER passes through this gate, so denying them here costs exactly zero
+# legitimate functionality.
+#
+# Why this lives here and not in governance_manager: governance classifies tools
+# by NAME ONLY and deliberately refuses to inspect arguments. "write_file" is a
+# single KINETIC verb whether it targets a scratch file or the entire database.
+# Argument-aware denial therefore has to happen at the output gate.
+_PROTECTED_BASENAME_PATTERNS = [
+    # SQLite database + its WAL/journal sidecars (journal_mode=WAL, database.py:31)
+    "*.db", "*.db-wal", "*.db-shm", "*.db-journal",
+    "*.sqlite", "*.sqlite3",
+    # ...and every backup of one, so a wipe can't be followed by a cleanup
+    "*.db.bak", "*.db.backup*", "users.db*",
+    # Credentials / secrets
+    ".env", ".env.*", "*.pem", "*.key", "id_rsa*",
+    "api_keys.json", "secrets.json", "credentials.json",
+    # Persona definitions — the model editing its own character sheet unprompted
+    "personas.json",
+]
+
+# Argument keys that carry a filesystem path across the MCP filesystem toolset
+# (write_file/edit_file: path, move_file: source+destination, read_multiple_files: paths)
+_PATH_ARG_KEYS = frozenset({
+    "path", "source", "destination", "dest", "file_path", "filepath", "target",
+})
+_PATH_LIST_ARG_KEYS = frozenset({"paths", "files"})
+
+_MAX_WALK_DEPTH = 6
+
+
+def _collect_candidate_paths(obj: Any, depth: int = 0) -> List[str]:
+    """
+    Recursively harvest every filesystem path referenced anywhere in a tool-call
+    argument tree.
+
+    Must be structure-agnostic because llm_engine.py dispatches MCP tools through
+    TWO shapes, and this gate (llm_engine.py:1315) runs in front of both:
+
+      1. direct  -> name="filesystem__write_file", args={"path": ...}
+      2. wrapper -> name="call_mcp_tool",
+                    args={"server_name": "filesystem",
+                          "tool_name": "write_file",
+                          "arguments": {"path": ...}}
+
+    Shape 2 nests the real target, and `arguments` may still be a raw JSON STRING
+    at this point -- llm_engine only json.loads() it later, at :1325-1327. So we
+    walk dicts, lists, and opportunistically parse embedded JSON objects.
+    """
+    found: List[str] = []
+    if depth > _MAX_WALK_DEPTH:
+        return found
+
+    if isinstance(obj, str):
+        candidate = obj.strip()
+        if candidate.startswith("{") and candidate.endswith("}"):
+            try:
+                return _collect_candidate_paths(json.loads(candidate), depth + 1)
+            except (ValueError, TypeError):
+                pass
+        return found
+
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            key_l = str(key).lower()
+            if key_l in _PATH_ARG_KEYS and isinstance(value, str):
+                found.append(value)
+            elif key_l in _PATH_LIST_ARG_KEYS and isinstance(value, (list, tuple)):
+                found.extend(v for v in value if isinstance(v, str))
+            else:
+                found.extend(_collect_candidate_paths(value, depth + 1))
+        return found
+
+    if isinstance(obj, (list, tuple)):
+        for value in obj:
+            found.extend(_collect_candidate_paths(value, depth + 1))
+
+    return found
+
+
+def _is_protected_path(raw: str) -> bool:
+    """
+    Match on BASENAME, which is deliberately robust against the two ways a path
+    can arrive mangled:
+      - traversal:      "uploads/../../users.db"      -> "users.db"
+      - the doubled-path bug (llm_engine.py:1330-1339):
+                        "C:\\root\\C:\\root\\users.db" -> "users.db"
+    Both collapse to the same basename, so neither evades the check.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return False
+
+    normalized = raw.strip().strip('"').strip("'").replace("\\", "/").rstrip("/")
+    basename = normalized.rsplit("/", 1)[-1].lower()
+    if not basename:
+        return False
+
+    return any(fnmatch.fnmatch(basename, pattern) for pattern in _PROTECTED_BASENAME_PATTERNS)
 
 def validate_tool_call(name: str, args: Dict[str, Any]) -> bool:
     """
@@ -40,6 +143,16 @@ def validate_tool_call(name: str, args: Dict[str, Any]) -> bool:
         domain = match.group(1).lower()
         if not any(re.search(allowed, domain) for allowed in _ALLOWED_DOMAINS):
             print(f"[OUTPUT GATE] Blocked tool call to untrusted domain: {domain}")
+            return False
+
+    # --- Layer 4b: protected-path deny-list ---
+    # Applied to EVERY tool call regardless of name. Non-filesystem tools carry no
+    # path-shaped arguments, so this is a no-op for them; meanwhile it transparently
+    # covers both MCP dispatch shapes, the non-MCP helpers (read_file_lines), and
+    # any future tool that grows a "path" argument without anyone updating this file.
+    for candidate in _collect_candidate_paths(args):
+        if _is_protected_path(candidate):
+            print(f"[OUTPUT GATE] Blocked '{name}' targeting protected path: {candidate}")
             return False
 
     return True

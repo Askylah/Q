@@ -502,6 +502,12 @@ class PersonaAPI {
         });
     }
 
+    async resetPoolKey(username, provider, keyId) {
+        return await this._fetch(`/settings/${encodeURIComponent(username)}/telemetry/keys/${encodeURIComponent(provider)}/${encodeURIComponent(keyId)}/reset`, {
+            method: 'POST'
+        });
+    }
+
     async fetchPoolProxies(username = "default_user") {
         try {
             return await this._fetch(`/settings/${encodeURIComponent(username)}/telemetry/proxies`);
