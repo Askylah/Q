@@ -2,6 +2,8 @@
 
 ## Status: SESSIONS 1-9 COMMITTED — SESSION 9 ADDED DAEMON MODEL SELECTION, THE NOVELTY DA CHANNEL AND THE IDLE REST GATE; §47 RETRACTED; §51.2 CONFIRMED — **APP RUNNING, DAEMON HEALTHY (pid 27404), ALL FOUR SUITES GREEN, NOTHING MID-FLIGHT** (2026-09-01, 21:38)
 
+> ✅ **SESSION 10 (2026-09-03): §23's telemetry `event_type` filter is APPLIED, one line at `main.py:859`, UNCOMMITTED as of writing** (§58). App was down at the time — no reload, no daemon recovery to check. **Then §59: the panel's third badge colour + the `/10` score lie, `App.jsx` edited and `dist` rebuilt (`index-CBrCaQPS.js`).**
+>
 > 🚨 **SESSION 9 HEADLINE — §47 IS RETRACTED, READ §52.** The monologue writer was
 > **never** inert from an empty key pool. It fires **once per user message**, keyed on
 > the `daemon:last_monologue:*` mark, and the last user message was 2026-08-29 23:02.
@@ -1594,6 +1596,7 @@ more visible; it does not create one. One-line fix if wanted: add
 `AND event_type IN ('entropic_gap','semantic_contradiction','internal_reflection')` at
 `main.py:833`. **Not applied** — it changes what a UI panel displays, which is a product
 decision, not a flood fix.
+> **[Session 10, 2026-09-03 — CORRECTION: APPLIED.]** Owner made the product call. Route had drifted to `main.py:817`, SQL to `:856`. Measured before/after in **§58**.
 
 The most plausible feared coupling was checked and **does not exist**: F1b's
 `_claim_dissonance_slot` counts *attempts* in Redis, never rows, so **the reaper cannot
@@ -3223,6 +3226,85 @@ once; a gap with the gate shut still proceeds.
 - `da_neuron_log.md` still said the active cycle "has not yet been measured." It has:
   548/577 s (§35) and 652.8 s (§39). Corrected there.
 
+### 58. APPLIED — §23's telemetry `event_type` filter **[D]**
+
+Session 10, 2026-09-03. Owner's call; §23 had left it as a product decision. **App was not
+running** (no python process, `q:daemon:lock` gone, `q:daemon:heartbeat` a stale 09-02 stamp),
+so no uvicorn reload and nothing to recover.
+
+Reality vs §23's line numbers: the route is now `main.py:817`, the query `main.py:856-860`
+(Session 9's edits pushed it 20 lines). The SQL text itself was unchanged from §23.
+
+**Live DB, `observations.event_type` across all users, read-only `immutable=1`:**
+`user_message` 268, `dense_observation` 104, `entropic_gap` 3. **That is the whole set.**
+`semantic_contradiction` and `internal_reflection` have zero rows but are live writers
+(`stream_worker.py:792/:831` and `:1067/:1146`), so §23's three-type `IN` list covers every
+dissonance writer in the tree and nothing else.
+
+**Replay of the exact SQL lifted back off disk, `username='Sky'`:**
+
+| | rows | non-dissonance rows |
+|---|---|---|
+| before | 10 | 8 (`user_message`/`dense_observation` backfill, all `Sky/rick`, 09-02 18:23–19:03) |
+| after | **2** | **0** — id 5733 `Sky/rick` 09-02 19:15, id 5464 `Sky/v` 08-22 14:38 |
+
+The panel will look nearly empty. That is the honest state: three gaps ever detected, two
+of them Sky's. The `App.jsx:826-827` empty-state copy ("complete equilibrium") never fires
+for Sky while those two rows exist.
+
+Mechanics: byte-level edit, CRLF 1011 → 1012 lines, bare-LF 0 → 0, `py_compile` OK,
+`git diff --stat` = `1 file changed, 1 insertion(+)`, one hunk. Pre-edit copy in the session
+scratchpad. **Not committed** — `main.py` was clean vs `9fa8afc` before this, so it is one
+`git checkout -- main.py` from clean if the owner wants it gone.
+
+**Still open, deliberately not touched:** `App.jsx:834-839` only distinguishes `entropic_gap`
+from *everything else* — an `internal_reflection` row (the daemon's own monologue,
+`reflection_score=0.8`) would still render in the red "contradiction" style. Cosmetic, JSX-only,
+needs a rebuild of `dist` to ship. Worth a third badge colour if the monologue ever lands there.
+> **[Same session — done, §59.]**
+
+---
+
+### 59. APPLIED — third badge colour for `internal_reflection`, and the score was never out of 10 **[D]**
+
+Session 10, same sitting as §58. Owner's call ("an interesting brain, not a fucked up one").
+
+`vite-project/src/App.jsx:833-848` (post-edit numbering). The badge was a two-way ternary:
+`entropic_gap` → amber, *anything else* → red. `internal_reflection` — the daemon's own
+monologue, `reflection_score=0.8`, written at `stream_worker.py:1067/:1146` — would have
+rendered as a contradiction. Now three-way, using colours the file already owns: gap stays
+amber/magenta (`#f0b232` / `#ff007f` void), **reflection is green** (`#23a55a` / `#00cc66`
+void — 14 prior uses of the void green, it is this UI's "healthy" colour), contradiction
+stays red/violet. Background tint follows.
+
+**Second thing, spotted while in the block:** `App.jsx:888` printed
+`Dissonance Reflection Score: {reflection_score}/10`. The column is a **0–1 fraction**
+(0.7 gap, 0.8 monologue, 1.0 dense — §23, `main.py:835`). "0.8/10" was a display lie on every
+row. Now `Reflection Score: 80%`. Label dropped the word "Dissonance" because a reflection row
+is not one.
+
+Mechanics: `App.jsx` is pure LF (4251 → 4258 lines, 0 CRLF before and after — note this file
+is the *opposite* of `main.py`). `git diff --stat`: 1 file, 14 insertions, 6 deletions, two
+hunks. `npm run build` (vite 8.0.0-beta.16, node 24.13): 30 modules, 208 ms.
+`dist/assets/index-Bak0jk3w.js` (Jul 18, 326,259 B) → `index-CBrCaQPS.js` (327,253 B); CSS
+hash `BckMtsgU` **unchanged**, so no style drift. Bundle grep: `internal_reflection` 1,
+`#00cc66` 3, `rgba(0,204,102,0.12)` 1, `Reflection Score:` 1, `/10` **0**,
+`Dissonance Reflection Score` **0**. `dist` is gitignored (`vite-project/.gitignore:11`);
+the pre-build copy is in the session scratchpad as `dist.pre-s10`.
+
+**Not committed**, same as §58. `git` warns `LF will be replaced by CRLF` on `App.jsx` —
+that warning fires on the pristine file too; it is `core.autocrlf` meeting a tree that is
+CRLF/LF *per file*. Nothing here changed that.
+
+**The rebuild also shipped something older:** the Jul 18 bundle predates `9fa8afc`, which added
+`api.resetPoolKey` and the *Restore this key to HEALTHY* button to the Ecosystem Health panel
+(`App.jsx` +39, `api.js` +6). Committed 09-01, never built until now. First time it is live.
+
+Not verified in a browser: the app was down for the whole session. The bundle is on disk;
+the next `main.py` boot serves it from `FRONTEND_DIST` (`main.py:996`).
+
+---
+
 ### Next session — start here (supersedes the Session 8 list)
 
 1. **Watch the two new log lines.** A ≥5-turn conversation that teaches `Sky/rick`
@@ -3242,7 +3324,7 @@ once; a gap with the gate shut still proceeds.
 
 **Mechanical batch, still untouched:** persist the 33-case attribution suite into
 `tests/`; `mcp_client.py:83` colon; `database.py:20` monkeypatch reload guard;
-`q:daemon:heartbeat` TTL + `main.py:832` staleness check; telemetry `event_type` filter;
+`q:daemon:heartbeat` TTL + `main.py:832` staleness check; ~~telemetry `event_type` filter~~ (done, §58);
 `include_embeddings=False`; `try/finally` on the two bare connections; delete the stale
 `users.db` stub and the July backup (~15.4 MB); the now-unused `import redis_client` at
 the top of `generate_idle_monologue`.
