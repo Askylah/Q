@@ -1,29 +1,61 @@
 # Q
 
-**Q** is a hardened, model-agnostic multi-agent execution container designed for adversarial agentic research, security-first tool execution, and immersive simulation environments. It combines a dynamic React interface with a sandboxed "Strict Physics" backend, allowing developers to safely unleash autonomous, high-entropy personas in resource-constrained, secure environments. *Side note:* On PC, it is basically a model-agnostic Antigravity on steroids with some dedicated roleplay elements and much stronger security.
+**Q** is an architecture for an autonomous agent mind: neuromodulator-driven motivation, a decaying graph memory, and a daemon that keeps thinking between conversations. Because a thing like that has to be allowed to act, Q is also built around zero-trust execution: sandboxed tools, AST-gated code, injection screening on every inbound payload, and human approval on anything that matters.
+
+It is model-agnostic (Claude, Gemini, OpenAI-compatible endpoints, OpenRouter, Vertex), runs locally, and ships as a FastAPI backend with a React front end.
 
 ---
 
 ## 🏛️ System Architecture & Pillars
 
-### 1. Strict Physics (Sandboxed Security)
-Q is engineered around the principle of zero-trust agent execution. Autonomous agents run inside a root-jailed, network-isolated "Padded Room" container to prevent arbitrary host execution.
-*   **Docker Containment:** Hard limits on compute resources (512MB RAM, 1 CPU, 64 PIDs limit).
-*   **Temporal Guillotine:** Automatic SIGKILL enforcement for runaway processes (15s execution cap).
-*   **Governance Gates:** Human-in-the-loop approval routing for sensitive tool calls (e.g., file writes, system edits) with live environmental diff analysis before permission is granted.
-*   **Layer A/B Firewalls:** Real-time syntax and semantic classifiers checking inputs for role-jacking or prompt injection vectors before the payload is sent to cloud APIs.
+### 1. Cognition (The Consciousness Daemon)
+A background daemon runs a homeostasis sweep over every active persona whether or not anyone is talking to it. What it does on each cycle is decided by drive state, not by a schedule.
+*   **Neuromodulator State:** Two variables per persona, on two timescales. *Tonic* is a slow baseline that sets exploration versus consolidation. *Phasic* is a fast spike envelope fired by reward-prediction-error events: expected versus observed, so predicted novelty is not rewarding. Redis-backed with an in-memory fallback.
+*   **Gap Picker:** Scans the memory graph for entropic gaps (isolated clusters, low link density) and semantic contradictions (token-overlap prefilter, then an NLI gate on a strong model). Resolutions are written back to the graph and fed into the next sweep.
+*   **Rest Gate:** Low tonic shuts the gap picker. If the gate is shut and there is nothing to integrate, the daemon rests and writes no monologue. This replaced an idle branch that, in July 2026, produced 69 of 74 monologues as unprompted self-interrogation and stored every one of them as memory.
+*   **Dissonance Cap and Telemetry:** Daemon-authored writes are rate-limited per persona per window, by kind. Every daemon event is logged with a reflection score and surfaced in the UI.
 
-### 2. Auto-Zettel Memory & Temporal Decay
-Context management in Q utilizes a hybrid, graph-based memory structure designed to prevent token bloat and stale context poisoning.
-*   **Auto-Zettel Knowledge Graph:** A 1-hop relational lorebook powered by a hybrid Vector + SQLite FTS5 database.
-*   **Temporal Memory Decay:** Memories and dense observations age dynamically, decaying in weight or dropping out of the immediate context window to simulate organic memory retention.
-*   **Token-Optimizing Observers:** Background Reflector threads compress long chat transcripts into structured `<agent_reflections>` and `<conversation_summary>` blocks asynchronously.
+Deep dive: [Cognition](docs/COGNITION.md). Bugs, dead ends and retractions: [lab notes](lab_notes/).
 
-### 3. Immersive Simulation & Narrative Inversion
-For agentic alignment testing, creative scenarios, and tabletop orchestration, Q hosts complex multi-model rooms.
-*   **Direct-Wire Inversion:** A proprietary bypass architecture that uses pre-fill handshakes and axiomatic framing to enforce strict persona alignment and suppress system disclaimer drift.
-*   **Model-Agnostic Rooms:** Mix and match models (Claude, Gemini, GPT) in a single unified group session with distinct namespaces.
-*   **Observer Mode:** Allows inactive agent profiles to observe transcripts asynchronously and inject reflections.
+### 2. Memory (Auto-Zettel Graph & Temporal Decay)
+Context management is a hybrid graph memory designed to prevent token bloat and stale-context poisoning.
+*   **Auto-Zettel Knowledge Graph:** Lore and observations are chunked, embedded, entity-extracted by a flash-model pass, and auto-linked into a graph stored in SQLite.
+*   **Zero-Cost Read Path:** Every message runs vector search plus FTS5 keyword search, fuses them with reciprocal rank fusion, expands one hop across the graph, and injects the subgraph. No LLM call on the read path.
+*   **Temporal Decay:** Memories age and drop out of the active window. The decay rate is modulated by tonic dopamine; memories written during a phasic spike receive an importance bonus.
+*   **Reflector Threads:** Background observers compress long transcripts into structured `<agent_reflections>` and `<conversation_summary>` blocks asynchronously.
+
+### 3. Strict Physics (Zero-Trust Execution)
+Agents that can run code run it inside a root-jailed, network-isolated Docker container, and nothing they emit is trusted on the way back in.
+*   **Padded Room:** Hard limits on RAM (512MB), CPU (1), and PIDs (64). `--network none`. A 15-second SIGKILL cap on every process.
+*   **Input Firewall:** Payloads are normalized (NFKC, hex and Base64 unwrapped) and scanned by a syntactic role-jacking filter, then by a semantic hazard classifier. Two channels: untrusted content gets the paranoid threshold, the operator's own messages get a high-precision rule set, because a single strictness level was dropping "summarize the following" as an injection attempt.
+*   **Governance Gates:** Tools are classified INFO, KINETIC or DESTRUCTIVE by what they do, never by their arguments. Unregistered tools fail closed as DESTRUCTIVE. The registry is validated at boot. KINETIC and above pause for human approval, with a file-tree diff of the simulated effect shown first.
+*   **Output Gate:** Generated code passes an AST linter that enforces the sandbox calling convention and blocks the common escapes. The linter's own docstring states it is not a security boundary; the container is.
+
+Deep dive: [Security & Sandbox](docs/SECURITY_AND_SANDBOX.md).
+
+### 4. Simulation & Modes
+For alignment testing, creative work and tabletop orchestration, Q hosts multi-model rooms with stateful personas.
+*   **Model-Agnostic Rooms:** Mix models in one group session under distinct namespaces.
+*   **Observer Mode:** A persona watches silently and injects a single reflection at the end of each round.
+*   **Mode Engine:** Classifies each user turn into one of four operating modes (immersive roleplay, technical utility, creative writing, experiential utility) and swaps the governing rule set accordingly.
+*   **Cognitive Friction:** A documented anti-sycophancy doctrine. Personas are structurally forbidden from mirroring the user's framing, which closes a real permission-hijack path. See [cognitive_friction_schema.md](cognitive_friction_schema.md).
+
+Deep dive: [Roleplay & Lore](docs/ROLEPLAY_AND_LORE.md).
+
+---
+
+## ✅ Verification
+
+**Tests** live in `tests/` and cover the daemon lock, novelty reward, extraction firewall, strict security, workspace paths, zettel retrieval and scaling, MCP routing, and live tool execution.
+
+**Lab notes** live in `lab_notes/`. Each one tracks a single problem from first symptom to fix, with a status banner, numbered sections, and explicit retractions where an earlier session's analysis turned out to be wrong.
+
+| Note | Subject |
+|---|---|
+| `entropic_gap_livelock.md` | The daemon livelocked on an entropic gap. Nine sessions, one major retraction. |
+| `da_neuron_log.md` | The dopamine system from first live traffic to the novelty channel and rest gate. |
+| `tool_outcome_attribution.md` | Failed tool calls were being scored as successes. The first fix caused four regressions. |
+| `storage_hardening.md` | The database sat inside a writable tool root. |
 
 ---
 
@@ -32,16 +64,17 @@ For agentic alignment testing, creative scenarios, and tabletop orchestration, Q
 ### Prerequisites
 *   **Python 3.14+**
 *   **Node.js & npm**
-*   **Docker Desktop** (Required for the sandboxed Workspace Engine)
+*   **Docker Desktop** (required for the sandboxed Workspace Engine)
+*   **Redis** (optional; everything degrades to in-memory fallbacks without it)
 
 ### Setup
 
 1. **Clone the repository.**
-2. **Install Backend Dependencies:**
+2. **Install backend dependencies:**
    ```bash
    py -m pip install -r requirements.txt
    ```
-3. **Install Frontend Dependencies:**
+3. **Install frontend dependencies:**
    ```bash
    cd vite-project
    npm install
@@ -49,21 +82,24 @@ For agentic alignment testing, creative scenarios, and tabletop orchestration, Q
 
 ### Running the App
 
-1. **Launch the Backend:**
+1. **Launch the backend** (the consciousness daemon starts with it, under a single-instance lock):
    ```bash
-   # From the project root (e.g. C:\path\to\your\project\PersonaApp-merged)
+   # From the project root
    py main.py
    ```
-2. **Launch the Frontend:**
+2. **Launch the frontend:**
    ```bash
    cd vite-project
    npm run dev
    ```
-3. **Configure:** Open the **Settings** tab in the UI to input your API keys (Google, Anthropic, OpenRouter) and select your target models.
+3. **Configure:** Open the **Settings** tab in the UI to enter API keys (Google, Anthropic, OpenRouter) and select target models.
 
 ---
 
 ## 📖 Deep Dives
-*   [**Security & Sandbox**](docs/SECURITY_AND_SANDBOX.md) — Dive into Docker resource clamping, firewalls, and output gates.
-*   [**Roleplay & Lore**](docs/ROLEPLAY_AND_LORE.md) — Mastering namespaces, group chats, and temporal memories.
-*   [**Extension Guide**](docs/EXTENSION_GUIDE.md) — Custom plugins, tools, and the dynamic Skill Tree.
+*   [**Cognition**](docs/COGNITION.md) — The daemon, neuromodulator state, gap picker, rest gate, telemetry.
+*   [**Security & Sandbox**](docs/SECURITY_AND_SANDBOX.md) — Containment, the two-channel firewall, governance, output gates.
+*   [**Roleplay & Lore**](docs/ROLEPLAY_AND_LORE.md) — Namespaces, group chats, memory, modes.
+*   [**Extension Guide**](docs/EXTENSION_GUIDE.md) — Plugins, the skill tree, the MCP router.
+*   [**Cognitive Friction Schema**](cognitive_friction_schema.md) — The anti-mirroring doctrine.
+*   [**Lab Notes**](lab_notes/) — How the hard bugs were actually found.
