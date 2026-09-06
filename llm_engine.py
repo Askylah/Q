@@ -388,6 +388,7 @@ def call_llm(
     # FIX(false-burn): each attempt checks out the NEXT healthy key, so without
     # this counter one bad request could permanently burn every key in the pool.
     _auth_burns = 0
+    _thinking_off_refused = False  # FIX(gemini-blank-turn): set by the 400 handler
     for attempt in range(max_retries):
         if provider == "google_vertex" or (provider == "anthropic" and "aiplatform" in base_url):
             key_id = None
@@ -673,11 +674,20 @@ def call_llm(
                 local_messages = messages
                 pre_fill = kwargs.get("pre_fill", "")
                 if pre_fill and provider != "anthropic" and local_messages:
-                    local_messages = [dict(m) for m in messages]
-                    last_content = local_messages[-1].get("content", "")
-                    if isinstance(last_content, str):
-                        if not last_content.endswith(pre_fill):
-                            local_messages[-1]["content"] = last_content.rstrip() + f"\n{pre_fill}"
+                    # FIX(prefill-placement): for OpenAI-compatible providers the persona
+                    # pre-fill rides as a trailing assistant turn, the shape the Anthropic
+                    # path uses. It must never be glued onto the user message: the model
+                    # then reads the persona name as the USER speaking ("telling me who
+                    # I am"). Gemini gets no pre-fill at all: gemini-3.7-flash on Vertex
+                    # answers a trailing model turn with 400 "Requests ending with a model
+                    # turn are not supported", and on gemini-3-flash the pre-fill made no
+                    # measurable difference to anything (2026-09-06, 8 runs per shape).
+                    # The system prompt carries identity. Regression: tests/test_prefill_placement.py
+                    is_gemini = provider in ("google", "google_vertex") or "gemini" in model_id.lower()
+                    if is_gemini:
+                        pass
+                    elif local_messages[-1].get("role") != "assistant":
+                        local_messages = list(messages) + [{"role": "assistant", "content": pre_fill}]
 
                 payload_messages = [{"role": "system", "content": system_prompt}] + [{k: (clean_content(v) if k == "content" else v) for k, v in m.items() if k in ["role", "content", "tool_calls", "tool_call_id", "name"]} for m in local_messages]
                     
@@ -713,9 +723,23 @@ def call_llm(
                             data.pop("presence_penalty", None)
                             data.pop("frequency_penalty", None)
 
-                if provider == "google":
+                if provider in ("google", "google_vertex"):
                     if thinking_norm in ["low", "medium", "high"]:
                         data["reasoning_effort"] = thinking_norm
+                    elif thinking_norm in ["off", "none", "minimal", "0", ""] and not is_reasoning_mandatory:
+                        # FIX(gemini-blank-turn): this route used to send no thinking config
+                        # at all, so the dial never reached Gemini. gemini-3-flash then
+                        # thought when it felt like it and, with real assistant history in
+                        # context, returned whitespace in ~37% of turns (15/40 across five
+                        # prompt shapes, Vertex, 2026-09-06); with thinking_budget 0: 0/16.
+                        # gemini-3.5-flash accepted the zero budget, gemini-3.1-pro ignored
+                        # it; a model that refuses it with a 400 is retried once at the
+                        # lowest effort (see the 400 handler below).
+                        # Regression: tests/test_gemini_thinking_off.py
+                        if _thinking_off_refused:
+                            data["reasoning_effort"] = "low"
+                        else:
+                            data["extra_body"] = {"google": {"thinking_config": {"thinking_budget": 0}}}
                     
                 pipeline_tools = kwargs.get("tools", [])
                 if pipeline_tools and not any(kw in model_id.lower() for kw in ["stealth", "experimental", "alpha", "beta"]):
@@ -834,6 +858,21 @@ def call_llm(
                     print(f"[COMPUTE_POOL] Upstream provider failure on custom gateway -> retrying in {_wait:.1f}s.", flush=True)
                     import time as _t
                     _t.sleep(_wait)
+                    continue
+
+                # FIX(gemini-blank-turn): a model that cannot switch thinking off answers
+                # the zero budget with a 400 that names thinking. Retry once at the lowest
+                # effort instead of surfacing "API Error" to the user.
+                if (
+                    response.status_code == 400
+                    and not _thinking_off_refused
+                    and ((data.get("extra_body") or {}).get("google") or {}).get("thinking_config", {}).get("thinking_budget") == 0
+                    and ("think" in response.text.lower() or "reasoning" in response.text.lower())
+                ):
+                    _thinking_off_refused = True
+                    if is_pooled:
+                        key_pool.release_key(provider, key_id, "HEALTHY")
+                    print(f"[THINKING] {model_id} refuses thinking off -> retrying at lowest effort", flush=True)
                     continue
 
                 if response.status_code == 429:
