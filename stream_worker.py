@@ -16,6 +16,22 @@ try:
     import dopamine_state
 except ImportError:
     dopamine_state = None
+try:
+    import gaba_state
+except ImportError:
+    gaba_state = None
+try:
+    import telemetry as _tm
+except Exception:  # telemetry must never be load-bearing
+    _tm = None
+
+
+def _emit(*a, **k):
+    if _tm is not None:
+        try:
+            _tm.emit(*a, **k)
+        except Exception:
+            pass
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("stream_worker")
@@ -227,6 +243,29 @@ def _derive_stale_ttl(observed_cycle, interval):
     obs = max(obs, float(interval))
     return min(max(300, int(interval * 5), int(STALE_TTL_FACTOR * obs)), TTL_CEILING)
 
+def gate_edge(prev, exploring: bool, tonic_ok: bool, gaba_shut: bool, now: float):
+    """Pure. prev is {"open": bool, "since": epoch} or None (first sighting).
+    Returns (new_state, edge) where edge is None or a dict with "event" in
+    {"gate_open", "gate_close"}; gate_close carries open_for_s and closed_by in
+    {"tonic", "gaba", "both"}. First sighting after a daemon start records
+    state and emits nothing -- there is no edge to report yet."""
+    if prev is None:
+        return {"open": bool(exploring), "since": now}, None
+    if bool(exploring) == bool(prev.get("open")):
+        return prev, None
+    if exploring:
+        return {"open": True, "since": now}, {"event": "gate_open"}
+    if gaba_shut and not tonic_ok:
+        closed_by = "both"
+    elif gaba_shut:
+        closed_by = "gaba"
+    else:
+        closed_by = "tonic"
+    return ({"open": False, "since": now},
+            {"event": "gate_close", "closed_by": closed_by,
+             "open_for_s": round(now - float(prev.get("since", now)), 1)})
+
+
 class ConsciousnessWorker:
     # How long (in seconds) to wait before re-flagging the same entropic gap node.
     # Default: 86400s (24 hours). Set env var DAEMON_GAP_COOLDOWN_SECS to override.
@@ -246,6 +285,8 @@ class ConsciousnessWorker:
     DISSONANCE_WINDOW_SECS = int(os.getenv("DAEMON_DISSONANCE_WINDOW_SECS", 86400))
 
     def __init__(self):
+        # (username, persona) -> {"open": bool, "since": epoch}; feeds gate_edge().
+        self._gate_state = {}
         self.db_manager = db.UserManager()
         self.running = True
         self.last_monologue_time = {}  # (username, persona) -> timestamp string
@@ -321,6 +362,18 @@ class ConsciousnessWorker:
         # Single-slot dict: writing a fresh mapping drops expired windows.
         self._dissonance_fallback = {key: used}
         return (used <= cap, used)
+
+    def _track_gate(self, username, persona, exploring, tonic_ok, gaba_shut, tonic, inhibition):
+        """Emit daemon/gate_open and daemon/gate_close edges with the closing
+        source, so the calibration can answer "who closes the gate, and how
+        long was it open" without reconstructing it from per-cycle rows."""
+        key = (username, persona)
+        now = time.time()
+        new_state, edge = gate_edge(self._gate_state.get(key), exploring, tonic_ok, gaba_shut, now)
+        self._gate_state[key] = new_state
+        if edge is not None:
+            _emit("daemon", edge["event"], username, persona, tonic=tonic, inhibition=inhibition,
+                  **{k: v for k, v in edge.items() if k != "event"})
 
     def run_cycle(self):
         """Executes a single consciousness evaluation sweep across all active personas."""
@@ -416,6 +469,30 @@ class ConsciousnessWorker:
                 except Exception:
                     _da_tonic = None
             _exploring = dopamine_state.should_explore(_da_tonic) if _da_tonic is not None else True
+            # GABA: the clock is no longer the only thing that can close the
+            # gate. High inhibition puts the picker in consolidation regardless
+            # of tonic, so the rest gate below can fire mid-session after a
+            # dull stretch instead of waiting most of an hour for tonic to leak.
+            _gaba_inh = None
+            if gaba_state is not None:
+                try:
+                    _gaba_inh = gaba_state.get_state(username, persona)["inhibition"]
+                except Exception:
+                    _gaba_inh = None
+            _gaba_shut = bool(_gaba_inh is not None and gaba_state is not None
+                              and gaba_state.is_inhibited(_gaba_inh))
+            if _exploring and _gaba_shut:
+                logger.info(
+                    f"[GABA] {persona}: inhibition={_gaba_inh} >= {gaba_state.GATE_INHIBITION_MAX} "
+                    f"-- gate held shut (tonic={_da_tonic}).")
+                _exploring = False
+            _emit("daemon", "gate", username, persona, tonic=_da_tonic, inhibition=_gaba_inh,
+                  gaba_shut=_gaba_shut, exploring=_exploring)
+            _tonic_ok = True if _da_tonic is None else bool(dopamine_state.should_explore(_da_tonic))
+            try:
+                self._track_gate(username, persona, _exploring, _tonic_ok, _gaba_shut, _da_tonic, _gaba_inh)
+            except Exception:
+                pass
             
             # 1. Scan for Entropic Gaps (Isolated clusters / lack of link density)
             gap = self.analyze_entropic_gaps(username, persona, exploring=_exploring)
@@ -568,7 +645,19 @@ class ConsciousnessWorker:
                 # Gap discovery is itself arousing: small tonic bump.
                 if dopamine_state is not None:
                     try:
-                        dopamine_state.boost_tonic(username, persona, 0.04)
+                        _b = dopamine_state.boost_tonic(username, persona, 0.04)
+                        # §6.8: this writer used to print nothing.
+                        logger.info(f"[DA] boost: gap discovery +0.04 tonic={_b.get('tonic')}")
+                        _emit("da", "boost", username, persona, source="daemon_gap", amount=0.04,
+                              tonic=_b.get("tonic"), node=str(target_node.get("title", ""))[:120])
+                    except Exception:
+                        pass
+                # §6.7/§6.12: the daemon paying itself for a gap nobody asked
+                # about is a redundancy event. Gate opens -> daemon works -> work
+                # pays tonic -> gate stays open; this is the brake on that loop.
+                if gaba_state is not None:
+                    try:
+                        gaba_state.on_redundant(username, persona, source="daemon_gap")
                     except Exception:
                         pass
                 

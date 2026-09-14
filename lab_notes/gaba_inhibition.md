@@ -1,6 +1,6 @@
 # GABA Inhibition — Lab Notes
 
-## Status: BASELINE REPLAYED (§6), TWO RULES NEEDED IN §3, NOTHING BUILT (2026-09-06)
+## Status: BUILT (§7), UNIT-VERIFIED, NOT YET REPLAYED — §6 BASELINE INVALIDATED (2026-09-09)
 
 > Origin: a scripted model-to-model trace against `dopamine_state.py` on 2026-09-06
 > (isolated copy, `PersonaApp-GABA-Test`). Every line reconciled with the formulas in
@@ -327,6 +327,424 @@ stream and the store itself ~6 s in, mid-turn.
 > **3. Engine, final shape (both copies byte-identical, uncommitted):** (a) ~L674 trailing-assistant pre-fill for non-Anthropic, none for Gemini; (b) ~L727 `google`/`google_vertex`: low/medium/high → `reasoning_effort`; off → `thinking_budget: 0`; (c) new `_thinking_off_refused` flag before the retry loop + a 400 handler: a 400 that names thinking while budget 0 was sent → one retry at `reasoning_effort: low` (no model on Vertex refused; the branch is unit-tested with a stubbed 400, not live). The "pro → low" special case from round 1 is gone. Suites: `tests/test_prefill_placement.py` **8**, `tests/test_gemini_thinking_off.py` **10**. Live through the engine, nothing injected: 3.7-flash Medium 3/3, 3-flash Off 3/3, 3.5-flash Off 1/1, streaming 1/1.
 >
 > Harness note: three probes in parallel against Vertex hit 429 `Resource exhausted`; the engine's Vertex fallback then returns an error *string*, and two background runs died silently because the log grep no longer matched `Traceback`. Run Vertex probes one at a time.
+
+---
+
+### 7. Built — 2026-09-09 **[D]**, constants still **[PROPOSED]**
+
+> Origin: session 2026-09-09, both copies patched byte-identically, **uncommitted**.
+> Suite: `tests/test_gaba_inhibition.py`, 46 checks, all pass in both copies.
+> Existing suites unchanged: `test_novelty_reward` ALL PASS, `test_prefill_placement` 8/8,
+> `test_gemini_thinking_off` 10/10. Redis was offline (Docker down) for every run, so
+> only the in-memory fallback path is exercised; the Redis path is a verbatim mirror of
+> `dopamine_state`'s and has not been touched live.
+
+**7.1 Amendment to §1 rule 2 and §3: the input is the reflector's shrug, not the
+predicted store.** §6.2 found the reflector stores every turn from turn 5 on, so the
+"predicted store" stream measured the reflector's 18/20 window overlap, not the
+conversation. Reading `Reflector.reflect()` for the cause: it counted raw events in the
+20-row window and reflected whenever there were ≥ `turn_threshold`, with no memory of
+what it had already summarised. The knob was a start delay, not a cadence; set to 1 it
+fires from turn 1, set to 5 from turn 5, set high enough the daemon rows crowd the window
+and it never fires again. That is the bug, and it was GABA's clock. Fixing it after
+building GABA would have retuned every constant by a factor of ~5.
+
+So the fix and the organ's input are one change. `reflect()` now asks two questions
+(`reflect_gate.plan_reflection`, pure, stdlib-only, tested standalone):
+
+1. *Watermark* — how many raw events since the last `dense_observation`? Fewer than
+   `turn_threshold` → **wait**. This alone ends the every-turn reflection.
+2. *Meaning* — cosine (shared MiniLM, no LLM call) between the newest `turn_threshold`
+   raw events and the `turn_threshold` before them. At/above `REFLECT_SIM_CEIL` →
+   **shrug**: log `[DA] reflect: shrug nearest=…`, `gaba_state.on_redundant()`, return.
+   Below → **reflect** as before; on a successful store `gaba_state.on_novel()`.
+   No prior chunk (cold start), no model, or the check raising → **reflect** (fail open).
+
+The shrug is the redundancy event. "I looked at the window and it had not moved" is
+exactly "the world stopped being interesting" (§2 option 2), measured on the
+conversation rather than on the reflector's own output. Rule 2's "no new detector"
+holds in the sense it was written — same embedding model, same cosine — moved *before*
+the LLM call instead of after it. Side effect Sky asked for: an observation is written
+because something changed, not because it is turn five, and a dull stretch costs zero
+LLM calls.
+
+**Why newest-N vs the N before them, not new-events vs the last reflection.** After a
+shrug nothing advances the watermark, so a "new since last reflection" blob keeps
+growing through a dull stretch; one genuinely novel turn is then diluted by everything
+dull around it, the blob still looks like the prior, and the reflector never fires until
+the window rolls the prior out. That is a livelock (the §6.7 class). N-vs-N bounds the
+dilution to one threshold's worth of events. Unit case 7d covers it.
+
+**7.2 What is wired.**
+
+| where | what |
+|---|---|
+| `gaba_state.py` (new) | `inhibition` + `streak` per (user, persona), `gaba:*` keys, lazy drain on `GABA_TAU_SEC`, streak TTL, `on_redundant / on_novel / get_state / is_inhibited`. Never imports `dopamine_state` (unit case 0 greps for it; case 5 checks raw DA entries byte-identical across 14 GABA ops). |
+| `reflect_gate.py` (new) | the two questions above, pure. |
+| `plugins/memory_plugin.py` | `reflect()` uses it; `[DA] reflect: shrug/go` lines; `[DA] social:` line on the §6.8 silent writer; GABA hooks. Env: `REFLECT_SIM_CEIL` (0.85 PROPOSED), `REFLECT_NOVELTY_GATE` (1; set 0 to keep only the watermark). |
+| `memory_engine.py` | `[DA] novelty: … paid=0 (predicted)` on the §6.1 silent branch. |
+| `stream_worker.py` | **site 1+3**: `_exploring` is now `should_explore(tonic) and not is_inhibited(inhibition)`; `[GABA] … gate held shut` line. **§6.12**: each daemon gap boost is `on_redundant(source="daemon_gap")` and logs `[DA] boost:` (§6.8). |
+
+**Not built:** site 2 (stamp scaling) — parked per §6.12 until option 1 exists; option 1
+(satiety) itself — still the real fix for one-event phasic pinning (§6.5).
+
+**7.3 Constants [PROPOSED].** `GABA_BASE` 0.05, `GABA_GROWTH` 1.5, `GABA_TAU_SEC` 600,
+`GABA_GATE_MAX` 0.50, `GABA_STREAK_TTL_SEC` 1200, `REFLECT_SIM_CEIL` 0.85. All
+env-overridable. The curve crosses 0.50 on the 5th consecutive redundant event (unit case
+1, matches §6.12's arithmetic). `REFLECT_SIM_CEIL` sits above the 0.70 of §6.12 on
+purpose: that number was reflection-vs-corpus; newest-N vs prior-N of the *same
+conversation* runs hotter. It is a guess. The replay sets it.
+
+**7.4 Hazards to carry into the replay.**
+- The threshold's unit is raw events, not turns: a turn is user + assistant (+ tool
+  outputs), so 5 ≈ every 2–3 turns. It always was; now it matters.
+- Social reward fires from inside `reflect()`, so its cadence dropped with the
+  reflector's. Tonic dynamics in §6 are no longer the baseline.
+- On a dull stretch the reflector shrugs every turn (watermark never advances), so
+  inhibition climbs one tick per turn; at 30 s cadence drain between ticks is ~5 %.
+  Expect the gate to shut around turn 5 of repetition. If it shuts *before* the
+  conversation is actually repetitive, `REFLECT_SIM_CEIL` is too low.
+- §6.4 showed repetition never opened the gate on its own (tonic 0.48). The headline
+  live check needs the gate open *first*: run `bad_tool` before `repetition`.
+
+---
+
+### 8. Live watch — 2026-09-11, pre-turn findings **[D]**
+
+> Stack relaunched by Sky 20:11 CDT (`py main.py` → uvicorn 8000 reload worker →
+> `stream_worker.py` PID 4712, vite 5173, Redis up). Daemon is on the §7 code (all
+> processes post-date the 2026-09-09 edits). Redis: `q:daemon:lock` held by 4712 and
+> renewing, heartbeat fresh, **zero** `gaba:*` / `da:*` keys, last conversation row
+> 2026-09-02. Clean baseline. Daemon stdout goes to Sky's terminal, so the `[DA]` /
+> `[GABA]` lines are not readable from the agent side; state is watched instead:
+> `labs/watch/gaba_watch.py` polls `gaba:*`, `da:*` and new `observations` rows every
+> 5 s into `labs/watch/timeline_<ts>.log` (under `labs/`, so it never trips reload).
+
+**8.1 The watermark's unit is user turns, not "raw events".** `reflect_gate.RAW_EVENT_TYPES`
+lists `user_message, assistant_response, tool_output`, but the only live caller of
+`run_observers` (`llm_engine.py:1935`) passes `"user_message"`; nothing writes the other
+two. The last 20 rows for Sky/rick are 9 `user_message`, 10 `dense_observation`, 1
+`entropic_gap`. So with rick's `om_turn_threshold=5` (custom_personas), the reflector
+waits for **five user messages** after the last reflection, then compares the newest five
+against the five before them. §7.4 hazard 1 ("5 ≈ every 2–3 turns") is wrong for the
+live schema; expect ≤ 1 reflection per 5 user turns. The old rows show the bug it
+replaces: Sep 2, `user_message` 18:23:44 → `dense_observation` 18:23:49, every turn.
+
+**8.2 First reflection after boot will run the meaning check, not cold-start.** Window
+is `window_limit(5) = 20` rows. After five new user rows the window holds ~12 raw rows
+≥ `2t = 10`, so the newest-5 (tonight) vs prior-5 (Sep 2, the sole-provider thread)
+cosine is computed. Those are different topics; expect `go`, not `shrug`. A `shrug`
+there would mean 0.85 is too low.
+
+**8.3 Cosmetic drift, not fixed:** `llm_engine.py:2258` still emits the UI
+`reflection_started` control frame on `user_msg_count % om_threshold == 0` over the
+whole 100-row window. That was the old every-turn clock; it is now decoupled from the
+real gate and will show the toast on turns where the reflector waits or shrugs.
+
+**8.4 What to look for in the timeline.** One `OBS … dense_observation` per ≥ 5
+`OBS … user_message`; a `REDIS gaba:Sky:rick:*` change without a following dense row =
+shrug; `gaba:Sky:rick:inhibition` climbing 0.05 → 0.075 → … across consecutive shrugs
+and resetting on a store. No `gaba:*` key appearing after 10+ user turns means neither
+hook fired — check the terminal for `[GABA] on_redundant failed`.
+
+---
+
+### 9. First live cycle read back, and the recorder the build never had — 2026-09-13 **[D]**
+
+**9.1 Sep 11 timeline (`labs/watch/timeline_20260911_201431.log`, 17 lines).** Sky's
+evening session, obs ids 5734–5741. Five `user_message` rows → one `dense_observation`
+(5739) five seconds after the fifth → turns 6 and 7 with no reflection. §8.4 cadence
+confirmed live; §8.2 prediction held (first reflection was a `go`). Dopamine keys
+appeared in Redis after turn 3 (phasic 0.858, tonic 0.431, tool_ema 0.719 — a tool fired
+on "why don't you just LoOK?"); on the reflection: phasic → 0.390, tonic → 0.490,
+valence_ema 0.57, novelty_spent 0.089, `gaba:Sky:rick:streak` = 0. The reflection text
+says "no external tools utilized" while tool_ema says one fired a turn earlier; the
+summariser is not told about tool calls in its window. Cosmetic, noted.
+
+**9.2 The watcher was the wrong instrument, and the build had no right one.** Sky's
+question, verbatim: "why wouldn't I want data recorded in an ongoing build? How would I
+know how to calibrate?" Correct on every count:
+
+- Every calibration number (gate verdict, `nearest`, GABA increments, DA deltas) reached
+  the world through `print()` — 14 sites across `gaba_state`, `memory_plugin`,
+  `memory_engine`, `llm_engine`, plus two `logger.info` in `stream_worker`. The daemon
+  is a multiprocessing child, so stdout is the terminal: scrolls off, window closes, gone.
+  No file sink existed anywhere in the app.
+- Redis holds organ *state* with TTLs (GABA `6·tau` = 1 h, dopamine `4·tau` = 3 h). §8
+  said "zero gaba/da keys" and the 2026-09-11 memory said "not persisted"; both wrong,
+  the keys were written and had simply expired by the time anyone looked. A gauge, not
+  a chart recorder.
+- `gaba_watch.py` could only see the gauge (Redis snapshots) and the DB rows. The one
+  number `REFLECT_SIM_CEIL` tuning needs — `nearest` on go/shrug — never left the print
+  call, so the watcher could not capture it even while alive. And it was a child of the
+  agent's session, so it died with it.
+
+**9.3 Built: `telemetry.py`.** One JSON object per line, appended to
+`%LOCALAPPDATA%\PersonaApp\telemetry\YYYY-MM-DD.jsonl`. `emit()` never raises;
+open/append/close per call so the app process and the daemon child interleave by line;
+imports nothing from the organs. `TELEMETRY_OFF=1` (read per call) disables writes;
+`TELEMETRY_DIR` relocates. Read side: `telemetry.read(day)`, `read_range(days)`,
+`python telemetry.py [N]` to tail. Wired next to every print site
+(`labs/patch_telemetry.py`, idempotent, preserves CRLF):
+
+| channel | event | writer | fields beyond ts/pid/user/persona |
+|---|---|---|---|
+| reflect | wait / shrug / reflect | memory_plugin.reflect | nearest, new_events, threshold, sim_ceil, novelty_gate, window_rows, reason |
+| reflect | stored / empty | memory_plugin.reflect | nearest, chars, valence |
+| gaba | redundant | gaba_state.on_redundant | source, streak, nearest, before, increment, inhibition, gate_shut |
+| gaba | novel | gaba_state.on_novel | source, nearest, inhibition |
+| da | novelty | memory_engine.store | nearest, novelty, paid, predicted, tonic, budget_left, memory_id |
+| da | social | memory_plugin.reflect | valence, expected, rpe, tonic, phasic |
+| da | tool_reward | llm_engine tool loop | successes, action_failures, infra_failures, rpe, tonic, phasic, infra_discounted |
+| da | boost | stream_worker gap | source, amount, tonic, node |
+| daemon | gate | stream_worker cycle | tonic, inhibition, gaba_shut, exploring |
+| * | *_failed | each except-branch | error |
+
+`reflect/wait` is emitted on purpose: one row per user turn is the cadence trace and
+costs a few hundred bytes. The prints stay; the terminal is still useful when it is open.
+
+**9.4 Found by the first live Redis run: a 1e-4 split between the two storage paths.**
+`test_gaba_inhibition.py` [6] ("identical inhibition sequence with Redis unreachable")
+failed today: online `[…, 0.6593]`, offline `[…, 0.6594]`, tolerance 1e-6. `_save`
+wrote `round(v, 4)` to Redis and the unrounded `v` to the in-process fallback, so the
+Redis-backed curve compounds on rounded values and the fallback does not. Invisible on
+2026-09-09 because Redis was offline then and both "paths" were the fallback. Fix:
+round once, store the same number both places. `dopamine_state._save` had the identical
+split and got the identical fix. Both suites green after.
+
+**9.5 Test hygiene.** The organ suites wrote 178 fixture rows (`_test`, `_smoke`) into
+the real sink on their first run. Kill switch was read at import, so tests could not
+flip it. Now read per call; `tests/test_gaba_inhibition.py`, `tests/test_novelty_reward.py`
+and the `gaba_state` `__main__` smoke set `TELEMETRY_OFF=1`. Sink verified not to grow
+across a rerun. Fixture rows scrubbed from `2026-09-13.jsonl`.
+
+**9.6 First rows from the live daemon (edits bounced it via uvicorn reload; it came back
+on the new code each time).** `daemon/gate` for Sky/rick and SkyTest/rick every cycle:
+`tonic=0.3 inhibition=0.0 gaba_shut=false exploring=false`. So at dopamine baseline the
+explore gate reads shut on tonic alone (`should_explore(0.3)` is False); GABA has
+nothing to inhibit until a conversation lifts tonic. That is §6.7's rest gate doing its
+job, and it is the first calibration fact on disk: the daemon never explores an idle
+persona.
+
+**9.7 Graded boredom (Sky, same day).** "Five consecutive flat windows is a different
+signal than five mildly-dull ones, and right now they're the same." They were. Now
+`reflect_gate.plan_reflection` returns `intensity = (nearest − sim_ceil) / (1 − sim_ceil)`
+clipped to 0..1 (`boredom_intensity()`, pure), and `gaba_state.on_redundant` scales the
+increment by `GRADE_MIN + (GRADE_MAX − GRADE_MIN) · intensity` with **PROPOSED** 0.5 / 1.5.
+The streak still advances by one per shrug — grading weights the pressure, not the count.
+`intensity=None` (daemon_gap, or no similarity model) is weight 1.0, the old fixed step, so
+the daemon source is untouched. Consequence at the defaults: five windows at intensity 0.1
+end at 0.396 (gate stays open); five at 1.0 end at 0.989 and cross 0.50 on the **fourth**.
+Test [9]. Rule 1 (never reads dopamine) intact — the grade comes from the reflector's own
+cosine.
+
+**9.8 Closure source and open duration.** `gaba/redundant` rows now carry `crossed`
+(this event took inhibition from below 0.50 to at/above it) alongside `source`, so "which
+GABA source closed the gate" is one filter. `stream_worker.gate_edge()` (pure, test [10])
+watches the composed gate per (user, persona) across cycles and emits
+`daemon/gate_open` and `daemon/gate_close` with `open_for_s` and `closed_by ∈ {tonic,
+gaba, both}`. First sighting after a daemon start records state and emits nothing. The
+per-cycle `daemon/gate` rows stay for the continuous view.
+
+**9.9 Tonic-gating the watermark: recorded, not enacted.** Sky's alternative was to count
+only shrugs that occur while the explore gate is open (tonic ≥ 0.5). Deferred, for a
+reason worth writing down: inhibition accrued while tonic is low is *history*, and rule 4
+exists so that one shiny thing (a tool spike lifting tonic past 0.5) does not reopen the
+gate with a clean slate after a dull stretch. Hard-gating on tonic would throw that
+history away at runtime. So instead every `reflect/*` row now records `tonic` and
+`gate_open` at the moment of the verdict, and the split Sky wants (shrugs in the regime
+where dullness matters vs. shrugs that were moot) is a filter on the recorder. If the
+replay shows low-tonic shrugs are pure noise, gate then, with numbers.
+
+**On what the daemon source keys on** (Sky asked): not semantic distance. `analyze_entropic_gaps`
+scores the zettel graph — nodes with degree ≤ 1 and > 150 chars of content are "isolated
+dense pockets" — rotates across the fresh ones under a 24 h per-node cooldown, pays itself
++0.04 tonic per pick, and calls `on_redundant(source="daemon_gap")` on every pick. So
+`daemon_gap` redundancy means "the daemon stimulated itself", structural, and it fires once
+per cycle while exploring; `reflect` redundancy means "the conversation did not move",
+semantic, and it fires at most once per five user turns. Two semantics, one accumulator.
+The closure-source rows (§9.8) are what will show whether that is a problem.
+
+**9.10 The hidden ratio (Sky), run numerically.** The daemon is the one actor that pushes
+both signals on the same event: +0.04 tonic and one GABA step per pick. `labs/daemon_ratio_sim.py`
+runs that loop with the real constants (no conversation, unlimited fresh gaps, gate just opened
+at tonic 0.60). Result: at any cycle interval under ~5 min the **step outruns the bump** —
+GABA closes the gate on pick 5, every time, tonic never does (52 of 52 closes at 60 s, 6 of 6
+at 300 s). The 1.5× streak growth beats a linear 0.04 bump no matter what the graph holds.
+Then a ~7 min duty cycle (drain from ~0.66 to 0.50 takes 167 s, one pick at streak 6+ re-shuts
+it). At ≥ 10 min the streak TTL (1200 s) resets between picks, GABA never accumulates, and
+tonic closes it instead. The code's own comment says the measured cycle is ~300 s, so live
+we are in the GABA-closes regime.
+
+But the ratio is nearly moot in practice because of F1: `DISSONANCE_CAP = 8` picks per
+24 h, claimed *before* the boost. Daily signature with silence after a conversation:
+5 picks → `gate_close closed_by=gaba` → ~3 min → 3 picks → cap → no boost, no step →
+tonic leaks to baseline over ~45 min → `gate_close closed_by=tonic`. So the closure log
+will read gaba, gaba, tonic, and the second half of "the daemon shut itself off" is the
+budget, not the organ. Watch `daemon/gate_close` with `closed_by` against the `da/boost`
+count since the matching `gate_open`.
+
+Is that the behaviour we want? The burst length (5) is emergent from BASE/GROWTH vs
+GATE_MAX and should be a stated number ("picks per novel event"), not an accident. The
+reflector's `on_novel` resets the streak, so a real conversation earns the daemon a fresh
+burst — satiation with a reset on novelty, which is the right shape. Leave the ratio
+alone until the rows exist; make the burst length explicit when they do.
+
+**On the graph** (Sky asked whether it is small enough that the daemon runs dry first):
+it is the opposite. Same criteria as `analyze_entropic_gaps`, live DB 2026-09-13:
+
+| user/persona | nodes | links | isolated dense | degree-0 share |
+|---|---|---|---|---|
+| Sky/rick | 334 | 99 | 278 | 70 % |
+| SkyTest/rick | 98 | 2 | 92 | 97 % |
+| Sky/v | 94 | 40 | 42 | 45 % |
+| Sky/eni | 34 | 7 | 24 | 76 % |
+
+At 8 picks/day Sky/rick has ~35 days of fuel. The picker will never run dry; the graph is
+mostly unlinked. Two things live in those pockets: the persona's own imported KB modules
+("Truth and Evidence Hierarchy", "On Free Will"…) with zero links, and the July every-turn
+reflection droppings ("Reflection: 2026-07-15 21:21 / 21:22 / 21:28 / 21:29…"), each ~2 KB,
+each unlinked. The daemon has written exactly **2** `entropic_gap` rows ever (Aug 31,
+Sep 2). So Sky's conclusion holds for a different reason: you will be testing the
+reflector path by default not because the graph is small but because tonic sits at
+0.30 < 0.50 whenever nobody is talking, and only a conversation opens the gate at all.
+
+**9.11 Why the graph is a wasteland: the typed links never become edges.** Sky: "links have
+been typed out." They have. Traced 2026-09-13:
+
+- `zettel_engine._parse_header` parses the `Links: [[A]], [[B]]` header into
+  `OnDemandModule.links`. `compile_behavioral_zettels` then inserts the node with
+  `node_id_tag=mod.id` and **never reads `.links`**. Parsed, dropped. No code anywhere in the
+  app turns a typed `[[ID]]` into a `zettel_links` row; edges come only from ingest-time LLM
+  relation extraction, embedding auto-link (≥ threshold, max 3), the daemon's `bridges`, and
+  the `create_zettel_link` tool.
+- `compile_behavioral_zettels` deletes a file's previous nodes on recompile and does **not**
+  delete their links. Rick: 99 edges, **85 dangling** (target node gone), all created Aug
+  19–20. The 14 that survive are 13 daemon `bridges` from its own Internal Monologue nodes
+  (seven of them to WOUND-006) and one embedding auto-link. Zero module→module edges.
+- Query-time graph expansion (`get_class_isolated_expansion` → `get_linked_nodes`, depth 1) is
+  real and runs every turn. For Rick it has nothing to walk.
+- The "if you see `[[X]]`, fetch X" protocol in the persona's own instructions cannot be
+  executed through search either: `node_id` is not in the FTS index and stored content does
+  not carry its own ID, so `search_knowledge_graph("SCAR-008")` returns the KB nodes that
+  *mention* SCAR-008, not the module.
+- What does work: the deterministic trigger scan (94 behavioral modules fire on trigger
+  words) and vector/keyword retrieval on the body text. Modules load; the associative layer
+  between them does not exist.
+
+Consequence for this lab: the 278 "isolated dense pockets" the daemon sees are the persona's
+own knowledge base with its wiring stripped. The daemon's structural boredom signal is
+measuring an importer bug. Fix is three small things, none of them GABA: (1) after inserting a
+file's modules, resolve each `mod.links` against that persona's `node_id` tags and
+`add_zettel_link(relationship="links_to", strength=1.0)`; (2) delete links when deleting
+nodes (or FK cascade); (3) put `node_id` in the FTS index or prefix content with `ID: <tag>`.
+**Fixed the same night, on Sky's go** (`labs/patch_typed_links.py`, `tests/test_typed_links.py`):
+
+- `rebuild_typed_links()` resolves every module's parsed `Links` against the persona's
+  `node_id` tags and writes `links_to` edges (strength 1.0, label core); called after any
+  recompile and, once per process, for a persona that has behavioral nodes and no typed
+  edges yet (bootstrap, so existing installs heal on their next turn). Unresolved tags are
+  logged.
+- Recompile deletes a file's edges before its nodes; `rebuild_typed_links` also prunes any
+  edge with a missing end, globally.
+- `search_zettel_fts` resolves ID-shaped tokens (`[A-Za-z]…-ddd`, case-insensitive) by exact
+  `node_id` first, ranked above every keyword hit, so `search_knowledge_graph("SCAR-008")`
+  returns SCAR-008.
+- `get_linked_nodes` dedups neighbours reachable by reciprocal edges (typed links make
+  A→B and B→A common; B used to appear twice and could take two expansion slots).
+
+Live DB (backup `backups/users_20260913_192533_pre_typed_links.db`): Sky/rick 0 → 217
+module→module edges, 90 dangling → 0, behavioral isolated 94 → 4 (`ARG-005`,
+`DOM-PSYCH-001`, `RESEARCH-003`, `FALL-META-001` link to nothing and nothing links to them;
+Sky's call). Unresolved tags that remain are exactly the five ALWAYS_LOAD modules that live
+in the system prompt, not the files (COPE-001, CORE-001, SAFE-001, SAFE-002, TRAUMA-001).
+
+**9.12 The parser was eating modules.** Found while resolving the typed links: four of the
+"unresolved" tags were *defined* in the files and still not nodes. 104 `ID:` headers across
+`rick_ondemand.txt` and `Rick_kb.txt`, 94 compiled. `parse_on_demand_file` split on `^---$`
+and called any block containing the strings "ID:" and "Title:" a header. Where the author
+omitted the `---` between a body and the next header, the two fused into one block, the
+fused block passed the header test, and the module whose body it was vanished — along with
+every module in the run until the next clean separator (fused runs also lacked the `---`
+after the header, so header and body fused too). Lost: TOOL-CHECK/SYS/INFO/OPT-001,
+ARCH-DATA/ROBUST-001, SCAR-008/009 (the Citadel and the Pissmaster modules), RESEARCH-002/003.
+Two months invisible, and the persona's own instructions reference SCAR-009 by name.
+
+Fix (`labs/patch_parser_recovery.py` + `_2.py`, test [7]): a header is a block whose first
+line is `ID:`; a body block containing an `ID:` line followed by `Title:` is split there;
+the header ends at the last consecutive known key line (ID/Title/Type/Links/Triggers/
+Priority) and the remainder is fed back through the splitter, so chains recover in full.
+Every recovery prints a `[ZETTEL PARSER] … put the separator back` line naming the module.
+The compile hash now carries `:p<ON_DEMAND_PARSER_VERSION>` so a parser change recompiles
+byte-identical files once. Both files now parse 104/104, no duplicates; live recompile put
+104 modules and 217 edges on each Rick instance.
+
+Separators missing in the source files (for Sky to restore, the parser no longer needs
+them): `rick_ondemand.txt` before EPIS-001 and around RESEARCH-002; `Rick_kb.txt` around
+TOOL-SYS/INFO/OPT-001, ARCH-ROBUST-001, SCAR-009.
+
+**What the daemon's census honestly is now** (Sky/rick, isolated dense pockets): 197 = 4
+behavioral above + 185 `KB (n)` lore chunks + 8 dated `Reflection:` nodes. The 185 are a
+*second copy* of `Rick_kb.txt`, chunked by the lore ingest on 2026-08-20 with generated
+`[[CONCEPT-KB-n-001]]` tags and no links — a duplicate of the knowledge base sitting next
+to the compiled modules. Deleting that entry (`zettel_entries` title "KB", 2026-05-25) is
+destructive and Sky's call; until then the daemon's "gaps" are mostly that duplicate.
+
+---
+
+## Next session — start here (2026-09-13)
+
+1. After Sky's next session: `python telemetry.py 60` from the repo root (or
+   `telemetry.read()` in a notebook). Expect one `reflect/wait` per user turn (each with
+   `tonic` and `gate_open`), a `reflect/reflect` + `reflect/stored` + `gaba/novel` at
+   turn 5, and the first real `nearest` values. Make turns 6–10 deliberately same-topic to
+   provoke a `reflect/shrug` + `gaba/redundant` pair; that pair's `nearest` and
+   `intensity` are the numbers that set `REFLECT_SIM_CEIL` (§7.3) and sanity-check the
+   0.5/1.5 grade range (§9.7).
+2. Once the daemon has had a few open/close cycles: filter `daemon/gate_close` by
+   `closed_by`, and `gaba/redundant` by `crossed=true` split on `source`. If `daemon_gap`
+   closes it nearly every time, the reflector's constants are the ones to move (§9.8).
+   Then decide tonic-gating from the `gate_open` split on the `reflect/shrug` rows (§9.9).
+3. `labs/watch/gaba_watch.py` is now optional. Delete it, or keep it as a live tail of
+   Redis for the rare case the sink is suspected of lying.
+4. ~~Typed links never become edges (§9.11)~~ **Fixed 2026-09-13**, plus the parser (§9.12).
+   Remaining, Sky's calls: (a) delete the duplicate lore ingest of the KB (the 185 `KB (n)`
+   chunks) so the daemon's census means something; (b) put the missing `---` separators
+   back in the two source files (§9.12 lists them); (c) give ARG-005, DOM-PSYCH-001,
+   RESEARCH-003, FALL-META-001 a `Links:` line or accept them as leaves.
+5. The summariser is blind to tool calls (§9.1). Either feed `tool_output` rows into the
+   window (ties to the 2026-09-11 item 2 question about raw event types) or accept it.
+6. Then the 2026-09-11 list below, from item 2.
+
+---
+
+## Next session — start here (2026-09-11)
+
+1. Read `labs/watch/timeline_*.log` after Sky's real turns (need ≥ 6 user messages for
+   one watermark cycle, ≥ 10 for two; make the second five deliberately same-topic to
+   provoke a shrug). Verify §8.4. Then fill in §8 with the measured cadence and the
+   first `nearest` values.
+2. Decide whether `assistant_response` should be logged as a raw event (§8.1). If yes,
+   the threshold's meaning halves and §7.3's `REFLECT_SIM_CEIL` guess moves with it.
+3. Fix or remove the `reflection_started` UI signal (§8.3).
+4. Then the 2026-09-09 list below, from item 2.
+
+---
+
+## Next session — start here (2026-09-09)
+
+1. Bring the app and daemon back up (they were down for the edits) and watch Sky's real
+   path for a few turns: `[DA] reflect: go|shrug`, `[GABA] redundant|novel`, and whether
+   the reflector fires at a sane cadence. This costs nothing beyond normal use.
+2. Offline, zero API cost: re-embed the recorded turns in
+   `labs/replay_out/20260906_142803/sse/` and run `reflect_gate.plan_reflection` over
+   the four shapes to see where 0.85 lands them. If novelty shrugs, the ceiling is too low.
+3. Re-baseline with `labs/gaba_replay.py`, shapes reordered `novelty, bad_tool,
+   repetition, transport`. Headline (§5): `[GABA] … GATE_SHUT` on repetition while tonic
+   is still ≥ 0.50, and `resting, no monologue` mid-session. **Sky's call — Vertex cost.**
+4. Set the §7.3 constants from that run. Then option 1.
+5. Unchanged: `tool_outcome_attribution.md` §5's 33-case suite still needs lifting into
+   `tests/` — the three files there are empty shells.
 
 ---
 

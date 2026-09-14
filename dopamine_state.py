@@ -111,8 +111,12 @@ def _load(kind: str, username: str, persona: str):
 
 def _save(kind: str, username: str, persona: str, v: float):
     k = _key(username, persona, kind)
-    payload = json.dumps({"v": round(v, 4), "ts": time.time()})
-    _MEM_FALLBACK[k] = {"v": v, "ts": time.time()}
+    # Round once; Redis and the fallback must hold the same number (same
+    # 1e-4 drift gaba_state had, found 2026-09-13 on the first live Redis run).
+    v = round(float(v), 4)
+    ts = time.time()
+    payload = json.dumps({"v": v, "ts": ts})
+    _MEM_FALLBACK[k] = {"v": v, "ts": ts}
     if _RCONN is not None:
         try:
             _RCONN.set(k.encode() if isinstance(k, str) else k,

@@ -33,6 +33,18 @@ try:
     _DA_AVAILABLE = True
 except ImportError:
     _DA_AVAILABLE = False
+try:
+    import telemetry as _tm
+except Exception:  # telemetry must never be load-bearing
+    _tm = None
+
+
+def _emit(*a, **k):
+    if _tm is not None:
+        try:
+            _tm.emit(*a, **k)
+        except Exception:
+            pass
 
 # ═══════════════════════════════════════════════════════════
 # CONSTANTS
@@ -343,13 +355,24 @@ class DeepMemory:
             try:
                 max_sim = self._max_similarity_to_existing(vec, exclude_id=mem_id)
                 _nov = dopamine_state.novelty_reward(self.username, self.persona, max_sim)
+                _near = "none" if max_sim is None else round(max_sim, 3)
+                _emit("da", "novelty", self.username, self.persona, nearest=max_sim,
+                      novelty=_nov.get("novelty"), paid=_nov.get("paid", 0.0),
+                      predicted=bool(_nov.get("paid", 0.0) <= 0.0), tonic=_nov.get("tonic"),
+                      budget_left=_nov.get("budget_left"), memory_id=mem_id)
                 if _nov.get("paid", 0.0) > 0.0:
-                    _near = "none" if max_sim is None else round(max_sim, 3)
                     print(f"[DA] novelty: nearest={_near} novelty={_nov['novelty']} "
                           f"paid=+{_nov['paid']} tonic={_nov['tonic']} "
                           f"budget_left={_nov['budget_left']}", flush=True)
+                else:
+                    # §6.1: the predicted branch used to leave no trace; the
+                    # replay had to count sqlite rows to see it.
+                    print(f"[DA] novelty: nearest={_near} novelty={_nov['novelty']} "
+                          f"paid=0 (predicted) tonic={_nov['tonic']} "
+                          f"budget_left={_nov['budget_left']}", flush=True)
             except Exception as _nov_err:
                 print(f"[DA] novelty_reward failed (non-fatal): {_nov_err}", flush=True)
+                _emit("da", "novelty_failed", self.username, self.persona, error=str(_nov_err))
         
         return memory
     

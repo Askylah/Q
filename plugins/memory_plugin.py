@@ -17,6 +17,56 @@ try:
 except ImportError:
     _DA_AVAILABLE = False
 
+# Inhibition organ (optional). The Reflector is its main input: a "shrug"
+# (window looked at, nothing new, no LLM call) is one redundancy tick, a
+# successful reflection resets the streak.
+try:
+    import gaba_state
+    _GABA_AVAILABLE = True
+except ImportError:
+    _GABA_AVAILABLE = False
+
+import os as _os
+import reflect_gate
+try:
+    import telemetry as _tm
+except Exception:  # telemetry must never be load-bearing
+    _tm = None
+
+
+def _emit(*a, **k):
+    if _tm is not None:
+        try:
+            _tm.emit(*a, **k)
+        except Exception:
+            pass
+# Novelty pre-check: at/above this cosine between the newest N raw events and
+# the N before them, the reflector shrugs instead of paying for an LLM call.
+# PROPOSED (lab_notes/gaba_inhibition.md §7): same-register chunks of one
+# conversation run hotter than reflection-vs-corpus, so this sits above the
+# 0.70 the lab note measured for that. The replay sets it.
+REFLECT_SIM_CEIL = float(_os.getenv("REFLECT_SIM_CEIL", "0.85"))
+REFLECT_NOVELTY_GATE = _os.getenv("REFLECT_NOVELTY_GATE", "1") not in ("0", "false", "False", "")
+
+
+def _chunk_similarity(new_text: str, prior_text: str):
+    """Cosine between two text chunks on the shared MiniLM. None when the
+    model is unavailable so the gate fails open (reflect_gate handles None)."""
+    try:
+        from embedding_model import get_shared_model
+        model = get_shared_model()
+        if not model:
+            return None
+        import numpy as _np
+        v = model.encode([new_text, prior_text], convert_to_numpy=True)
+        a, b = v[0], v[1]
+        den = float(_np.linalg.norm(a) * _np.linalg.norm(b))
+        if den == 0.0:
+            return None
+        return float(_np.dot(a, b) / den)
+    except Exception:
+        return None
+
 class Observer:
     def __init__(self, db: UserManager, username: str, persona: str):
         self.db = db
@@ -40,10 +90,61 @@ class Reflector:
         self.llm_callback = llm_callback
 
     def reflect(self, turn_threshold: int = 5):
-        logs = self.db.get_observation_log(self.username, self.persona, limit=20)
-        raw_events = [l for l in logs if l['type'] in ['user_message', 'assistant_response', 'tool_output']]
-        if len(raw_events) < turn_threshold:
+        # FIX(reflect-every-turn): this used to count raw events in the 20-row
+        # window and reflect whenever there were >= turn_threshold of them --
+        # with no memory of what it had already summarised, so from turn 5 on
+        # it fired on EVERY user message (one dense_observation per turn, each
+        # 18/20 identical to the last; lab_notes/gaba_inhibition.md §6.2). The
+        # threshold was a start delay, not a cadence. reflect_gate now answers
+        # two questions: enough NEW raw events since the last reflection
+        # (watermark), and did the conversation actually MOVE (novelty
+        # pre-check on the shared MiniLM, no LLM call spent to find out).
+        full = self.db.get_observation_log(
+            self.username, self.persona,
+            limit=reflect_gate.window_limit(turn_threshold, prompt_rows=20))
+        logs = full[-20:]   # the transcript the LLM sees is unchanged: last 20 rows
+        plan = reflect_gate.plan_reflection(
+            full, turn_threshold,
+            similarity=_chunk_similarity if REFLECT_NOVELTY_GATE else None,
+            sim_ceil=REFLECT_SIM_CEIL)
+        _near = plan["nearest"]
+        _near_s = "none" if _near is None else f"{_near:.3f}"
+        _intensity = plan.get("intensity")
+        # Dopamine posture at the moment of the verdict, recorded (NOT acted
+        # on): lets the calibration split shrugs by whether the explore gate
+        # was even open. Gating the watermark on tonic is a later decision,
+        # taken from these rows, not before them.
+        _tonic = None
+        _gate_open = None
+        if _DA_AVAILABLE:
+            try:
+                _tonic = dopamine_state.get_state(self.username, self.persona)["tonic"]
+                _gate_open = bool(dopamine_state.should_explore(_tonic))
+            except Exception:
+                _tonic = None
+        # Every verdict lands on disk, including "wait": the wait rows are the
+        # cadence trace (one per user turn) and cost nothing.
+        _emit("reflect", plan["verdict"], self.username, self.persona,
+              nearest=_near, intensity=_intensity, tonic=_tonic, gate_open=_gate_open,
+              new_events=plan["new_events"], threshold=turn_threshold,
+              sim_ceil=REFLECT_SIM_CEIL, novelty_gate=REFLECT_NOVELTY_GATE,
+              window_rows=len(full), reason=plan["reason"])
+        if plan["verdict"] == "wait":
             return
+        if plan["verdict"] == "shrug":
+            # The redundancy event. Logged on the [DA] channel next to the
+            # novelty lines so the replay can count both from one grep.
+            print(f"[DA] reflect: shrug nearest={_near_s} new_events={plan['new_events']} "
+                  f"-- {plan['reason']}", flush=True)
+            if _GABA_AVAILABLE:
+                try:
+                    gaba_state.on_redundant(self.username, self.persona, nearest=_near,
+                                            source="reflect", intensity=_intensity)
+                except Exception as e:
+                    print(f"[GABA] on_redundant failed (non-fatal): {e}", flush=True)
+            return False
+        print(f"[DA] reflect: go nearest={_near_s} new_events={plan['new_events']} "
+              f"-- {plan['reason']}", flush=True)
 
         log_text = "\n".join([f"[{l['timestamp']}] {l['type'].upper()}: {l['content']}" for l in logs])
         reflection_prompt = f"""
@@ -78,9 +179,17 @@ class Reflector:
         
         if _DA_AVAILABLE and valence_observed is not None:
             try:
-                dopamine_state.social_reward(self.username, self.persona, valence_observed)
+                _soc = dopamine_state.social_reward(self.username, self.persona, valence_observed)
+                # §6.8: this writer used to print nothing on success.
+                print(f"[DA] social: valence={valence_observed:.2f} expected={_soc.get('expected')} "
+                      f"rpe={_soc.get('rpe')} tonic={_soc.get('tonic')} phasic={_soc.get('phasic')}",
+                      flush=True)
+                _emit("da", "social", self.username, self.persona, valence=valence_observed,
+                      expected=_soc.get("expected"), rpe=_soc.get("rpe"),
+                      tonic=_soc.get("tonic"), phasic=_soc.get("phasic"))
             except Exception as e:
                 print(f"[DA] social_reward failed (non-fatal): {e}")
+                _emit("da", "social_failed", self.username, self.persona, error=str(e))
         
         if dense_observation and len(dense_observation.strip()) > 10:
             self.db.add_observation(
@@ -90,6 +199,8 @@ class Reflector:
                 content=dense_observation.strip(),
                 reflection_score=1.0
             )
+            _emit("reflect", "stored", self.username, self.persona, nearest=_near,
+                  chars=len(dense_observation.strip()), valence=valence_observed)
             if _DEEP_MEMORY_AVAILABLE:
                 try:
                     dm = DeepMemory(username=self.username, persona=self.persona)
@@ -103,7 +214,14 @@ class Reflector:
                     )
                 except Exception as e:
                     print(f"DEEP_MEMORY BRIDGE ERROR: {e}")
+            if _GABA_AVAILABLE:
+                try:
+                    gaba_state.on_novel(self.username, self.persona, nearest=_near, source="reflect")
+                except Exception as e:
+                    print(f"[GABA] on_novel failed (non-fatal): {e}", flush=True)
             return True
+        _emit("reflect", "empty", self.username, self.persona, nearest=_near,
+              chars=len((dense_observation or "").strip()))
         return False
 
 def memory_observer_hook(event_type: str, content: str, **kwargs):

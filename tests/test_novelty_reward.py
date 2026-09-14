@@ -14,6 +14,8 @@ deletes them on exit. It never touches a real persona or the database.
 Each check names the failure it exists to prevent.
 """
 import os, sys, ast, time
+os.environ["TELEMETRY_OFF"] = "1"   # fixtures must never land in the real telemetry sink
+
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)

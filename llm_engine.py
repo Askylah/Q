@@ -134,6 +134,18 @@ try:
     import dopamine_state
 except ImportError:
     dopamine_state = None
+try:
+    import telemetry as _tm
+except Exception:  # telemetry must never be load-bearing
+    _tm = None
+
+
+def _emit(*a, **k):
+    if _tm is not None:
+        try:
+            _tm.emit(*a, **k)
+        except Exception:
+            pass
 
 # Operational world-model: provider reliability. Deliberately separate from
 # dopamine_state — the router learns servers are flaky, the neuron does not
@@ -1630,8 +1642,15 @@ async def intercepting_stream_generator(model_id, system_prompt, messages, api_k
                         infra_failures=_da_counts["infra_fail"],
                     )
                     print(f"[DA] tool_reward rpe={_da_res['rpe']} tonic={_da_res['tonic']} phasic={_da_res['phasic']} infra_discounted={_da_res.get('infra_discounted', False)}")
+                    _emit("da", "tool_reward", kwargs.get('username', 'default'), kwargs.get('persona_key', 'default'),
+                          successes=_da_counts["success"], action_failures=_da_counts["action_fail"],
+                          infra_failures=_da_counts["infra_fail"], rpe=_da_res.get('rpe'),
+                          tonic=_da_res.get('tonic'), phasic=_da_res.get('phasic'),
+                          infra_discounted=bool(_da_res.get('infra_discounted', False)))
                 except Exception as _da_ex:
                     print(f"[DA] tool_reward failed (non-fatal): {_da_ex}")
+                    _emit("da", "tool_reward_failed", kwargs.get('username', 'default'),
+                          kwargs.get('persona_key', 'default'), error=str(_da_ex))
             # Continue loop to allow LLM to generate response after all tool outputs are appended
         else:
             break
