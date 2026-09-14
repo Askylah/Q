@@ -1580,10 +1580,28 @@ class UserManager:
             return []
 
     def search_zettel_fts(self, username, persona, query):
-        """Full-text search across zettel node content using tokenized keyword OR matching."""
+        """Full-text search across zettel node content using tokenized keyword OR matching.
+        FIX(id-lookup): node_id is not in the FTS index and content does not carry
+        its own tag, so searching "SCAR-008" used to return the nodes that MENTION
+        SCAR-008 and never the module. ID-shaped tokens in the query now resolve by
+        exact node_id first and rank above every keyword hit."""
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
+            exact = []
+            seen_ids = set()
+            for tag in re.findall(r'\b[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*-\d{3}\b', query or ''):
+                tag = tag.upper()
+                c.execute("""
+                    SELECT id, node_id, title, content, category, embedding FROM zettel_nodes
+                    WHERE (node_id COLLATE NOCASE=? OR node_id COLLATE NOCASE=?)
+                      AND username COLLATE NOCASE=? AND persona COLLATE NOCASE=?
+                """, (tag, f"[[{tag}]]", username, persona))
+                for r in c.fetchall():
+                    if r[0] not in seen_ids:
+                        seen_ids.add(r[0])
+                        exact.append({"id": r[0], "node_id": r[1], "title": r[2], "content": r[3],
+                                      "category": r[4], "embedding": r[5], "fts_rank": -1e9})
             # Tokenize: strip punctuation, lowercase, filter short words
             # Then join as OR terms so FTS5 matches any significant keyword
             clean = re.sub(r'[^\w\s]', ' ', query.lower())
@@ -1594,7 +1612,7 @@ class UserManager:
             tokens = [w for w in clean.split() if len(w) > 2 and w not in stop_words]
             if not tokens:
                 conn.close()
-                return []
+                return exact
             # FTS5 OR query across all significant tokens
             fts_query = ' OR '.join(tokens)
             c.execute("""
@@ -1609,7 +1627,8 @@ class UserManager:
             """, (fts_query, username, persona))
             rows = c.fetchall()
             conn.close()
-            return [{"id": r[0], "node_id": r[1], "title": r[2], "content": r[3], "category": r[4], "embedding": r[5], "fts_rank": r[6]} for r in rows]
+            return exact + [{"id": r[0], "node_id": r[1], "title": r[2], "content": r[3], "category": r[4], "embedding": r[5], "fts_rank": r[6]}
+                            for r in rows if r[0] not in seen_ids]
         except Exception as e:
             print(f"DB ERROR (search_zettel_fts): {e}")
             return []
@@ -1620,6 +1639,7 @@ class UserManager:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             visited = set()
+            seen_results = set()   # FIX(reciprocal-edges): A->B and B->A yielded B twice
             results = []
             frontier = [node_id]
 
@@ -1637,7 +1657,8 @@ class UserManager:
                         AND zn.id != ?
                     """, (nid, nid, nid))
                     for row in c.fetchall():
-                        if row[0] not in visited:
+                        if row[0] not in visited and row[0] not in seen_results:
+                            seen_results.add(row[0])
                             results.append({
                                 "id": row[0], "node_id": row[1], "title": row[2],
                                 "content": row[3], "category": row[4],

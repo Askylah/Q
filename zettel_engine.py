@@ -733,6 +733,75 @@ def _parse_header(header_text: str) -> dict:
             
     return header
 
+ON_DEMAND_PARSER_VERSION = 2
+
+
+_HEADER_KEYS = ("ID", "Title", "Type", "Links", "Triggers", "Priority")
+
+
+def _is_header_key_line(line: str) -> bool:
+    l = line.lstrip()
+    return any(l.startswith(k + ":") for k in _HEADER_KEYS)
+
+
+def _split_embedded_header(block: str, filepath: str = "") -> list:
+    """Classify a '---'-delimited block into [(kind, text)...], kind in
+    {"header", "body"}, tolerating missing separators in either position:
+
+      body ... ID: X / Title: ...        <- no '---' before the header
+      ID: X / Title: ... / body ...      <- no '---' after the header
+      body ... ID: X ... body ... ID: Y  <- chains of both
+
+    A header starts at an `ID:` line whose next non-empty line is `Title:` and
+    ends at the last consecutive known key line (ID/Title/Type/Links/Triggers/
+    Priority). Text before it is body; text after it is fed back through this
+    function, so a run of fused modules yields every one of them. Each
+    recovery is logged so the author can put the separators back."""
+    lines = block.split("\n")
+    n = len(lines)
+    start = None
+    for i, line in enumerate(lines):
+        if not line.lstrip().startswith("ID:"):
+            continue
+        j = i + 1
+        while j < n and not lines[j].strip():
+            j += 1
+        if j < n and lines[j].lstrip().startswith("Title:"):
+            start = i
+            break
+    if start is None:
+        return [("body", block)]
+    # header runs while lines are known keys (blank lines inside are tolerated)
+    k = start
+    last_key = start
+    while k < n:
+        if _is_header_key_line(lines[k]):
+            last_key = k
+            k += 1
+        elif not lines[k].strip() and k + 1 < n and _is_header_key_line(lines[k + 1]):
+            k += 1
+        else:
+            break
+    header = "\n".join(lines[start:last_key + 1]).strip()
+    before = "\n".join(lines[:start]).strip()
+    after = "\n".join(lines[last_key + 1:]).strip()
+    name = os.path.basename(filepath) or "?"
+    first = header.splitlines()[0][:40]
+    if before:
+        print(f"[ZETTEL PARSER] {name}: recovered a header without a '---' before it ({first}); "
+              f"put the separator back in the source file.")
+    if after:
+        print(f"[ZETTEL PARSER] {name}: recovered a header without a '---' after it ({first}); "
+              f"put the separator back in the source file.")
+    out = []
+    if before:
+        out.append(("body", before))
+    out.append(("header", header))
+    if after:
+        out.extend(_split_embedded_header(after, filepath))
+    return out
+
+
 def parse_on_demand_file(filepath: str) -> list:
     """Parse a Markdown/text file containing multiple YAML-header modules."""
     if not os.path.exists(filepath):
@@ -745,28 +814,46 @@ def parse_on_demand_file(filepath: str) -> list:
         return []
 
     modules = []
-    blocks = re.split(r"^---$", raw_content, flags=re.MULTILINE)
-    
+    # FIX(parser-eats-module): the old test for "is this block a header" was
+    # `"ID:" in block and "Title:" in block`. When an author forgets the '---'
+    # between a body and the next header, the two fuse into one block, the
+    # fused block passes that test, and the module whose body it was is
+    # silently dropped -- along with every module in the run until the next
+    # clean separator. Rick_kb.txt lost 8 modules that way (TOOL-CHECK/SYS/
+    # INFO/OPT, ARCH-DATA/ROBUST, SCAR-008/009) and rick_ondemand.txt 2
+    # (RESEARCH-002/003), measured 2026-09-13. Now: a header is a block whose
+    # FIRST line is `ID:`; a body block that contains an `ID:` line followed
+    # by a `Title:` line is split there, the front half kept as the body it
+    # was, the back half treated as the header it is. Recovery is logged so
+    # the author can put the separator back.
+    blocks = re.split(r"^---\s*$", raw_content, flags=re.MULTILINE)
+
     current_header = None
     for block in blocks:
         block = block.strip()
         if not block:
             continue
-
-        if "ID:" in block and "Title:" in block:
-            current_header = _parse_header(block)
-        elif current_header:
-            new_module = OnDemandModule(
-                id=current_header.get("ID", "UNKNOWN"),
-                title=current_header.get("Title", "Untitled"),
-                type=current_header.get("Type", "ON_DEMAND"),
-                links=current_header.get("Links", []),
-                triggers=current_header.get("Triggers", []),
-                content=block,
-                priority=current_header.get("Priority", "NORMAL")
-            )
-            modules.append(new_module)
-            current_header = None
+        for kind, text in _split_embedded_header(block, filepath):
+            if kind == "header":
+                if current_header is not None:
+                    print(f"[ZETTEL PARSER] {os.path.basename(filepath)}: module "
+                          f"{current_header.get('ID', '?')} has no body (header followed by header); skipped.")
+                current_header = _parse_header(text)
+            elif current_header is not None:
+                modules.append(OnDemandModule(
+                    id=current_header.get("ID", "UNKNOWN"),
+                    title=current_header.get("Title", "Untitled"),
+                    type=current_header.get("Type", "ON_DEMAND"),
+                    links=current_header.get("Links", []),
+                    triggers=current_header.get("Triggers", []),
+                    content=text,
+                    priority=current_header.get("Priority", "NORMAL")
+                ))
+                current_header = None
+            # else: body text before any header -- preamble, ignored
+    if current_header is not None:
+        print(f"[ZETTEL PARSER] {os.path.basename(filepath)}: module "
+              f"{current_header.get('ID', '?')} has no body (end of file); skipped.")
 
     return modules
 
@@ -806,6 +893,10 @@ def compile_behavioral_zettels(username: str, persona: str, on_demand_paths: lis
         if not file_hash:
             continue
             
+        # The stored hash carries the parser version: a parser fix (2026-09-13,
+        # missing-separator recovery) must recompile files whose bytes did not
+        # change, or the modules it recovers never reach the graph.
+        file_hash = f"{file_hash}:p{ON_DEMAND_PARSER_VERSION}"
         # If the file hasn't changed, skip compilation
         if path in existing_hashes and existing_hashes[path] == file_hash:
             continue
@@ -820,6 +911,16 @@ def compile_behavioral_zettels(username: str, persona: str, on_demand_paths: lis
         # Delete existing nodes from this source file
         conn = sqlite3.connect(db.DB_PATH)
         c = conn.cursor()
+        # FIX(dangling-links): a recompile replaced this file's nodes with new
+        # UUIDs but left every edge that pointed at the old ones. Rick had 85 of
+        # 99 edges dangling by 2026-09-13. Edges go with their nodes.
+        c.execute("""
+            DELETE FROM zettel_links
+            WHERE source_node_id IN (SELECT id FROM zettel_nodes
+                                     WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=? AND source_entry_id=?)
+               OR target_node_id IN (SELECT id FROM zettel_nodes
+                                     WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=? AND source_entry_id=?)
+        """, (username, persona, path, username, persona, path))
         c.execute("""
             DELETE FROM zettel_nodes
             WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=? AND source_entry_id=?
@@ -869,6 +970,107 @@ def compile_behavioral_zettels(username: str, persona: str, on_demand_paths: lis
     # (query_knowledge_graph) rebuilds the cache from SQLite on this same turn.
     if any_recompiled:
         invalidate_zettel_cache(username, persona)
+    # FIX(typed-links): the header parser has always read `Links: [[A]], [[B]]`
+    # into OnDemandModule.links, and this function never looked at it. Not one
+    # typed link ever became an edge; query-time graph expansion had nothing to
+    # walk and the daemon saw the whole KB as "isolated pockets". Rebuild after
+    # any recompile, and once per process for a persona that has none yet.
+    _ensure_typed_links(username, persona, on_demand_paths, force=any_recompiled)
+
+
+TYPED_LINK_RELATIONSHIP = "links_to"
+_TYPED_LINKS_OK = set()
+
+
+def _ensure_typed_links(username: str, persona: str, on_demand_paths: list, force: bool = False):
+    import sqlite3
+    key = (username.lower(), persona.lower())
+    if not force and key in _TYPED_LINKS_OK:
+        return
+    if not force:
+        # Bootstrap: a persona compiled before this fix has behavioral nodes and
+        # zero typed edges. One COUNT, once per process.
+        try:
+            conn = sqlite3.connect(db.DB_PATH)
+            c = conn.cursor()
+            c.execute("""
+                SELECT count(*) FROM zettel_links l JOIN zettel_nodes n ON n.id = l.source_node_id
+                WHERE n.username COLLATE NOCASE=? AND n.persona COLLATE NOCASE=? AND l.relationship=?
+            """, (username, persona, TYPED_LINK_RELATIONSHIP))
+            have = c.fetchone()[0]
+            conn.close()
+        except Exception:
+            have = 1  # unreadable -> do not thrash
+        if have > 0:
+            _TYPED_LINKS_OK.add(key)
+            return
+    try:
+        rebuild_typed_links(username, persona, on_demand_paths)
+    except Exception as e:
+        print(f"[ZETTEL COMPILER] typed-link rebuild failed (non-fatal): {e}")
+    _TYPED_LINKS_OK.add(key)
+
+
+def rebuild_typed_links(username: str, persona: str, on_demand_paths: list) -> dict:
+    """Parse every on-demand file for the persona, resolve each module's typed
+    Links against the persona's node_id tags, replace all `links_to` edges for
+    the persona with the result, and prune any edge whose end no longer exists.
+    Returns {"edges": int, "unresolved": [tag...], "pruned": int}. Pure SQLite,
+    no model, no LLM."""
+    import sqlite3, uuid
+    wanted = {}
+    for path in on_demand_paths or []:
+        if not path or not os.path.exists(path):
+            continue
+        for mod in parse_on_demand_file(path):
+            if mod.links:
+                wanted.setdefault(mod.id, [])
+                wanted[mod.id].extend(l for l in mod.links if l and l != mod.id)
+    conn = sqlite3.connect(db.DB_PATH)
+    c = conn.cursor()
+    c.execute("""SELECT node_id, id FROM zettel_nodes
+                 WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?""", (username, persona))
+    tag_to_pk = {}
+    for tag, pk in c.fetchall():
+        tag_to_pk.setdefault(tag, pk)
+        # lore nodes carry their brackets in node_id; typed links do not
+        tag_to_pk.setdefault(tag.strip("[]"), pk)
+    # prune edges with a missing end (global: a dangling edge is garbage for everyone)
+    c.execute("""DELETE FROM zettel_links
+                 WHERE source_node_id NOT IN (SELECT id FROM zettel_nodes)
+                    OR target_node_id NOT IN (SELECT id FROM zettel_nodes)""")
+    pruned = c.rowcount
+    # replace this persona's typed edges wholesale (the file is the source of truth)
+    c.execute("""DELETE FROM zettel_links
+                 WHERE relationship=? AND source_node_id IN
+                       (SELECT id FROM zettel_nodes WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?)""",
+              (TYPED_LINK_RELATIONSHIP, username, persona))
+    edges = 0
+    unresolved = set()
+    seen = set()
+    ts = str(__import__("datetime").datetime.now())
+    for src_tag, targets in wanted.items():
+        src_pk = tag_to_pk.get(src_tag)
+        if not src_pk:
+            continue
+        for tgt_tag in targets:
+            tgt_pk = tag_to_pk.get(tgt_tag)
+            if not tgt_pk:
+                unresolved.add(tgt_tag)
+                continue
+            if (src_pk, tgt_pk) in seen:
+                continue
+            seen.add((src_pk, tgt_pk))
+            c.execute("""INSERT OR IGNORE INTO zettel_links (id, source_node_id, target_node_id, relationship, strength, created_at, label)
+                         VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                      (str(uuid.uuid4()), src_pk, tgt_pk, TYPED_LINK_RELATIONSHIP, 1.0, ts, "core"))
+            edges += 1
+    conn.commit()
+    conn.close()
+    print(f"[ZETTEL COMPILER] typed links for {username}/{persona}: {edges} edge(s) from "
+          f"{len(wanted)} module(s); {len(unresolved)} unresolved tag(s); {pruned} dangling edge(s) pruned"
+          + (f" | unresolved: {sorted(unresolved)[:8]}" if unresolved else ""), flush=True)
+    return {"edges": edges, "unresolved": sorted(unresolved), "pruned": pruned}
 
 
 def query_knowledge_graph(username: str, persona: str, query_text: str, top_k: int = 5) -> str:
