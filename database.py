@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import os
 import re
+import threading
 import bcrypt
 import json
 from datetime import datetime, date, timedelta
@@ -17,13 +18,50 @@ from app_paths import DB_PATH, BACKUP_DIR, ensure_dirs
 # NOTE: this wrapper is keyed on STRING EQUALITY with DB_PATH. That is precisely why
 # every module must import the shared app_paths value instead of recomputing its own
 # path — a divergence here silently disables lock protection with no error at all.
+#
+# DB_PATH is looked up as a module global on every call, never captured, because
+# tests rebind `database.DB_PATH` at runtime (tests/test_zettel_retrieval.py:97).
+# The abspath/normcase comparison is a second chance for the same file reached by
+# a relative or differently-cased path; it is NOT a fuzzy match, and anything that
+# is not a plain filesystem path (":memory:", a URI, a backup target) falls through
+# untouched.
 _original_connect = sqlite3.connect
+
+
+def _is_app_db(target):
+    """True if `target` names the live application database."""
+    if not isinstance(target, str) or not target or target == ":memory:":
+        return False
+    if target == DB_PATH:
+        return True
+    if target.startswith("file:"):
+        return False
+    try:
+        return (os.path.normcase(os.path.abspath(target))
+                == os.path.normcase(os.path.abspath(DB_PATH)))
+    except (OSError, ValueError):
+        return False
+
+
 def _custom_connect(*args, **kwargs):
-    if len(args) > 0 and args[0] == DB_PATH:
+    target = args[0] if len(args) > 0 else kwargs.get('database')
+    is_app_db = _is_app_db(target)
+    if is_app_db:
         kwargs.setdefault('timeout', 30.0)
-    elif 'database' in kwargs and kwargs['database'] == DB_PATH:
-        kwargs.setdefault('timeout', 30.0)
-    return _original_connect(*args, **kwargs)
+    conn = _original_connect(*args, **kwargs)
+    if is_app_db:
+        # `synchronous` is a PER-CONNECTION pragma. It used to be set only on the
+        # short-lived _init_db connection, which is then closed — so every actual
+        # writer in the tree ran at the FULL default and paid a disk flush per
+        # commit that the code believed it had opted out of. journal_mode=WAL is
+        # persistent in the database file and is deliberately left where it is.
+        try:
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.Error:
+            pass   # a locked or unreadable file is the caller's problem, not ours
+    return conn
+
+
 sqlite3.connect = _custom_connect
 
 _BACKUP_PREFIX = "users_"
@@ -522,9 +560,60 @@ def reap_observations(ttl_days=None, keep_per_context=None, min_interval_hours=N
     return result
 
 
+# ── Schema-init once-guard ───────────────────────────────────────────────────
+# _init_db is ~13 CREATE IF NOT EXISTS statements, six PRAGMA table_info
+# migrations, six index creates and a commit. UserManager() is constructed
+# several times per chat message (main.py builds a fresh one per endpoint), so
+# that whole sequence was running on every construction for a schema that has
+# not changed since the first one.
+#
+# Keyed on the DB_PATH VALUE, not a bare boolean: tests rebind database.DB_PATH
+# to a throwaway file at runtime (tests/test_zettel_retrieval.py:97) and expect
+# the new file to get a schema. The membership test also re-arms if the file has
+# since disappeared, so a deleted-and-reused path is rebuilt rather than silently
+# left empty.
+_SCHEMA_INIT_LOCK = threading.Lock()
+_SCHEMA_INITIALISED = set()
+
+
+def _delete_deep_memories(c, username, persona):
+    """Scoped erasure of memory_engine's deep_memories rows.
+
+    deep_memories is the one table in this database that database.py does not
+    create — memory_engine._ensure_table() builds it lazily, only once a persona
+    with deep memory enabled has actually run. Both wipe paths here cascaded
+    every other per-persona table and left this one whole, so "wipe memories"
+    and "delete persona" both returned success while the richest store of what
+    the user said survived them.
+
+    The table genuinely may not exist (fresh install, deep memory never used), so
+    a missing table is not an error and must not abort the rest of the wipe.
+    memory_engine writes username/persona with exact case; the NOCASE comparison
+    here matches the convention used by every other delete in this file and stops
+    a wipe from missing rows over a capital letter.
+    """
+    try:
+        c.execute(
+            "DELETE FROM deep_memories WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?",
+            (username, persona))
+        return c.rowcount
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e).lower():
+            return 0
+        raise
+
+
 class UserManager:
     def __init__(self):
-        self._init_db()
+        path = DB_PATH
+        if path in _SCHEMA_INITIALISED and os.path.exists(path):
+            return
+        with _SCHEMA_INIT_LOCK:
+            # Re-checked under the lock: two threads can clear the fast path.
+            if path in _SCHEMA_INITIALISED and os.path.exists(path):
+                return
+            self._init_db()
+            _SCHEMA_INITIALISED.add(path)
 
     def _init_db(self):
         create = not os.path.exists(DB_PATH)
@@ -742,11 +831,25 @@ class UserManager:
 
         # ── Performance indexes (idempotent) ──
         # observations: get_observation_log filters (username,persona) and
-        # orders by id, twice per turn. zettel_nodes: filtered by
-        # (username,persona) on every retrieval. Without these, both are full
-        # scans that grow with history.
+        # orders by id, twice per turn. Without it that is a full scan that
+        # grows with history.
         c.execute("CREATE INDEX IF NOT EXISTS idx_obs_user_persona_id ON observations(username, persona, id)")
+        # idx_znodes_user_persona is BINARY-collated and therefore did NOT cover
+        # the zettel queries it was added for: every one of them filters
+        # `username COLLATE NOCASE=? AND persona COLLATE NOCASE=?`, and an index
+        # is only usable when its collation matches the collation of the
+        # comparison. EXPLAIN QUERY PLAN on get_zettel_nodes_for_persona reported
+        # SCAN, not SEARCH — the index existed and was never once used. The
+        # NOCASE pair below is what those queries actually bind to. The old index
+        # is kept: it still serves any exact-case lookup, and dropping an index
+        # that something outside this file may plan against buys nothing.
         c.execute("CREATE INDEX IF NOT EXISTS idx_znodes_user_persona ON zettel_nodes(username, persona)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_znodes_user_persona_nocase ON zettel_nodes(username COLLATE NOCASE, persona COLLATE NOCASE)")
+        # source_entry_id drives the cascade deletes in update/delete_zettel_entry
+        # and the recompile path in zettel_engine, all of which scanned the table.
+        c.execute("CREATE INDEX IF NOT EXISTS idx_znodes_source_entry ON zettel_nodes(source_entry_id)")
+        # zettel_entries has the same NOCASE filter in get_zettel_entries.
+        c.execute("CREATE INDEX IF NOT EXISTS idx_zentries_user_persona_nocase ON zettel_entries(username COLLATE NOCASE, persona COLLATE NOCASE)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_zlinks_source ON zettel_links(source_node_id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_zlinks_target ON zettel_links(target_node_id)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_conv_user_persona_id ON conversations(username, persona, id)")
@@ -816,8 +919,10 @@ class UserManager:
             c.execute("DELETE FROM zettel_fts WHERE node_db_id IN (SELECT id FROM zettel_nodes WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?)", (username, persona))
             c.execute("DELETE FROM zettel_nodes WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?", (username, persona))
             c.execute("DELETE FROM zettel_entries WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?", (username, persona))
+            # Deep memories live in a table memory_engine creates lazily; see the helper.
+            _delete_deep_memories(c, username, persona)
             conn.commit()
-            
+
             # Physically erase the deleted data from the raw database file on disk
             conn.execute("VACUUM")
             
@@ -1292,6 +1397,8 @@ class UserManager:
             c.execute("DELETE FROM zettel_fts WHERE node_db_id IN (SELECT id FROM zettel_nodes WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?)", (username, persona_key))
             c.execute("DELETE FROM zettel_nodes WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?", (username, persona_key))
             c.execute("DELETE FROM zettel_entries WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?", (username, persona_key))
+            # Deep memories live in a table memory_engine creates lazily; see the helper.
+            _delete_deep_memories(c, username, persona_key)
             # Delete the persona itself
             c.execute("DELETE FROM custom_personas WHERE username COLLATE NOCASE=? AND persona_key COLLATE NOCASE=?", (username, persona_key))
             conn.commit()
@@ -1462,15 +1569,49 @@ class UserManager:
             print(f"DB ERROR (get_zettel_entries): {e}")
             return []
 
+    # ── Scoped cascade for the two entry-mutating paths ──────────────────────
+    # WHY THE OWNER PREDICATE IS NOT OPTIONAL
+    #
+    # These cascades used to select their victims by `source_entry_id=?` ALONE.
+    # Only the final statement against zettel_entries carried the caller's
+    # username/persona, which reads as adequate right up until you notice that
+    # source_entry_id is not always a per-user identifier. zettel_engine:1557
+    # writes every node a persona curates about itself with the CONSTANT
+    # "source:persona_curation", and the behavioural compiler uses a shared FILE
+    # PATH. Those values collide across the entire installation, so one account
+    # calling DELETE /personas/{k}/lore/source:persona_curation removed the
+    # curated nodes, edges and FTS rows of EVERY user on the box — and then
+    # deleted nothing from zettel_entries (no such row) and returned success.
+    # The API layer's `if username != current_user` check never saw it, because
+    # the request was perfectly authentic; the ownership hole was below it.
+    #
+    # Scoping the node selection to the caller reduces the blast radius to the
+    # caller's own (username, persona), which is the most this endpoint is ever
+    # entitled to touch.
+    _NODE_SCOPE = ("SELECT id FROM zettel_nodes WHERE source_entry_id=? "
+                   "AND username COLLATE NOCASE=? AND persona COLLATE NOCASE=?")
+
+    def _cascade_entry_nodes(self, c, username, persona, entry_id):
+        """Remove links/FTS/nodes for one entry, within one owner's scope."""
+        scope = (entry_id, username, persona)
+        c.execute(f"DELETE FROM zettel_links WHERE source_node_id IN ({self._NODE_SCOPE}) "
+                  f"OR target_node_id IN ({self._NODE_SCOPE})", scope + scope)
+        c.execute(f"DELETE FROM zettel_fts WHERE node_db_id IN ({self._NODE_SCOPE})", scope)
+        c.execute("DELETE FROM zettel_nodes WHERE source_entry_id=? "
+                  "AND username COLLATE NOCASE=? AND persona COLLATE NOCASE=?", scope)
+
     def update_zettel_entry(self, username, persona, entry_id, title, raw_content):
         """Update a lore entry and reset processed flag to trigger re-processing."""
+        conn = None
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
+            # One transaction: the cascade and the entry write must not be
+            # separable, or a failure between them leaves an entry whose nodes
+            # are already gone and whose processed flag never got reset.
+            conn.execute("BEGIN IMMEDIATE")
             # Delete old nodes and links for this entry before re-processing
-            c.execute("DELETE FROM zettel_links WHERE source_node_id IN (SELECT id FROM zettel_nodes WHERE source_entry_id=?) OR target_node_id IN (SELECT id FROM zettel_nodes WHERE source_entry_id=?)", (entry_id, entry_id))
-            c.execute("DELETE FROM zettel_fts WHERE node_db_id IN (SELECT id FROM zettel_nodes WHERE source_entry_id=?)", (entry_id,))
-            c.execute("DELETE FROM zettel_nodes WHERE source_entry_id=?", (entry_id,))
+            self._cascade_entry_nodes(c, username, persona, entry_id)
             # Update the entry
             c.execute("""
                 UPDATE zettel_entries SET title=?, raw_content=?, processed=0
@@ -1481,22 +1622,34 @@ class UserManager:
             return True
         except Exception as e:
             print(f"DB ERROR (update_zettel_entry): {e}")
+            if conn is not None:
+                try:
+                    conn.rollback()
+                    conn.close()
+                except sqlite3.Error:
+                    pass
             return False
 
     def delete_zettel_entry(self, username, persona, entry_id):
         """Delete a lore entry and cascade-remove its nodes + links."""
+        conn = None
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
-            c.execute("DELETE FROM zettel_links WHERE source_node_id IN (SELECT id FROM zettel_nodes WHERE source_entry_id=?) OR target_node_id IN (SELECT id FROM zettel_nodes WHERE source_entry_id=?)", (entry_id, entry_id))
-            c.execute("DELETE FROM zettel_fts WHERE node_db_id IN (SELECT id FROM zettel_nodes WHERE source_entry_id=?)", (entry_id,))
-            c.execute("DELETE FROM zettel_nodes WHERE source_entry_id=?", (entry_id,))
+            conn.execute("BEGIN IMMEDIATE")
+            self._cascade_entry_nodes(c, username, persona, entry_id)
             c.execute("DELETE FROM zettel_entries WHERE id=? AND username COLLATE NOCASE=? AND persona COLLATE NOCASE=?", (entry_id, username, persona))
             conn.commit()
             conn.close()
             return True
         except Exception as e:
             print(f"DB ERROR (delete_zettel_entry): {e}")
+            if conn is not None:
+                try:
+                    conn.rollback()
+                    conn.close()
+                except sqlite3.Error:
+                    pass
             return False
 
     def add_zettel_node(self, node_id_pk, username, persona, node_id_tag, title, content, category, embedding_blob, source_entry_id, node_class='lore', trigger_type='PROBABILISTIC', content_hash=None):
