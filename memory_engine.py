@@ -154,7 +154,12 @@ def _ensure_table():
     # since the last application.
     if 'last_decay_at' not in columns:
         c.execute("ALTER TABLE deep_memories ADD COLUMN last_decay_at TEXT")
-        
+
+    # FIX(missing-index): deep_memories only had its PK. Every per-user query
+    # (recall, decay_cycle, connection lookups) filters on username/persona/
+    # active and full-scanned ALL users' rows to do it.
+    c.execute("CREATE INDEX IF NOT EXISTS idx_deep_mem_scope ON deep_memories(username, persona, active)")
+
     conn.commit()
     conn.close()
 

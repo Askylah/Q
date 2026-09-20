@@ -1317,7 +1317,13 @@ def query_knowledge_graph(username: str, persona: str, query_text: str, top_k: i
                 label = ln.get("label", "related")
                 target_class = ln.get("node_class", "lore")
                 
-                if strength >= LINK_FLOOR and label not in EXCLUDE_LABELS and target_class == allowed_class:
+                # FIX(curated-invisible): a link the persona deliberately made via
+                # create_curated_link defaults to strength 0.5 and label "curated" —
+                # below LINK_FLOOR, it would never be traversed here even though the
+                # persona explicitly asserted the relationship. A curated label is
+                # exempt from the strength floor (it still must pass class isolation,
+                # the fan-out cap, and dedup below).
+                if (strength >= LINK_FLOOR or label == "curated") and label not in EXCLUDE_LABELS and target_class == allowed_class:
                     if ln["id"] not in seen_expand_ids:
                         if fanout_count < EXPAND_FANOUT:
                             seen_expand_ids.add(ln["id"])
@@ -1562,7 +1568,53 @@ def store_curated_observation(username: str, persona: str, title: str, content: 
     if not success:
         return f"DATABASE_ERROR: Failed to commit node {node_id_tag} to SQLite."
 
-    # 4. Incremental Matrix Append (Zero Full Invalidation)
+    # 4a. Auto-link against existing SAME-persona lore nodes via embedding
+    # similarity, BEFORE the new node enters the cache (existing_nodes was
+    # fetched above and does not include it). Same policy as process_entry
+    # step 6b: top matches >= AUTO_LINK_SIMILARITY_THRESHOLD, max 3, strongest
+    # first. Without this, every curated note is an isolated node forever and
+    # a background daemon treats it as a permanent "gap".
+    # FIX(curated-orphans): store_curated_observation created no links.
+    links_made = 0
+    if shared_model and embedding is not None:
+        try:
+            # existing_nodes above was fetched with include_embeddings=False
+            # (cheap, for the tag-uniqueness check) -- re-fetch WITH blobs for
+            # the similarity pass. This still runs once, before the new node
+            # is appended to the cache/DB result set.
+            existing_with_blobs = db_manager.get_zettel_nodes_for_persona(username, persona, include_embeddings=True)
+            lore_candidates = [
+                n for n in existing_with_blobs
+                if n.get("node_class") == "lore" and n.get("embedding") and n["id"] != node_id_pk
+            ]
+            if lore_candidates:
+                candidate_vecs = np.array([
+                    np.frombuffer(n["embedding"], dtype=np.float32)
+                    for n in lore_candidates
+                ])
+                sims = cosine_similarity(embedding.reshape(1, -1), candidate_vecs).flatten()
+                top_indices = np.argsort(sims)[::-1]
+                for idx in top_indices:
+                    if sims[idx] < AUTO_LINK_SIMILARITY_THRESHOLD:
+                        break
+                    if links_made >= 3:
+                        break
+                    target = lore_candidates[idx]
+                    added = db_manager.add_zettel_link(
+                        link_id=str(uuid.uuid4()),
+                        source_node_id=node_id_pk,
+                        target_node_id=target["id"],
+                        relationship="related_to",
+                        strength=round(float(sims[idx]), 3),
+                        label=get_strength_label(sims[idx])
+                    )
+                    if added:
+                        links_made += 1
+        except Exception as e:
+            # A failure here must not fail the store — the node is already committed.
+            print(f"[ZETTEL CURATION] Auto-link on write failed (non-fatal): {e}")
+
+    # 4b. Incremental Matrix Append (Zero Full Invalidation)
     if shared_model and embedding is not None:
         bulk_append_to_zettel_cache(username, persona, [{
             "id": node_id_pk,
@@ -1570,7 +1622,8 @@ def store_curated_observation(username: str, persona: str, title: str, content: 
             "embedding": embedding
         }])
 
-    return f"SUCCESS: Stored observation node {node_id_tag} ('{clean_title}'). Node is indexed in knowledge graph."
+    return (f"SUCCESS: Stored observation node {node_id_tag} ('{clean_title}'). "
+            f"Node is indexed in knowledge graph. Auto-linked to {links_made} related node(s).")
 
 
 def create_curated_link(username: str, persona: str, source_tag: str, target_tag: str, relationship: str = "relates_to", strength: float = 0.5) -> str:

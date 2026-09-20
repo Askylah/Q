@@ -359,6 +359,15 @@ async def delete_persona(persona_key: str, username: str = "default_user", curre
         raise HTTPException(status_code=403, detail="Username mismatch")
     user_manager = db.UserManager()
     success = user_manager.delete_custom_persona(username, persona_key)
+
+    # FIX(stale-vectors): a deleted persona's nodes are gone from SQLite; drop
+    # its cache too or the vectors linger in-process/Redis indefinitely.
+    try:
+        import zettel_engine
+        zettel_engine.invalidate_zettel_cache(username, persona_key)
+    except Exception as e:
+        print(f"[PERSONA DELETE ERROR] Failed to invalidate zettel cache: {e}")
+
     if not success:
         raise HTTPException(status_code=400, detail="Failed to delete persona")
     return {"status": "success", "message": f"Persona {persona_key} deleted"}
@@ -663,7 +672,16 @@ def update_lore_entry(persona_key: str, entry_id: str, payload: LoreEntryPayload
     )
     if not success:
         raise HTTPException(status_code=400, detail="Failed to update lore entry")
-    
+
+    # FIX(stale-vectors): reprocessing deletes/replaces this entry's nodes,
+    # so the in-process/Redis embedding matrix must drop before the
+    # background reprocess thread starts populating it again.
+    try:
+        import zettel_engine
+        zettel_engine.invalidate_zettel_cache(payload.username, persona_key)
+    except Exception as e:
+        print(f"[LORE UPDATE ERROR] Failed to invalidate zettel cache: {e}")
+
     api_keys = {
         "openrouter": os.getenv("OPENROUTER_API_KEY", ""),
         "openai": os.getenv("OPENAI_API_KEY", ""),
@@ -694,6 +712,15 @@ def delete_lore_entry(persona_key: str, entry_id: str, username: str = "default_
     success = db_conn.delete_zettel_entry(username, persona_key, entry_id)
     if not success:
         raise HTTPException(status_code=400, detail="Failed to delete lore entry")
+
+    # FIX(stale-vectors): deletion drops nodes from SQLite; the cache must be
+    # invalidated too or the deleted nodes' vectors keep ranking in queries.
+    try:
+        import zettel_engine
+        zettel_engine.invalidate_zettel_cache(username, persona_key)
+    except Exception as e:
+        print(f"[LORE DELETE ERROR] Failed to invalidate zettel cache: {e}")
+
     return {"status": "success", "message": "Lore entry deleted"}
 
 # ============================================================
