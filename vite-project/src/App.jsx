@@ -6,6 +6,7 @@ import Editor from '@monaco-editor/react'
 function ModelSelector({ value, onChange, placeholder, style, openRouterModels, appTheme }) {
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [isSearching, setIsSearching] = useState(false);
   const containerRef = useRef(null);
 
   useEffect(() => {
@@ -16,64 +17,82 @@ function ModelSelector({ value, onChange, placeholder, style, openRouterModels, 
     const handleOutsideClick = (e) => {
       if (containerRef.current && !containerRef.current.contains(e.target)) {
         setIsOpen(false);
+        setIsSearching(false);
+        setSearchQuery(value || "");
       }
     };
     document.addEventListener("mousedown", handleOutsideClick);
     return () => document.removeEventListener("mousedown", handleOutsideClick);
-  }, []);
+  }, [value]);
 
   const directGoogle = [
+    { id: "google/gemini-3.5-flash-preview", name: "Gemini 3.5 Flash Preview" },
+    { id: "google/gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview" },
     { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro (Direct)" },
-    { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash (Direct)" },
-    { id: "gemini-1.5-pro", name: "Gemini 1.5 Pro (Direct)" },
-    { id: "gemini-1.5-flash", name: "Gemini 1.5 Flash (Direct)" }
+    { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash (Direct)" }
   ];
 
   const directAnthropic = [
-    { id: "claude-3-5-sonnet-latest", name: "Claude 3.5 Sonnet (Direct)" },
-    { id: "claude-3-5-haiku-latest", name: "Claude 3.5 Haiku (Direct)" },
-    { id: "claude-3-opus-latest", name: "Claude 3 Opus (Direct)" }
+    { id: "anthropic/claude-sonnet-4.6", name: "Claude Sonnet 4.6" },
+    { id: "anthropic/claude-opus-4.6", name: "Claude Opus 4.6" },
+    { id: "anthropic/claude-sonnet-4.5", name: "Claude Sonnet 4.5" },
+    { id: "anthropic/claude-haiku-4.5", name: "Claude Haiku 4.5" },
+    { id: "claude-3-5-sonnet-latest", name: "Claude 3.5 Sonnet (Direct)" }
+  ];
+
+  const directOpenAI = [
+    { id: "openai/gpt-5.3-codex", name: "GPT-5.3 Codex" },
+    { id: "openai/gpt-5.2", name: "GPT-5.2" },
+    { id: "openai/gpt-5.1", name: "GPT-5.1" },
+    { id: "openai/gpt-4o", name: "GPT-4o (Direct)" }
   ];
 
   const directGrok = [
-    { id: "grok-2-latest", name: "Grok 2 (Direct)" },
-    { id: "grok-beta", name: "Grok Beta (Direct)" }
+    { id: "x-ai/grok-4.20", name: "Grok 4.20 (beta)" },
+    { id: "x-ai/grok-4.1-fast", name: "Grok 4.1 Fast" },
+    { id: "grok-2-latest", name: "Grok 2 (Direct)" }
   ];
 
   const openRouterPresets = [
+    { id: "google/gemini-3.5-flash-preview", name: "Gemini 3.5 Flash (OpenRouter)" },
     { id: "google/gemini-3.1-pro-preview", name: "Gemini 3.1 Pro (OpenRouter)" },
     { id: "google/gemini-3-flash-preview", name: "Gemini 3 Flash (OpenRouter)" },
-    { id: "anthropic/claude-3.5-sonnet", name: "Claude 3.5 Sonnet (OpenRouter)" },
+    { id: "anthropic/claude-sonnet-4.6", name: "Claude Sonnet 4.6 (OpenRouter)" },
+    { id: "anthropic/claude-sonnet-4.5", name: "Claude Sonnet 4.5 (OpenRouter)" },
+    { id: "openai/gpt-5.3-codex", name: "GPT-5.3 Codex (OpenRouter)" },
     { id: "deepseek/deepseek-r1", name: "DeepSeek R1 (OpenRouter)" },
-    { id: "deepseek/deepseek-chat", name: "DeepSeek V3 (OpenRouter)" },
-    { id: "openai/gpt-4o", name: "GPT-4o (OpenRouter)" }
+    { id: "deepseek/deepseek-chat", name: "DeepSeek V3 (OpenRouter)" }
   ];
 
-  const allLocalPresets = [...directGoogle, ...directAnthropic, ...directGrok, ...openRouterPresets];
+  const allLocalPresets = [...directGoogle, ...directAnthropic, ...directOpenAI, ...directGrok, ...openRouterPresets];
 
-  const query = searchQuery.toLowerCase();
+  // If user hasn't actively typed, show the full catalog!
+  const query = isSearching ? searchQuery.toLowerCase().trim() : "";
   
-  const filteredGoogle = directGoogle.filter(m => m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query));
-  const filteredAnthropic = directAnthropic.filter(m => m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query));
-  const filteredGrok = directGrok.filter(m => m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query));
-  const filteredORPresets = openRouterPresets.filter(m => m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query));
+  const filteredGoogle = directGoogle.filter(m => !query || m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query));
+  const filteredAnthropic = directAnthropic.filter(m => !query || m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query));
+  const filteredOpenAI = directOpenAI.filter(m => !query || m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query));
+  const filteredGrok = directGrok.filter(m => !query || m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query));
+  const filteredORPresets = openRouterPresets.filter(m => !query || m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query));
 
   const filteredORList = (openRouterModels || []).filter(m => 
     !allLocalPresets.some(p => p.id === m.id) &&
-    (m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query))
+    (!query || m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query))
   );
 
-  const totalMatches = filteredGoogle.length + filteredAnthropic.length + filteredGrok.length + filteredORPresets.length + filteredORList.length;
+  const totalMatches = filteredGoogle.length + filteredAnthropic.length + filteredOpenAI.length + filteredGrok.length + filteredORPresets.length + filteredORList.length;
 
   const handleSelect = (id) => {
     onChange(id);
     setSearchQuery(id);
+    setIsSearching(false);
     setIsOpen(false);
   };
 
   const handleInputChange = (e) => {
     const val = e.target.value;
     setSearchQuery(val);
+    setIsSearching(true);
     onChange(val);
     setIsOpen(true);
   };
@@ -84,6 +103,38 @@ function ModelSelector({ value, onChange, placeholder, style, openRouterModels, 
   const hoverBg = isDark ? 'rgba(176,96,255,0.2)' : 'rgba(176,96,255,0.1)';
   const textColor = isDark ? '#f2f3f5' : '#313338';
   const textMuted = isDark ? '#949ba4' : '#5c5e66';
+  const activeColor = appTheme === 'void' ? '#ff007f' : '#5865f2';
+
+  const renderModelItem = (m) => {
+    const isSelected = m.id === value;
+    return (
+      <div
+        key={m.id}
+        onClick={() => handleSelect(m.id)}
+        style={{
+          padding: '6px 12px',
+          fontSize: '12px',
+          color: isSelected ? activeColor : textColor,
+          cursor: 'pointer',
+          background: isSelected ? (isDark ? 'rgba(255,0,127,0.12)' : 'rgba(88,101,242,0.1)') : 'transparent',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          transition: 'background 0.15s ease'
+        }}
+        onMouseEnter={e => e.currentTarget.style.background = hoverBg}
+        onMouseLeave={e => e.currentTarget.style.background = isSelected ? (isDark ? 'rgba(255,0,127,0.12)' : 'rgba(88,101,242,0.1)') : 'transparent'}
+      >
+        <div>
+          <div style={{ fontWeight: isSelected ? '700' : '500' }}>{m.name}</div>
+          <div style={{ fontSize: '10px', color: textMuted }}>{m.id}</div>
+        </div>
+        {isSelected && (
+          <span className="material-icons" style={{ fontSize: '16px', color: activeColor }}>check</span>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div ref={containerRef} style={{ position: 'relative', width: '100%' }}>
@@ -94,11 +145,18 @@ function ModelSelector({ value, onChange, placeholder, style, openRouterModels, 
           placeholder={placeholder}
           value={searchQuery}
           onChange={handleInputChange}
-          onFocus={() => setIsOpen(true)}
+          onFocus={(e) => {
+            setIsSearching(false);
+            setIsOpen(true);
+            e.target.select();
+          }}
         />
         <button
           type="button"
-          onClick={() => setIsOpen(!isOpen)}
+          onClick={() => {
+            setIsSearching(false);
+            setIsOpen(!isOpen);
+          }}
           style={{
             position: 'absolute',
             right: '8px',
@@ -126,115 +184,92 @@ function ModelSelector({ value, onChange, placeholder, style, openRouterModels, 
             border: `1px solid ${borderCol}`,
             borderRadius: '6px',
             boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-            maxHeight: '220px',
+            maxHeight: '260px',
             overflowY: 'auto',
             zIndex: 99999,
             padding: '4px 0'
           }}
         >
+          {/* Custom typed model option if user is searching and typed text doesn't match an existing preset */}
+          {isSearching && searchQuery.trim() && !allLocalPresets.some(p => p.id.toLowerCase() === searchQuery.trim().toLowerCase()) && (
+            <div
+              onClick={() => handleSelect(searchQuery.trim())}
+              style={{
+                padding: '8px 12px',
+                fontSize: '12px',
+                color: appTheme === 'void' ? '#00cc66' : '#23a55a',
+                cursor: 'pointer',
+                background: isDark ? 'rgba(0,204,102,0.1)' : 'rgba(35,165,90,0.1)',
+                borderBottom: `1px solid ${borderCol}`,
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px'
+              }}
+              onMouseEnter={e => e.currentTarget.style.background = isDark ? 'rgba(0,204,102,0.2)' : 'rgba(35,165,90,0.2)'}
+              onMouseLeave={e => e.currentTarget.style.background = isDark ? 'rgba(0,204,102,0.1)' : 'rgba(35,165,90,0.1)'}
+            >
+              <span className="material-icons" style={{ fontSize: '15px', color: 'inherit' }}>edit</span>
+              <span>Use custom model: <strong>{searchQuery.trim()}</strong></span>
+            </div>
+          )}
+
           {totalMatches === 0 ? (
             <div style={{ padding: '8px 12px', fontSize: '12px', color: textMuted, fontStyle: 'italic' }}>
-              No matching models. Type to use custom ID.
+              No presets found matching "{searchQuery}". Press Enter or click above to use custom model.
             </div>
           ) : (
             <>
               {filteredGoogle.length > 0 && (
                 <>
                   <div style={{ padding: '6px 12px 2px 12px', fontSize: '9px', color: '#b060ff', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                    Google Direct (Native)
+                    Google (Gemini)
                   </div>
-                  {filteredGoogle.map(m => (
-                    <div
-                      key={m.id}
-                      onClick={() => handleSelect(m.id)}
-                      style={{ padding: '6px 12px', fontSize: '12px', color: textColor, cursor: 'pointer' }}
-                      onMouseEnter={e => e.currentTarget.style.background = hoverBg}
-                      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-                    >
-                      <div style={{ fontWeight: '500' }}>{m.name}</div>
-                      <div style={{ fontSize: '10px', color: textMuted }}>{m.id}</div>
-                    </div>
-                  ))}
+                  {filteredGoogle.map(renderModelItem)}
                 </>
               )}
 
               {filteredAnthropic.length > 0 && (
                 <>
                   <div style={{ padding: '8px 12px 2px 12px', fontSize: '9px', color: '#b060ff', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.05em', borderTop: `1px solid ${borderCol}`, marginTop: '4px' }}>
-                    Anthropic Direct (Native)
+                    Anthropic (Claude)
                   </div>
-                  {filteredAnthropic.map(m => (
-                    <div
-                      key={m.id}
-                      onClick={() => handleSelect(m.id)}
-                      style={{ padding: '6px 12px', fontSize: '12px', color: textColor, cursor: 'pointer' }}
-                      onMouseEnter={e => e.currentTarget.style.background = hoverBg}
-                      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-                    >
-                      <div style={{ fontWeight: '500' }}>{m.name}</div>
-                      <div style={{ fontSize: '10px', color: textMuted }}>{m.id}</div>
-                    </div>
-                  ))}
+                  {filteredAnthropic.map(renderModelItem)}
+                </>
+              )}
+
+              {filteredOpenAI.length > 0 && (
+                <>
+                  <div style={{ padding: '8px 12px 2px 12px', fontSize: '9px', color: '#b060ff', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.05em', borderTop: `1px solid ${borderCol}`, marginTop: '4px' }}>
+                    OpenAI
+                  </div>
+                  {filteredOpenAI.map(renderModelItem)}
                 </>
               )}
 
               {filteredGrok.length > 0 && (
                 <>
                   <div style={{ padding: '8px 12px 2px 12px', fontSize: '9px', color: '#b060ff', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.05em', borderTop: `1px solid ${borderCol}`, marginTop: '4px' }}>
-                    Grok Direct (Native)
+                    xAI (Grok)
                   </div>
-                  {filteredGrok.map(m => (
-                    <div
-                      key={m.id}
-                      onClick={() => handleSelect(m.id)}
-                      style={{ padding: '6px 12px', fontSize: '12px', color: textColor, cursor: 'pointer' }}
-                      onMouseEnter={e => e.currentTarget.style.background = hoverBg}
-                      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-                    >
-                      <div style={{ fontWeight: '500' }}>{m.name}</div>
-                      <div style={{ fontSize: '10px', color: textMuted }}>{m.id}</div>
-                    </div>
-                  ))}
+                  {filteredGrok.map(renderModelItem)}
                 </>
               )}
 
               {filteredORPresets.length > 0 && (
                 <>
                   <div style={{ padding: '8px 12px 2px 12px', fontSize: '9px', color: '#b060ff', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.05em', borderTop: `1px solid ${borderCol}`, marginTop: '4px' }}>
-                    OpenRouter Presets
+                    OpenRouter Flagship Presets
                   </div>
-                  {filteredORPresets.map(m => (
-                    <div
-                      key={m.id}
-                      onClick={() => handleSelect(m.id)}
-                      style={{ padding: '6px 12px', fontSize: '12px', color: textColor, cursor: 'pointer' }}
-                      onMouseEnter={e => e.currentTarget.style.background = hoverBg}
-                      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-                    >
-                      <div style={{ fontWeight: '500' }}>{m.name}</div>
-                      <div style={{ fontSize: '10px', color: textMuted }}>{m.id}</div>
-                    </div>
-                  ))}
+                  {filteredORPresets.map(renderModelItem)}
                 </>
               )}
 
               {filteredORList.length > 0 && (
                 <>
                   <div style={{ padding: '8px 12px 2px 12px', fontSize: '9px', color: '#b060ff', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.05em', borderTop: `1px solid ${borderCol}`, marginTop: '4px' }}>
-                    OpenRouter Catalog
+                    OpenRouter Full Catalog ({filteredORList.length})
                   </div>
-                  {filteredORList.map(m => (
-                    <div
-                      key={m.id}
-                      onClick={() => handleSelect(m.id)}
-                      style={{ padding: '6px 12px', fontSize: '12px', color: textColor, cursor: 'pointer' }}
-                      onMouseEnter={e => e.currentTarget.style.background = hoverBg}
-                      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-                    >
-                      <div style={{ fontWeight: '500' }}>{m.name}</div>
-                      <div style={{ fontSize: '10px', color: textMuted }}>{m.id}</div>
-                    </div>
-                  ))}
+                  {filteredORList.map(renderModelItem)}
                 </>
               )}
             </>
@@ -831,12 +866,19 @@ function EcosystemHealthPanel({ appTheme, USERNAME, S }) {
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', maxHeight: '250px', overflowY: 'auto', paddingRight: '4px' }}>
             {recentDissonances.map((log) => {
-              const badgeColor = log.event_type === 'entropic_gap' 
+              // Green is the brain thinking. Red is the brain fighting itself. Don't confuse them.
+              const isGap = log.event_type === 'entropic_gap';
+              const isReflection = log.event_type === 'internal_reflection';
+              const badgeColor = isGap
                 ? (appTheme === 'void' ? '#ff007f' : '#f0b232')
-                : (appTheme === 'void' ? '#b060ff' : '#f23f42');
-              const badgeBg = log.event_type === 'entropic_gap' 
-                ? 'rgba(240,178,50,0.12)' 
-                : 'rgba(242,63,66,0.12)';
+                : isReflection
+                  ? (appTheme === 'void' ? '#00cc66' : '#23a55a')
+                  : (appTheme === 'void' ? '#b060ff' : '#f23f42');
+              const badgeBg = isGap
+                ? 'rgba(240,178,50,0.12)'
+                : isReflection
+                  ? 'rgba(0,204,102,0.12)'
+                  : 'rgba(242,63,66,0.12)';
                 
               return (
                 <div key={log.id} style={{ 
@@ -877,7 +919,7 @@ function EcosystemHealthPanel({ appTheme, USERNAME, S }) {
                   </div>
                   {log.reflection_score !== null && (
                     <div style={{ marginTop: '6px', fontSize: '10px', color: mutedTextColor }}>
-                      Dissonance Reflection Score: <strong style={{ color: badgeColor }}>{log.reflection_score}/10</strong>
+                      Reflection Score: <strong style={{ color: badgeColor }}>{Math.round(log.reflection_score * 100)}%</strong>
                     </div>
                   )}
                 </div>
@@ -885,6 +927,934 @@ function EcosystemHealthPanel({ appTheme, USERNAME, S }) {
             })}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function ProviderManagementPanel({ appTheme, USERNAME, S, userSettings, setUserSettings, openRouterModels, isMobile }) {
+  const [oauthData, setOauthData] = useState(null);
+  const [providerData, setProviderData] = useState({ locked: false, providers: [] });
+  const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState({});
+  const [actionFeedback, setActionFeedback] = useState({});
+  const [showManualKey, setShowManualKey] = useState({});
+  const [manualKeys, setManualKeys] = useState({});
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
+
+  // Daemon background models state
+  const [daemonNli, setDaemonNli] = useState(userSettings?.daemon_nli_model || 'google/gemini-3-flash-preview');
+  const [daemonMonologue, setDaemonMonologue] = useState(userSettings?.daemon_monologue_model || 'google/gemini-3-flash-preview');
+  const [savingDaemon, setSavingDaemon] = useState(false);
+  const [daemonStatus, setDaemonStatus] = useState(null);
+
+  useEffect(() => {
+    if (userSettings?.daemon_nli_model) {
+      setDaemonNli(userSettings.daemon_nli_model);
+    }
+    if (userSettings?.daemon_monologue_model) {
+      setDaemonMonologue(userSettings.daemon_monologue_model);
+    }
+  }, [userSettings]);
+
+  // Load both OAuth overview and provider registry status
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    Promise.all([
+      api.fetchOAuthOverview(),
+      api.fetchProviders()
+    ])
+      .then(([oauthRes, provRes]) => {
+        if (!active) return;
+        if (oauthRes) setOauthData(oauthRes);
+        if (provRes) setProviderData(provRes);
+        setLoading(false);
+      })
+      .catch(err => {
+        if (!active) return;
+        console.error("OAuth status fetch error:", err);
+        setLoading(false);
+      });
+    return () => { active = false; };
+  }, [refreshTrigger]);
+
+  // Listen for popup OAuth postMessage callbacks
+  useEffect(() => {
+    const handleOAuthMessage = (event) => {
+      if (event.data && event.data.type === 'oauth_complete') {
+        const prov = event.data.provider || 'provider';
+        setActionFeedback(prev => ({
+          ...prev,
+          [prov]: { type: 'success', text: `Successfully authorized and connected ${prov.toUpperCase()} via OAuth!` }
+        }));
+        setRefreshTrigger(prev => prev + 1);
+      }
+    };
+    window.addEventListener('message', handleOAuthMessage);
+    return () => window.removeEventListener('message', handleOAuthMessage);
+  }, []);
+
+  // 1. OPENROUTER OAUTH PKCE POPUP FLOW
+  const handleOpenRouterOAuth = async () => {
+    setActionLoading(prev => ({ ...prev, openrouter: 'oauth' }));
+    setActionFeedback(prev => ({ ...prev, openrouter: null }));
+    try {
+      const res = await api.startOAuth('openrouter');
+      if (res && res.auth_url) {
+        const width = 600, height = 750;
+        const left = window.screen.width / 2 - width / 2;
+        const top = window.screen.height / 2 - height / 2;
+        window.open(
+          res.auth_url,
+          'openrouter_oauth',
+          `toolbar=no,location=no,directories=no,status=no,menubar=no,scrollbars=yes,resizable=yes,width=${width},height=${height},top=${top},left=${left}`
+        );
+      } else {
+        throw new Error("Did not receive authorization URL from server");
+      }
+    } catch (err) {
+      setActionFeedback(prev => ({
+        ...prev,
+        openrouter: { type: 'error', text: err.message || 'Failed to initiate OpenRouter OAuth' }
+      }));
+    } finally {
+      setActionLoading(prev => ({ ...prev, openrouter: null }));
+    }
+  };
+
+  // 2. ANTHROPIC CLAUDE CODE OAUTH IMPORT
+  const handleAnthropicImport = async () => {
+    setActionLoading(prev => ({ ...prev, anthropic: 'import' }));
+    setActionFeedback(prev => ({ ...prev, anthropic: null }));
+    try {
+      const res = await api.importSession('anthropic');
+      setActionFeedback(prev => ({
+        ...prev,
+        anthropic: {
+          type: 'success',
+          text: `Connected Claude Code OAuth (${res.subscription || 'active session'})!`
+        }
+      }));
+      setRefreshTrigger(prev => prev + 1);
+    } catch (err) {
+      setActionFeedback(prev => ({
+        ...prev,
+        anthropic: { type: 'error', text: err.message || 'Failed to import Claude Code session' }
+      }));
+    } finally {
+      setActionLoading(prev => ({ ...prev, anthropic: null }));
+    }
+  };
+
+  // 3. GOOGLE ANTIGRAVITY SESSION IMPORT
+  const handleGoogleImport = async () => {
+    setActionLoading(prev => ({ ...prev, google: 'import' }));
+    setActionFeedback(prev => ({ ...prev, google: null }));
+    try {
+      const res = await api.importSession('google');
+      setActionFeedback(prev => ({
+        ...prev,
+        google: {
+          type: 'success',
+          text: `Connected Google (${res.account || 'Antigravity Session'})!`
+        }
+      }));
+      setRefreshTrigger(prev => prev + 1);
+    } catch (err) {
+      setActionFeedback(prev => ({
+        ...prev,
+        google: { type: 'error', text: err.message || 'Failed to import Google session' }
+      }));
+    } finally {
+      setActionLoading(prev => ({ ...prev, google: null }));
+    }
+  };
+
+  // 4. MANUAL KEY FALLBACK CONNECT
+  const handleManualConnect = async (providerId, label) => {
+    const key = (manualKeys[providerId] || '').trim();
+    if (!key) {
+      setActionFeedback(prev => ({
+        ...prev,
+        [providerId]: { type: 'error', text: 'Please enter a valid key' }
+      }));
+      return;
+    }
+
+    setActionLoading(prev => ({ ...prev, [providerId]: 'manual' }));
+    setActionFeedback(prev => ({ ...prev, [providerId]: null }));
+
+    try {
+      const res = await api.connectProvider(providerId, key, false);
+      setManualKeys(prev => ({ ...prev, [providerId]: '' }));
+      setShowManualKey(prev => ({ ...prev, [providerId]: false }));
+      setActionFeedback(prev => ({
+        ...prev,
+        [providerId]: { type: 'success', text: `Saved and encrypted ${label || providerId} key in vault` }
+      }));
+      setRefreshTrigger(prev => prev + 1);
+    } catch (err) {
+      setActionFeedback(prev => ({
+        ...prev,
+        [providerId]: { type: 'error', text: err.message || 'Connection failed' }
+      }));
+    } finally {
+      setActionLoading(prev => ({ ...prev, [providerId]: null }));
+    }
+  };
+
+  // 4. DISCONNECT
+  const handleDisconnect = async (providerId, label) => {
+    if (!confirm(`Are you sure you want to disconnect and sign out of ${label || providerId}?`)) {
+      return;
+    }
+
+    setActionLoading(prev => ({ ...prev, [providerId]: 'disconnecting' }));
+    setActionFeedback(prev => ({ ...prev, [providerId]: null }));
+
+    try {
+      await api.disconnectProvider(providerId);
+      setActionFeedback(prev => ({
+        ...prev,
+        [providerId]: { type: 'success', text: `Disconnected ${label || providerId}` }
+      }));
+      setRefreshTrigger(prev => prev + 1);
+    } catch (err) {
+      setActionFeedback(prev => ({
+        ...prev,
+        [providerId]: { type: 'error', text: err.message || 'Disconnection failed' }
+      }));
+    } finally {
+      setActionLoading(prev => ({ ...prev, [providerId]: null }));
+    }
+  };
+
+  // 5. SAVE DAEMON MODELS
+  const handleSaveDaemon = async () => {
+    setSavingDaemon(true);
+    setDaemonStatus(null);
+    try {
+      const newSettings = {
+        ...userSettings,
+        daemon_nli_model: daemonNli,
+        daemon_monologue_model: daemonMonologue
+      };
+      if (setUserSettings) setUserSettings(newSettings);
+      await api.updateUserSettings(USERNAME, {
+        daemon_nli_model: daemonNli,
+        daemon_monologue_model: daemonMonologue
+      });
+      setDaemonStatus({ type: 'success', text: 'Daemon background models updated' });
+    } catch (err) {
+      setDaemonStatus({ type: 'error', text: err.message || 'Failed to save settings' });
+    } finally {
+      setSavingDaemon(false);
+      setTimeout(() => setDaemonStatus(null), 4000);
+    }
+  };
+
+  // THEME COLOR TOKENS
+  const cardBg = appTheme === 'void' ? 'rgba(26, 10, 42, 0.45)' : appTheme === 'q-dark' ? '#18191c' : '#f2f3f5';
+  const cardBorder = appTheme === 'void' ? '1px solid #2a0e4a' : `1px solid ${appTheme === 'q-dark' ? '#1f1f24' : '#e3e5e8'}`;
+  const accentColor = appTheme === 'void' ? '#ff007f' : '#5865f2';
+  const textColor = appTheme === 'q-light' ? '#2e3338' : appTheme === 'q-dark' ? '#dcddde' : '#00cc66';
+  const textMuted = appTheme === 'q-light' ? '#6d6f78' : appTheme === 'q-dark' ? '#72767d' : 'rgba(0,204,102,0.6)';
+  const inputBg = appTheme === 'q-light' ? '#ffffff' : appTheme === 'q-dark' ? '#020203' : '#0d0d0d';
+  const inputBorder = appTheme === 'q-dark' ? '1px solid #1f1f24' : appTheme === 'q-light' ? '1px solid #d1d3d6' : '1px solid #1a0a2a';
+
+  const providersStatus = (providerData.providers || []);
+  const getProv = (id) => providersStatus.find(p => p.id === id) || {};
+
+  const anthropicProv = getProv('anthropic');
+  const openrouterProv = getProv('openrouter');
+  const googleProv = getProv('google');
+
+  const detectedClaude = oauthData?.providers?.anthropic?.detected_session;
+  const detectedGoogle = oauthData?.providers?.google?.detected_session;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', fontFamily: 'Inter, sans-serif' }}>
+      {/* HEADER */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px' }}>
+        <div>
+          <div style={S.sectionTitle}>Connect a Provider</div>
+          <div style={S.sectionSub}>
+            Sign in externally via OAuth (like Antigravity and Claude Code) to authorize your accounts.
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => setRefreshTrigger(prev => prev + 1)}
+          style={{
+            background: 'transparent',
+            border: `1px solid ${accentColor}`,
+            borderRadius: '4px',
+            color: accentColor,
+            padding: '6px 12px',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            fontSize: '12px',
+            transition: 'background 0.2s',
+            fontFamily: 'Inter, sans-serif'
+          }}
+          onMouseEnter={e => e.currentTarget.style.background = appTheme === 'void' ? 'rgba(255,0,127,0.1)' : 'rgba(88,101,242,0.1)'}
+          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+        >
+          <span className={`material-icons ${loading ? 'rotating' : ''}`} style={{ fontSize: '14px' }}>sync</span>
+          Refresh Status
+        </button>
+      </div>
+
+      {/* 1. ANTHROPIC OAUTH CARD */}
+      <div style={{
+        background: cardBg,
+        border: anthropicProv.connected
+          ? (appTheme === 'void' ? '1px solid rgba(0,204,102,0.4)' : '1px solid #23a55a')
+          : cardBorder,
+        borderRadius: '8px',
+        padding: '20px',
+        transition: 'border-color 0.15s ease'
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px' }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span style={{ fontSize: '24px' }}>⚡</span>
+              <div>
+                <div style={{ fontWeight: '700', fontSize: '16px', color: textColor }}>
+                  Anthropic (Claude)
+                </div>
+                <div style={{ fontSize: '12px', color: textMuted }}>
+                  Sonnet, Haiku, Opus models via Claude Code or OAuth.
+                </div>
+              </div>
+            </div>
+
+            {/* DETECTED CLAUDE CODE SESSION BADGE */}
+            {detectedClaude && !anthropicProv.connected && (
+              <div style={{
+                marginTop: '10px',
+                padding: '6px 10px',
+                borderRadius: '4px',
+                background: appTheme === 'void' ? 'rgba(0, 204, 102, 0.1)' : 'rgba(35, 165, 90, 0.12)',
+                border: appTheme === 'void' ? '1px solid rgba(0, 204, 102, 0.3)' : '1px solid rgba(35, 165, 90, 0.3)',
+                fontSize: '11px',
+                color: appTheme === 'void' ? '#00cc66' : '#23a55a',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px'
+              }}>
+                <span className="material-icons" style={{ fontSize: '14px', color: 'inherit' }}>verified_user</span>
+                Active Claude Code session found on this PC ({detectedClaude.subscription_type || 'Active'})
+              </div>
+            )}
+          </div>
+
+          {/* STATUS & ACTIONS */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            {anthropicProv.connected ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span style={{
+                  padding: '4px 10px',
+                  borderRadius: '4px',
+                  fontSize: '11px',
+                  fontWeight: '700',
+                  textTransform: 'uppercase',
+                  background: appTheme === 'void' ? 'rgba(0,204,102,0.15)' : 'rgba(35,165,90,0.15)',
+                  border: appTheme === 'void' ? '1px solid #00cc66' : '1px solid #23a55a',
+                  color: appTheme === 'void' ? '#00cc66' : '#23a55a',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px'
+                }}>
+                  <span className="material-icons" style={{ fontSize: '14px', color: 'inherit' }}>check_circle</span>
+                  Connected
+                </span>
+
+                <button
+                  type="button"
+                  disabled={actionLoading.anthropic === 'disconnecting'}
+                  onClick={() => handleDisconnect('anthropic', 'Anthropic')}
+                  style={{
+                    padding: '6px 12px',
+                    borderRadius: '4px',
+                    background: 'rgba(237,66,69,0.1)',
+                    border: '1px solid #ed4245',
+                    color: '#ed4245',
+                    fontSize: '12px',
+                    fontWeight: '600',
+                    cursor: actionLoading.anthropic === 'disconnecting' ? 'not-allowed' : 'pointer',
+                    fontFamily: 'Inter, sans-serif'
+                  }}
+                >
+                  Sign Out
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px' }}>
+                {detectedClaude ? (
+                  <button
+                    type="button"
+                    disabled={actionLoading.anthropic === 'import'}
+                    onClick={handleAnthropicImport}
+                    style={{
+                      padding: '8px 18px',
+                      borderRadius: '6px',
+                      background: appTheme === 'void' ? 'rgba(255,0,127,0.15)' : '#5865f2',
+                      border: appTheme === 'void' ? '1px solid #ff007f' : 'none',
+                      color: appTheme === 'void' ? '#ff007f' : '#ffffff',
+                      fontWeight: '700',
+                      fontSize: '13px',
+                      cursor: actionLoading.anthropic === 'import' ? 'not-allowed' : 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      fontFamily: 'Inter, sans-serif'
+                    }}
+                  >
+                    {actionLoading.anthropic === 'import' ? (
+                      <span className="material-icons rotating" style={{ fontSize: '16px', color: 'inherit' }}>sync</span>
+                    ) : (
+                      <span className="material-icons" style={{ fontSize: '16px', color: 'inherit' }}>login</span>
+                    )}
+                    Sign In with Anthropic (Claude Code)
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setShowManualKey(prev => ({ ...prev, anthropic: !prev.anthropic }))}
+                    style={{
+                      padding: '8px 18px',
+                      borderRadius: '6px',
+                      background: appTheme === 'void' ? 'rgba(255,0,127,0.15)' : '#5865f2',
+                      border: appTheme === 'void' ? '1px solid #ff007f' : 'none',
+                      color: appTheme === 'void' ? '#ff007f' : '#ffffff',
+                      fontWeight: '700',
+                      fontSize: '13px',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      fontFamily: 'Inter, sans-serif'
+                    }}
+                  >
+                    <span className="material-icons" style={{ fontSize: '16px', color: 'inherit' }}>key</span>
+                    Connect Anthropic
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* FEEDBACK BANNER */}
+        {actionFeedback.anthropic && (
+          <div style={{
+            marginTop: '12px',
+            padding: '8px 12px',
+            borderRadius: '4px',
+            fontSize: '12px',
+            background: actionFeedback.anthropic.type === 'success'
+              ? (appTheme === 'void' ? 'rgba(0,204,102,0.15)' : 'rgba(35,165,90,0.15)')
+              : 'rgba(237,66,69,0.15)',
+            border: actionFeedback.anthropic.type === 'success'
+              ? (appTheme === 'void' ? '1px solid #00cc66' : '1px solid #23a55a')
+              : '1px solid #ed4245',
+            color: actionFeedback.anthropic.type === 'success'
+              ? (appTheme === 'void' ? '#00cc66' : '#23a55a')
+              : '#ed4245'
+          }}>
+            {actionFeedback.anthropic.text}
+          </div>
+        )}
+
+        {/* COLLAPSIBLE MANUAL KEY OPTION */}
+        <div style={{ marginTop: '12px' }}>
+          <span
+            onClick={() => setShowManualKey(prev => ({ ...prev, anthropic: !prev.anthropic }))}
+            style={{ fontSize: '11px', color: textMuted, cursor: 'pointer', textDecoration: 'underline' }}
+          >
+            {showManualKey.anthropic ? "Hide manual key entry" : "Advanced: Or enter Anthropic API key manually"}
+          </span>
+
+          {showManualKey.anthropic && (
+            <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+              <input
+                type="password"
+                placeholder="sk-ant-api..."
+                value={manualKeys.anthropic || ''}
+                onChange={e => setManualKeys(prev => ({ ...prev, anthropic: e.target.value }))}
+                style={{ ...S.input, marginBottom: 0, flex: 1, background: inputBg, border: inputBorder, color: textColor }}
+              />
+              <button
+                type="button"
+                onClick={() => handleManualConnect('anthropic', 'Anthropic')}
+                style={{
+                  padding: '8px 14px',
+                  borderRadius: '4px',
+                  background: accentColor,
+                  color: '#fff',
+                  border: 'none',
+                  fontSize: '12px',
+                  fontWeight: '600',
+                  cursor: 'pointer'
+                }}
+              >
+                Save Key
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 2. OPENROUTER OAUTH PKCE CARD */}
+      <div style={{
+        background: cardBg,
+        border: openrouterProv.connected
+          ? (appTheme === 'void' ? '1px solid rgba(0,204,102,0.4)' : '1px solid #23a55a')
+          : cardBorder,
+        borderRadius: '8px',
+        padding: '20px',
+        transition: 'border-color 0.15s ease'
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px' }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span style={{ fontSize: '24px' }}>🔀</span>
+              <div>
+                <div style={{ fontWeight: '700', fontSize: '16px', color: textColor }}>
+                  OpenRouter
+                </div>
+                <div style={{ fontSize: '12px', color: textMuted }}>
+                  Interactive OAuth PKCE authorization across 200+ models.
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* STATUS & ACTIONS */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            {openrouterProv.connected ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span style={{
+                  padding: '4px 10px',
+                  borderRadius: '4px',
+                  fontSize: '11px',
+                  fontWeight: '700',
+                  textTransform: 'uppercase',
+                  background: appTheme === 'void' ? 'rgba(0,204,102,0.15)' : 'rgba(35,165,90,0.15)',
+                  border: appTheme === 'void' ? '1px solid #00cc66' : '1px solid #23a55a',
+                  color: appTheme === 'void' ? '#00cc66' : '#23a55a',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px'
+                }}>
+                  <span className="material-icons" style={{ fontSize: '14px', color: 'inherit' }}>check_circle</span>
+                  Connected
+                </span>
+
+                <button
+                  type="button"
+                  disabled={actionLoading.openrouter === 'disconnecting'}
+                  onClick={() => handleDisconnect('openrouter', 'OpenRouter')}
+                  style={{
+                    padding: '6px 12px',
+                    borderRadius: '4px',
+                    background: 'rgba(237,66,69,0.1)',
+                    border: '1px solid #ed4245',
+                    color: '#ed4245',
+                    fontSize: '12px',
+                    fontWeight: '600',
+                    cursor: actionLoading.openrouter === 'disconnecting' ? 'not-allowed' : 'pointer',
+                    fontFamily: 'Inter, sans-serif'
+                  }}
+                >
+                  Sign Out
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                disabled={actionLoading.openrouter === 'oauth'}
+                onClick={handleOpenRouterOAuth}
+                style={{
+                  padding: '8px 18px',
+                  borderRadius: '6px',
+                  background: appTheme === 'void' ? 'rgba(255,0,127,0.15)' : '#5865f2',
+                  border: appTheme === 'void' ? '1px solid #ff007f' : 'none',
+                  color: appTheme === 'void' ? '#ff007f' : '#ffffff',
+                  fontWeight: '700',
+                  fontSize: '13px',
+                  cursor: actionLoading.openrouter === 'oauth' ? 'not-allowed' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  fontFamily: 'Inter, sans-serif'
+                }}
+              >
+                {actionLoading.openrouter === 'oauth' ? (
+                  <span className="material-icons rotating" style={{ fontSize: '16px', color: 'inherit' }}>sync</span>
+                ) : (
+                  <span className="material-icons" style={{ fontSize: '16px', color: 'inherit' }}>open_in_browser</span>
+                )}
+                Sign In with OpenRouter (OAuth)
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* FEEDBACK BANNER */}
+        {actionFeedback.openrouter && (
+          <div style={{
+            marginTop: '12px',
+            padding: '8px 12px',
+            borderRadius: '4px',
+            fontSize: '12px',
+            background: actionFeedback.openrouter.type === 'success'
+              ? (appTheme === 'void' ? 'rgba(0,204,102,0.15)' : 'rgba(35,165,90,0.15)')
+              : 'rgba(237,66,69,0.15)',
+            border: actionFeedback.openrouter.type === 'success'
+              ? (appTheme === 'void' ? '1px solid #00cc66' : '1px solid #23a55a')
+              : '1px solid #ed4245',
+            color: actionFeedback.openrouter.type === 'success'
+              ? (appTheme === 'void' ? '#00cc66' : '#23a55a')
+              : '#ed4245'
+          }}>
+            {actionFeedback.openrouter.text}
+          </div>
+        )}
+
+        {/* COLLAPSIBLE MANUAL KEY OPTION */}
+        <div style={{ marginTop: '12px' }}>
+          <span
+            onClick={() => setShowManualKey(prev => ({ ...prev, openrouter: !prev.openrouter }))}
+            style={{ fontSize: '11px', color: textMuted, cursor: 'pointer', textDecoration: 'underline' }}
+          >
+            {showManualKey.openrouter ? "Hide manual key entry" : "Advanced: Or enter OpenRouter API key manually"}
+          </span>
+
+          {showManualKey.openrouter && (
+            <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+              <input
+                type="password"
+                placeholder="sk-or-v1-..."
+                value={manualKeys.openrouter || ''}
+                onChange={e => setManualKeys(prev => ({ ...prev, openrouter: e.target.value }))}
+                style={{ ...S.input, marginBottom: 0, flex: 1, background: inputBg, border: inputBorder, color: textColor }}
+              />
+              <button
+                type="button"
+                onClick={() => handleManualConnect('openrouter', 'OpenRouter')}
+                style={{
+                  padding: '8px 14px',
+                  borderRadius: '4px',
+                  background: accentColor,
+                  color: '#fff',
+                  border: 'none',
+                  fontSize: '12px',
+                  fontWeight: '600',
+                  cursor: 'pointer'
+                }}
+              >
+                Save Key
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 3. GOOGLE / GEMINI CARD */}
+      <div style={{
+        background: cardBg,
+        border: googleProv.connected
+          ? (appTheme === 'void' ? '1px solid rgba(0,204,102,0.4)' : '1px solid #23a55a')
+          : cardBorder,
+        borderRadius: '8px',
+        padding: '20px',
+        transition: 'border-color 0.15s ease'
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px' }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span style={{ fontSize: '24px' }}>✨</span>
+              <div>
+                <div style={{ fontWeight: '700', fontSize: '16px', color: textColor }}>
+                  Google AI Studio / Gemini
+                </div>
+                <div style={{ fontSize: '12px', color: textMuted }}>
+                  Gemini Pro & Flash direct access.
+                </div>
+              </div>
+            </div>
+
+            {/* DETECTED ANTIGRAVITY SESSION BADGE */}
+            {detectedGoogle && (
+              <div style={{
+                marginTop: '10px',
+                padding: '6px 10px',
+                borderRadius: '4px',
+                background: appTheme === 'void' ? 'rgba(0, 204, 102, 0.1)' : 'rgba(35, 165, 90, 0.12)',
+                border: appTheme === 'void' ? '1px solid rgba(0, 204, 102, 0.3)' : '1px solid rgba(35, 165, 90, 0.3)',
+                fontSize: '11px',
+                color: appTheme === 'void' ? '#00cc66' : '#23a55a',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px'
+              }}>
+                <span className="material-icons" style={{ fontSize: '14px', color: 'inherit' }}>account_circle</span>
+                Antigravity Google Session: {detectedGoogle.account}
+              </div>
+            )}
+          </div>
+
+          {/* STATUS & ACTIONS */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            {googleProv.connected ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span style={{
+                  padding: '4px 10px',
+                  borderRadius: '4px',
+                  fontSize: '11px',
+                  fontWeight: '700',
+                  textTransform: 'uppercase',
+                  background: appTheme === 'void' ? 'rgba(0,204,102,0.15)' : 'rgba(35,165,90,0.15)',
+                  border: appTheme === 'void' ? '1px solid #00cc66' : '1px solid #23a55a',
+                  color: appTheme === 'void' ? '#00cc66' : '#23a55a',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px'
+                }}>
+                  <span className="material-icons" style={{ fontSize: '14px', color: 'inherit' }}>check_circle</span>
+                  Connected
+                </span>
+
+                <button
+                  type="button"
+                  disabled={actionLoading.google === 'disconnecting'}
+                  onClick={() => handleDisconnect('google', 'Google AI Studio')}
+                  style={{
+                    padding: '6px 12px',
+                    borderRadius: '4px',
+                    background: 'rgba(237,66,69,0.1)',
+                    border: '1px solid #ed4245',
+                    color: '#ed4245',
+                    fontSize: '12px',
+                    fontWeight: '600',
+                    cursor: actionLoading.google === 'disconnecting' ? 'not-allowed' : 'pointer',
+                    fontFamily: 'Inter, sans-serif'
+                  }}
+                >
+                  Sign Out
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px' }}>
+                {detectedGoogle ? (
+                  <button
+                    type="button"
+                    disabled={actionLoading.google === 'import'}
+                    onClick={handleGoogleImport}
+                    style={{
+                      padding: '8px 18px',
+                      borderRadius: '6px',
+                      background: appTheme === 'void' ? 'rgba(255,0,127,0.15)' : '#5865f2',
+                      border: appTheme === 'void' ? '1px solid #ff007f' : 'none',
+                      color: appTheme === 'void' ? '#ff007f' : '#ffffff',
+                      fontWeight: '700',
+                      fontSize: '13px',
+                      cursor: actionLoading.google === 'import' ? 'not-allowed' : 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      fontFamily: 'Inter, sans-serif'
+                    }}
+                  >
+                    {actionLoading.google === 'import' ? (
+                      <span className="material-icons rotating" style={{ fontSize: '16px', color: 'inherit' }}>sync</span>
+                    ) : (
+                      <span className="material-icons" style={{ fontSize: '16px', color: 'inherit' }}>login</span>
+                    )}
+                    Sign In with Google (Antigravity Session)
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setShowManualKey(prev => ({ ...prev, google: !prev.google }))}
+                    style={{
+                      padding: '8px 18px',
+                      borderRadius: '6px',
+                      background: appTheme === 'void' ? 'rgba(255,0,127,0.15)' : '#5865f2',
+                      border: appTheme === 'void' ? '1px solid #ff007f' : 'none',
+                      color: appTheme === 'void' ? '#ff007f' : '#ffffff',
+                      fontWeight: '700',
+                      fontSize: '13px',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      fontFamily: 'Inter, sans-serif'
+                    }}
+                  >
+                    <span className="material-icons" style={{ fontSize: '16px', color: 'inherit' }}>vpn_key</span>
+                    Connect Google Key
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* FEEDBACK BANNER */}
+        {actionFeedback.google && (
+          <div style={{
+            marginTop: '12px',
+            padding: '8px 12px',
+            borderRadius: '4px',
+            fontSize: '12px',
+            background: actionFeedback.google.type === 'success'
+              ? (appTheme === 'void' ? 'rgba(0,204,102,0.15)' : 'rgba(35,165,90,0.15)')
+              : 'rgba(237,66,69,0.15)',
+            border: actionFeedback.google.type === 'success'
+              ? (appTheme === 'void' ? '1px solid #00cc66' : '1px solid #23a55a')
+              : '1px solid #ed4245',
+            color: actionFeedback.google.type === 'success'
+              ? (appTheme === 'void' ? '#00cc66' : '#23a55a')
+              : '#ed4245'
+          }}>
+            {actionFeedback.google.text}
+          </div>
+        )}
+
+        {/* COLLAPSIBLE MANUAL KEY OPTION */}
+        <div style={{ marginTop: '12px' }}>
+          <span
+            onClick={() => setShowManualKey(prev => ({ ...prev, google: !prev.google }))}
+            style={{ fontSize: '11px', color: textMuted, cursor: 'pointer', textDecoration: 'underline' }}
+          >
+            {showManualKey.google ? "Hide manual key entry" : "Advanced: Or enter Google AI Studio API key manually"}
+          </span>
+
+          {showManualKey.google && (
+            <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+              <input
+                type="password"
+                placeholder="AIzaSy..."
+                value={manualKeys.google || ''}
+                onChange={e => setManualKeys(prev => ({ ...prev, google: e.target.value }))}
+                style={{ ...S.input, marginBottom: 0, flex: 1, background: inputBg, border: inputBorder, color: textColor }}
+              />
+              <button
+                type="button"
+                onClick={() => handleManualConnect('google', 'Google AI Studio')}
+                style={{
+                  padding: '8px 14px',
+                  borderRadius: '4px',
+                  background: accentColor,
+                  color: '#fff',
+                  border: 'none',
+                  fontSize: '12px',
+                  fontWeight: '600',
+                  cursor: 'pointer'
+                }}
+              >
+                Save Key
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* BACKGROUND DAEMON TASK MODELS */}
+      <div style={{
+        marginTop: '16px',
+        borderTop: appTheme === 'void' ? '1px solid #1a0a2a' : `1px solid ${appTheme === 'q-dark' ? '#1f1f24' : '#e3e5e8'}`,
+        paddingTop: '20px'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+          <span className="material-icons" style={{ color: accentColor, fontSize: '20px' }}>psychology</span>
+          <div style={S.sectionTitle}>Background Consciousness Models</div>
+        </div>
+        <div style={S.sectionSub}>
+          Assign dedicated models for autonomous daemon cycles (NLI episodic memory sweeps and spontaneous monologue).
+          Cycles execute continuously using your connected accounts above.
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '16px', marginBottom: '16px' }}>
+          <div>
+            <label style={S.label}>Daemon NLI Sweep Model</label>
+            <ModelSelector
+              value={daemonNli}
+              onChange={val => setDaemonNli(val)}
+              placeholder="e.g. google/gemini-3-flash-preview"
+              style={S.input}
+              openRouterModels={openRouterModels}
+              appTheme={appTheme}
+            />
+            <div style={{ fontSize: '11px', color: textMuted, marginTop: '-10px' }}>
+              Scores narrative divergence and triggers memory consolidation.
+            </div>
+          </div>
+
+          <div>
+            <label style={S.label}>Daemon Monologue Model</label>
+            <ModelSelector
+              value={daemonMonologue}
+              onChange={val => setDaemonMonologue(val)}
+              placeholder="e.g. google/gemini-3-flash-preview"
+              style={S.input}
+              openRouterModels={openRouterModels}
+              appTheme={appTheme}
+            />
+            <div style={{ fontSize: '11px', color: textMuted, marginTop: '-10px' }}>
+              Generates spontaneous reflections and subconscious monologues.
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <button
+            type="button"
+            disabled={savingDaemon}
+            onClick={handleSaveDaemon}
+            style={{
+              padding: '8px 16px',
+              borderRadius: '4px',
+              background: appTheme === 'void' ? 'rgba(255,0,127,0.15)' : '#5865f2',
+              border: appTheme === 'void' ? '1px solid #ff007f' : 'none',
+              color: appTheme === 'void' ? '#ff007f' : '#ffffff',
+              fontWeight: '600',
+              cursor: savingDaemon ? 'not-allowed' : 'pointer',
+              fontFamily: 'Inter, sans-serif',
+              fontSize: '13px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px'
+            }}
+          >
+            {savingDaemon ? (
+              <span className="material-icons rotating" style={{ fontSize: '14px', color: 'inherit' }}>sync</span>
+            ) : (
+              <span className="material-icons" style={{ fontSize: '14px', color: 'inherit' }}>save</span>
+            )}
+            Save Daemon Models
+          </button>
+
+          {daemonStatus && (
+            <span style={{
+              fontSize: '12px',
+              color: daemonStatus.type === 'success'
+                ? (appTheme === 'void' ? '#00cc66' : '#23a55a')
+                : '#ed4245',
+              fontFamily: 'Inter, sans-serif'
+            }}>
+              {daemonStatus.type === 'success' ? '✓ ' : '✕ '}
+              {daemonStatus.text}
+            </span>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -3815,6 +4785,18 @@ function App() {
             <EcosystemHealthPanel appTheme={appTheme} USERNAME={USERNAME} S={S} />
           );
 
+          if (settingsSection === 'providers') return (
+            <ProviderManagementPanel
+              appTheme={appTheme}
+              USERNAME={USERNAME}
+              S={S}
+              userSettings={userSettings}
+              setUserSettings={setUserSettings}
+              openRouterModels={openRouterModels}
+              isMobile={isMobile}
+            />
+          );
+
           if (settingsSection === 'api') return (
             <div>
               <div style={S.sectionTitle}>API & Routing</div>
@@ -4208,6 +5190,7 @@ function App() {
               <div style={S.nav}>
                 <div style={S.categoryLabel}>General</div>
                 {navSection('api', 'API & Routing')}
+                {navSection('providers', 'Providers')}
                 {navSection('params', 'Parameters')}
                 <div style={S.categoryLabel}>Diagnostics</div>
                 {navSection('telemetry', 'Ecosystem Health')}

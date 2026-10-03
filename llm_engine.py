@@ -17,8 +17,6 @@ from data_sanitizer import DataSanitizer
 
 _MCP_TOOLS_CACHE = None
 _MCP_TOOLS_CACHE_TIME = 0.0
-_VERTEX_TOKEN_CACHE = None
-_VERTEX_TOKEN_CACHE_TIME = 0.0
 # Initialize and Load Plugins
 PLUGIN_DIR = os.path.join(os.path.dirname(__file__), "plugins")
 manager = get_plugin_manager()
@@ -134,6 +132,18 @@ try:
     import dopamine_state
 except ImportError:
     dopamine_state = None
+# The outbound path: organ state -> sampling bias + prompt stance. Read-only
+# against the organs; absent, the turn is the request it always was.
+try:
+    import efferent
+except ImportError:
+    efferent = None
+# What a persona puts at the end of its own prompt: contrast pairs, and its
+# own wording for efferent's stances.
+try:
+    import persona_tail
+except ImportError:
+    persona_tail = None
 try:
     import telemetry as _tm
 except Exception:  # telemetry must never be load-bearing
@@ -279,7 +289,6 @@ def call_llm(
 
     # Determine initial provider and base_url
     import os
-    use_vertex = bool(os.getenv("VERTEX_PROJECT_ID"))
     use_responses_api = False
 
     if custom_base_url and custom_base_url.strip():
@@ -300,100 +309,34 @@ def call_llm(
         provider = "openrouter"
         base_url = "https://openrouter.ai/api/v1/chat/completions"
 
-    # Intelligent Fallback & Environment-based Vertex Routing
+    # Standard Developer API Routing & Direct Model Fallbacks
     if not (custom_base_url and custom_base_url.strip()):
         is_google_model = ("google/" in model_id.lower() or "gemini" in model_id.lower())
         is_anthropic_model = ("anthropic/" in model_id.lower() or "claude" in model_id.lower())
-        
-        # Only route native Google models through Vertex. 
-        # All partner/Anthropic models bypass Vertex entirely to avoid OAuth latency.
-        has_openrouter_key = bool(api_keys.get("openrouter") or (api_keys.get("universal") and str(api_keys.get("universal")).startswith("sk-or-")))
-        if use_vertex and is_google_model and not has_openrouter_key:
-            # Vertex AI Route
-            try:
-                from google.auth import default
-                import google.auth.transport.requests
-                
-                gcp_project = os.getenv("VERTEX_PROJECT_ID")
-                gcp_location = os.getenv("VERTEX_LOCATION", "us-central1")
-                
-                creds, default_project = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-                if not gcp_project:
-                    gcp_project = default_project
-                    
-                if not gcp_project:
-                    raise ValueError("GCP Project ID not found. Please set VERTEX_PROJECT_ID in your .env file.")
-                    
-                global _VERTEX_TOKEN_CACHE, _VERTEX_TOKEN_CACHE_TIME
-                import time
-                now_time = time.time()
-                
-                # Check if we have a valid cached token (last refreshed < 50 mins ago)
-                if _VERTEX_TOKEN_CACHE is not None and (now_time - _VERTEX_TOKEN_CACHE_TIME) < 3000.0:
-                    api_key = _VERTEX_TOKEN_CACHE
-                else:
-                    print("[VERTEX] Refreshing OAuth access token...", flush=True)
-                    creds.refresh(google.auth.transport.requests.Request())
-                    api_key = creds.token
-                    _VERTEX_TOKEN_CACHE = api_key
-                    _VERTEX_TOKEN_CACHE_TIME = now_time
-            except Exception as gcp_err:
-                err_msg = f"⚠️ Vertex Auth Failure: {gcp_err}"
-                if stream:
-                    class ErrStreamVertex:
-                        def iter_lines(self): yield f"data: {json.dumps({'choices': [{'delta': {'content': err_msg}}]})}\n\n".encode('utf-8')
-                    return ErrStreamVertex()
-                return err_msg
 
-            if gcp_location.lower() == "global":
-                gcp_host = "aiplatform.googleapis.com"
-            elif gcp_location.lower() == "us":
-                gcp_host = "aiplatform.us.rep.googleapis.com"
-            else:
-                gcp_host = f"{gcp_location}-aiplatform.googleapis.com"
+        if is_anthropic_model:
+            provider = "anthropic"
+            base_url = "https://api.anthropic.com/v1/messages"
+            if "anthropic/" in model_id: model_id = model_id.replace("anthropic/", "")
+            
+        elif ("openai/" in model_id.lower() or "gpt" in model_id.lower()):
+            provider = "openai"
+            base_url = "https://api.openai.com/v1/chat/completions"
+            if "openai/" in model_id: model_id = model_id.replace("openai/", "")
+            
+        elif is_google_model:
+            provider = "google"
+            base_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+            if "google/" in model_id: model_id = model_id.replace("google/", "")
 
-            if is_anthropic_model:
-                provider = "anthropic"
-                clean_model = model_id
-                if "anthropic/" in clean_model.lower():
-                    clean_model = clean_model.replace("anthropic/", "")
-                base_url = f"https://{gcp_host}/v1/projects/{gcp_project}/locations/{gcp_location}/publishers/anthropic/models/{clean_model}:rawPredict"
-                model_id = clean_model
-            else:
-                provider = "google_vertex"
-                clean_model = model_id
-                if "google/" in clean_model.lower():
-                    clean_model = clean_model.replace("google/", "")
-                base_url = f"https://{gcp_host}/v1/projects/{gcp_project}/locations/{gcp_location}/endpoints/openapi/chat/completions"
-                if "/" not in clean_model:
-                    model_id = f"google/{clean_model}"
-                else:
-                    model_id = clean_model
-        else:
-            # Standard developer API fallbacks
-            if is_anthropic_model:
-                provider = "anthropic"
-                base_url = "https://api.anthropic.com/v1/messages"
-                if "anthropic/" in model_id: model_id = model_id.replace("anthropic/", "")
-                
-            elif ("openai/" in model_id.lower() or "gpt" in model_id.lower()):
-                provider = "openai"
-                base_url = "https://api.openai.com/v1/chat/completions"
-                if "openai/" in model_id: model_id = model_id.replace("openai/", "")
-                
-            elif is_google_model:
-                provider = "google"
-                base_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-                if "google/" in model_id: model_id = model_id.replace("google/", "")
+        if "openrouter/" in model_id.lower():
+            provider = "openrouter"
+            base_url = "https://openrouter.ai/api/v1/chat/completions"
 
-            if "openrouter/" in model_id.lower():
-                provider = "openrouter"
-                base_url = "https://openrouter.ai/api/v1/chat/completions"
-
-            if "opencodezen/" in model_id.lower():
-                provider = "opencodezen" # Zen gateway — OpenAI-compatible schemas, own key slot
-                base_url = "https://opencode.ai/zen/v1/chat/completions"
-                model_id = model_id.replace("opencodezen/", "")
+        if "opencodezen/" in model_id.lower():
+            provider = "opencodezen" # Zen gateway — OpenAI-compatible schemas, own key slot
+            base_url = "https://opencode.ai/zen/v1/chat/completions"
+            model_id = model_id.replace("opencodezen/", "")
 
     # We retry up to 3 times to find a working key/proxy path
     max_retries = kwargs.get("max_retries", 3)
@@ -402,37 +345,31 @@ def call_llm(
     _auth_burns = 0
     _thinking_off_refused = False  # FIX(gemini-blank-turn): set by the 400 handler
     for attempt in range(max_retries):
-        if provider == "google_vertex" or (provider == "anthropic" and "aiplatform" in base_url):
-            key_id = None
-            pooled_key = None
-            static_proxy_url = None
-            is_pooled = False
-        else:
-            key_id, pooled_key, static_proxy_url = key_pool.checkout_key(provider)
-            is_pooled = key_id is not None
-            
-            # Fallback to UI dict keys if the pool is empty or inactive
-            api_key = pooled_key
-            if not api_key:
-                if provider.startswith("custom_"):
-                    api_key = api_keys.get("universal", "")
-                elif provider == "opencodezen":
-                    # Zen accepts any of the dedicated slots; "public" unlocks
-                    # the free model catalog when no key is configured.
-                    api_key = api_keys.get("opencode") or api_keys.get("opencodezen") or api_keys.get("universal") or "public"
-                elif provider == "anthropic":
-                    api_key = api_keys.get("anthropic") or api_keys.get("universal") or api_keys.get("openrouter", "")
-                elif provider == "openai":
-                    api_key = api_keys.get("openai") or api_keys.get("universal") or api_keys.get("openrouter", "")
-                elif provider == "google":
-                    api_key = api_keys.get("google") or api_keys.get("universal") or api_keys.get("openrouter", "")
-                else:
-                    api_key = api_keys.get("universal") or api_keys.get("openrouter", "")
+        key_id, pooled_key, static_proxy_url = key_pool.checkout_key(provider)
+        is_pooled = key_id is not None
+        
+        # Fallback to UI dict keys if the pool is empty or inactive
+        api_key = pooled_key
+        if not api_key:
+            if provider.startswith("custom_"):
+                api_key = api_keys.get("universal", "")
+            elif provider == "opencodezen":
+                # Zen accepts any of the dedicated slots; "public" unlocks
+                # the free model catalog when no key is configured.
+                api_key = api_keys.get("opencode") or api_keys.get("opencodezen") or api_keys.get("universal") or "public"
+            elif provider == "anthropic":
+                api_key = api_keys.get("anthropic") or api_keys.get("universal") or api_keys.get("openrouter", "")
+            elif provider == "openai":
+                api_key = api_keys.get("openai") or api_keys.get("universal") or api_keys.get("openrouter", "")
+            elif provider == "google":
+                api_key = api_keys.get("google") or api_keys.get("universal") or api_keys.get("openrouter", "")
+            else:
+                api_key = api_keys.get("universal") or api_keys.get("openrouter", "")
 
-            # Whitespace/stub keys pass truthiness checks but produce upstream
-            # "Missing Authentication header" 401s — normalize before use.
-            if api_key is not None:
-                api_key = str(api_key).strip()
+        # Whitespace/stub keys pass truthiness checks but produce upstream
+        # "Missing Authentication header" 401s — normalize before use.
+        if api_key is not None:
+            api_key = str(api_key).strip()
 
         # OpenRouter override check for fallback keys (never for explicit Zen routing)
         if api_key and api_key.startswith("sk-or-") and not custom_base_url and provider != "opencodezen":
@@ -458,7 +395,7 @@ def call_llm(
         try:
             # --- NATIVE ANTHROPIC PIPELINE ---
             if provider == "anthropic":
-                if "aiplatform" not in base_url and not base_url.rstrip("/").endswith("/messages"):
+                if not base_url.rstrip("/").endswith("/messages"):
                     base_url = "https://api.anthropic.com/v1/messages"
                 anth_messages = []
                 
@@ -532,12 +469,7 @@ def call_llm(
                     }
                     anth_payload["temperature"] = 1.0
                     
-                if "aiplatform" in base_url:
-                    headers = {
-                        "Authorization": f"Bearer {api_key}",
-                        "content-type": "application/json"
-                    }
-                elif custom_base_url and custom_base_url.strip():
+                if custom_base_url and custom_base_url.strip():
                     headers = {
                         custom_auth_header_name: f"{custom_auth_prefix}{api_key}".strip(),
                         "anthropic-version": "2023-06-01", 
@@ -592,20 +524,6 @@ def call_llm(
                         key_pool.release_key(provider, key_id, "COOLDOWN", cooldown_duration=300)
                     if active_proxy and active_proxy != static_proxy_url:
                         key_pool.release_proxy(active_proxy, "COOLDOWN", cooldown_duration=60)
-                    
-                    if "aiplatform" in base_url:
-                        print("[VERTEX FALLBACK] Rate limited/Quota exceeded on Vertex. Swapping to OpenRouter/Standard keys.")
-                        if api_keys.get("openrouter") or api_keys.get("universal"):
-                            provider = "openrouter"
-                            base_url = "https://openrouter.ai/api/v1/chat/completions"
-                            if "fable" in model_id.lower():
-                                model_id = "anthropic/claude-3.5-sonnet"
-                        else:
-                            provider = "anthropic"
-                            base_url = "https://api.anthropic.com/v1/messages"
-                            if "anthropic/" in model_id: model_id = model_id.replace("anthropic/", "")
-                            if "fable" in model_id.lower():
-                                model_id = "claude-3-5-sonnet-20241022"
                     continue
                 elif res.status_code in [401, 403]:
                     last_error = f"Auth error ({res.status_code}): {res.text}"
@@ -623,20 +541,6 @@ def call_llm(
                     # once. Cool it, or the pool gets blamed for the tunnel.
                     if active_proxy and active_proxy != static_proxy_url:
                         key_pool.release_proxy(active_proxy, "COOLDOWN", cooldown_duration=300)
-                    
-                    if "aiplatform" in base_url:
-                        print("[VERTEX FALLBACK] Auth error on Vertex. Swapping to OpenRouter/Standard keys.")
-                        if api_keys.get("openrouter") or api_keys.get("universal"):
-                            provider = "openrouter"
-                            base_url = "https://openrouter.ai/api/v1/chat/completions"
-                            if "fable" in model_id.lower():
-                                model_id = "anthropic/claude-3.5-sonnet"
-                        else:
-                            provider = "anthropic"
-                            base_url = "https://api.anthropic.com/v1/messages"
-                            if "anthropic/" in model_id: model_id = model_id.replace("anthropic/", "")
-                            if "fable" in model_id.lower():
-                                model_id = "claude-3-5-sonnet-20241022"
                     continue
                 elif res.status_code in [502, 503, 504]:
                     last_error = f"Transient gateway error ({res.status_code}): {res.text}"
@@ -695,7 +599,7 @@ def call_llm(
                     # turn are not supported", and on gemini-3-flash the pre-fill made no
                     # measurable difference to anything (2026-09-06, 8 runs per shape).
                     # The system prompt carries identity. Regression: tests/test_prefill_placement.py
-                    is_gemini = provider in ("google", "google_vertex") or "gemini" in model_id.lower()
+                    is_gemini = provider == "google" or "gemini" in model_id.lower()
                     if is_gemini:
                         pass
                     elif local_messages[-1].get("role") != "assistant":
@@ -735,7 +639,7 @@ def call_llm(
                             data.pop("presence_penalty", None)
                             data.pop("frequency_penalty", None)
 
-                if provider in ("google", "google_vertex"):
+                if provider == "google":
                     if thinking_norm in ["low", "medium", "high"]:
                         data["reasoning_effort"] = thinking_norm
                     elif thinking_norm in ["off", "none", "minimal", "0", ""] and not is_reasoning_mandatory:
@@ -893,18 +797,6 @@ def call_llm(
                         key_pool.release_key(provider, key_id, "COOLDOWN", cooldown_duration=300)
                     if active_proxy and active_proxy != static_proxy_url:
                         key_pool.release_proxy(active_proxy, "COOLDOWN", cooldown_duration=60)
-                    
-                    if "aiplatform" in base_url:
-                        print("[VERTEX FALLBACK] Rate limited/Quota exceeded on Vertex. Swapping to OpenRouter/Standard keys.")
-                        if api_keys.get("openrouter") or api_keys.get("universal"):
-                            provider = "openrouter"
-                            base_url = "https://openrouter.ai/api/v1/chat/completions"
-                            if "fable" in model_id.lower():
-                                model_id = "anthropic/claude-3.5-sonnet"
-                        else:
-                            provider = "google"
-                            base_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-                            if "google/" in model_id: model_id = model_id.replace("google/", "")
                     continue
                 elif response.status_code in [401, 403]:
                     last_error = f"Auth error ({response.status_code}): {response.text}"
@@ -922,18 +814,6 @@ def call_llm(
                     # once. Cool it, or the pool gets blamed for the tunnel.
                     if active_proxy and active_proxy != static_proxy_url:
                         key_pool.release_proxy(active_proxy, "COOLDOWN", cooldown_duration=300)
-                    
-                    if "aiplatform" in base_url:
-                        print("[VERTEX FALLBACK] Auth error on Vertex. Swapping to OpenRouter/Standard keys.")
-                        if api_keys.get("openrouter") or api_keys.get("universal"):
-                            provider = "openrouter"
-                            base_url = "https://openrouter.ai/api/v1/chat/completions"
-                            if "fable" in model_id.lower():
-                                model_id = "anthropic/claude-3.5-sonnet"
-                        else:
-                            provider = "google"
-                            base_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-                            if "google/" in model_id: model_id = model_id.replace("google/", "")
                     continue
                 elif response.status_code in [502, 503, 504]:
                     last_error = f"Transient gateway error ({response.status_code}): {response.text}"
@@ -1498,8 +1378,9 @@ async def intercepting_stream_generator(model_id, system_prompt, messages, api_k
                     persona_target = args.get("persona") or kwargs.get("persona_key") or "default"
                     user_target = kwargs.get("username", "default_user")
                     query_text = args.get("query", "")
-                    nodes = await asyncio.to_thread(zettel_engine.query_knowledge_graph, user_target, persona_target, query_text, top_k=5)
-                    result = zettel_engine.format_knowledge_graph_for_prompt(nodes) or "No relevant knowledge graph nodes found."
+                    # query_knowledge_graph returns the prompt-ready block itself.
+                    result = await asyncio.to_thread(zettel_engine.query_knowledge_graph, user_target, persona_target, query_text, top_k=5)
+                    result = result or "No relevant knowledge graph nodes found."
                 elif name == "store_zettel_observation":
                     if kwargs.get("group_session_id"):
                         result = "CURATION_ERROR: Curation writes are disabled during multi-participant group sessions."
@@ -2131,7 +2012,16 @@ async def build_context_and_stream(
         "custom_auth_prefix": custom_auth_prefix,
         "max_tool_output": max_tool_output
     }
-    
+
+    # Efferent path: the operator's sampling settings are the baseline, the
+    # organs lean on them. At rest this is the identity and the stance is "".
+    tail = persona_tail.load_for(persona_data) if persona_tail is not None else {}
+    efferent_band, efferent_stance = "", ""
+    if efferent is not None:
+        kwargs_dict, efferent_band, efferent_stance = efferent.for_turn(
+            username, persona_key, kwargs_dict, stances=tail.get("stances"))
+    voice_contrast = persona_tail.render_contrast(tail, efferent_band) if persona_tail is not None else ""
+
     # FIX(second-brain-loop): forcing tool_choice to query_second_brain broke
     # the feature in two ways. (1) The force applied to EVERY generation pass,
     # including the continuation call AFTER the tool result returned — so the
@@ -2163,9 +2053,12 @@ async def build_context_and_stream(
         f"This envelope is continuously maintained at the boundary of your state.\n\n"
         f"--- COGNITIVE ENGINE ---\n"
         f"- Target LLM Model: {model_id}\n"
-        f"- Temperature: {temperature}\n"
-        f"- Top_P: {top_p}\n"
-        f"- Max Tokens: {max_tokens}\n"
+        # The operator's settings, labelled as such: efferent leans on
+        # temperature and max_tokens per turn, and the live values stay out of
+        # the prompt on purpose (no state-driven number; stable prompt head).
+        f"- Temperature (operator setting): {temperature}\n"
+        f"- Top_P (operator setting): {top_p}\n"
+        f"- Max Tokens (operator setting): {max_tokens}\n"
         f"- Thinking Effort: {thinking_level}\n\n"
         f"--- COMPUTE LIQUIDITY POOL ---\n"
         f"- Multiplexer Status: {'ACTIVE' if pool_status.get('active') else 'INACTIVE / FALLBACK'}\n"
@@ -2245,6 +2138,15 @@ async def build_context_and_stream(
             f"[/AGENTIC_OPERATION_PROTOCOL]\n"
         )
         masked_system_prompt = masked_system_prompt + agentic_protocol
+
+    # --- PERSONA TAIL: VOICE_CONTRAST, then DISPOSITION (end-position, last) ---
+    # Last because the tail is what a long prompt still listens to. Both can be
+    # persona-authored text from disk, so they are masked like the persona file
+    # is. The stance is empty at rest; the contrast block is empty for a persona
+    # with no tail_file.
+    persona_tail_block = voice_contrast + efferent_stance
+    if persona_tail_block:
+        masked_system_prompt = masked_system_prompt + sanitizer.sanitize(persona_tail_block)
 
     # 2. Sanitize the messages history (user message + chat history)
     masked_messages = []

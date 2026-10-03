@@ -740,6 +740,12 @@ class UserManager:
         if 'global_direct_wire' not in columns:
             c.execute("ALTER TABLE user_settings ADD COLUMN global_direct_wire INTEGER DEFAULT 1")
 
+        # Migration: per-user model for the background daemon (NLI gate / idle
+        # monologue). NULL means "use the built-in default".
+        for _col in ('daemon_nli_model', 'daemon_monologue_model'):
+            if _col not in columns:
+                c.execute(f"ALTER TABLE user_settings ADD COLUMN {_col} TEXT")
+
         # ── Performance indexes (idempotent) ──
         # observations: get_observation_log filters (username,persona) and
         # orders by id, twice per turn. zettel_nodes: filtered by
@@ -1715,7 +1721,7 @@ class UserManager:
             c.execute("INSERT OR IGNORE INTO user_settings (username) VALUES (?)", (username,))
             
             for key, value in settings.items():
-                if key in ["review_policy", "auto_execute_terminal", "active_persona_key", "security_level", "global_direct_wire"]:
+                if key in ["review_policy", "auto_execute_terminal", "active_persona_key", "security_level", "global_direct_wire", "daemon_nli_model", "daemon_monologue_model"]:
                     c.execute(f"UPDATE user_settings SET {key} = ? WHERE username = ?", (value, username))
             
             conn.commit()

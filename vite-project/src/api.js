@@ -529,6 +529,47 @@ class PersonaAPI {
             method: 'DELETE'
         });
     }
+
+    async fetchProviders() {
+        try {
+            return await this._fetch('/providers');
+        } catch (e) {
+            console.error("Fetch providers failed:", e);
+            return null;
+        }
+    }
+
+    async connectProvider(providerId, apiKey, validateKey = true) {
+        return await this._fetch(`/providers/${encodeURIComponent(providerId)}/connect`, {
+            method: 'POST',
+            body: JSON.stringify({ api_key: apiKey, validate_key: validateKey })
+        });
+    }
+
+    async disconnectProvider(providerId) {
+        return await this._fetch(`/providers/${encodeURIComponent(providerId)}`, {
+            method: 'DELETE'
+        });
+    }
+
+    async fetchOAuthOverview() {
+        try {
+            return await this._fetch('/oauth/overview');
+        } catch (e) {
+            console.error("Fetch OAuth overview failed:", e);
+            return null;
+        }
+    }
+
+    async startOAuth(providerId) {
+        return await this._fetch(`/oauth/${encodeURIComponent(providerId)}/start`);
+    }
+
+    async importSession(providerId) {
+        return await this._fetch(`/oauth/import/${encodeURIComponent(providerId)}`, {
+            method: 'POST'
+        });
+    }
 }
 
 // Export a singleton instance globally for the App to use

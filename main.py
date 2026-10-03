@@ -1,10 +1,12 @@
-from fastapi import FastAPI, HTTPException, File, UploadFile, Depends, Header
+from fastapi import FastAPI, HTTPException, File, UploadFile, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse, Response
+from fastapi.responses import FileResponse, StreamingResponse, Response, HTMLResponse
 from pydantic import BaseModel
 import asyncio
 import database as db
+import provider_registry
+import oauth_engine
 import json
 import os
 import shutil
@@ -253,6 +255,8 @@ class SettingsPayload(BaseModel):
     active_persona_key: str = ""
     security_level: str = "strict"
     global_direct_wire: int = 1
+    daemon_nli_model: Optional[str] = None
+    daemon_monologue_model: Optional[str] = None
 
 # --- CORE LOGIC (Decoupled from Streamlit) ---
 def load_personas_logic(username: str = None):
@@ -314,6 +318,101 @@ def verify_profile(payload: VerifyPayload):
     if not valid:
          raise HTTPException(status_code=401, detail="Invalid username or secret key.")
     return {"status": "success", "message": "Attuned successfully."}
+
+# --- CONNECT A PROVIDER ---
+class ProviderConnectPayload(BaseModel):
+    model_config = {"extra": "forbid"}
+    api_key: str
+    validate_key: bool = True
+
+@app.get("/providers")
+def list_providers(current_user: str = Depends(get_current_user)):
+    """Connection status per provider. Never returns key material."""
+    return provider_registry.list_status(current_user)
+
+@app.post("/providers/{provider_id}/connect")
+def connect_provider(provider_id: str, payload: ProviderConnectPayload, current_user: str = Depends(get_current_user)):
+    """Validate (cheap live ping) and store an API key, encrypted at rest."""
+    try:
+        return provider_registry.connect(current_user, provider_id, payload.api_key, validate=payload.validate_key)
+    except provider_registry.ProviderRejected as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except provider_registry.ProviderStoreLocked as e:
+        # Fail closed: refuse rather than regenerate the master key and orphan stored credentials.
+        raise HTTPException(status_code=503, detail=f"Credential store is locked: {e}")
+
+@app.delete("/providers/{provider_id}")
+def disconnect_provider(provider_id: str, current_user: str = Depends(get_current_user)):
+    if provider_id not in provider_registry.PROVIDERS:
+        raise HTTPException(status_code=404, detail="Unknown provider")
+    return {"status": "success", "removed": provider_registry.disconnect(current_user, provider_id)}
+
+# --- OAUTH & EXTERNAL SESSIONS ---
+@app.get("/oauth/overview")
+def get_oauth_overview(current_user: str = Depends(get_current_user)):
+    """Overview of detected external sessions and OAuth connection status."""
+    return oauth_engine.get_oauth_status_overview(current_user)
+
+@app.get("/oauth/{provider_id}/start")
+def start_oauth(provider_id: str, request: Request, current_user: str = Depends(get_current_user)):
+    """Initiates an interactive OAuth PKCE browser flow."""
+    base_url = str(request.base_url)
+    if provider_id == "openrouter":
+        auth_url = oauth_engine.start_openrouter_oauth(current_user, base_url)
+        return {"auth_url": auth_url, "provider": "openrouter"}
+    else:
+        raise HTTPException(status_code=400, detail=f"OAuth start not implemented for {provider_id}")
+
+@app.get("/oauth/callback/openrouter")
+def callback_openrouter(code: str, state: str):
+    """Callback landing page for OpenRouter OAuth PKCE in popup window."""
+    try:
+        res = oauth_engine.finish_openrouter_oauth(code, state)
+        html = f"""<!DOCTYPE html>
+<html>
+<head><title>OpenRouter Authorized</title></head>
+<body style="background:#0a0a0a;color:#00cc66;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+  <div style="text-align:center;padding:24px;border:1px solid #1a0a2a;border-radius:8px;background:#050505;">
+    <h2 style="color:#ff007f;margin-bottom:8px;">OpenRouter Connected!</h2>
+    <p style="color:#00cc66;font-size:14px;">Authorization successful. Stored in your encrypted vault.</p>
+    <p style="color:#888;font-size:12px;">Closing window...</p>
+    <script>
+      if (window.opener) {{
+        window.opener.postMessage({{ type: 'oauth_complete', provider: 'openrouter', status: 'success' }}, '*');
+        setTimeout(() => window.close(), 1200);
+      }}
+    </script>
+  </div>
+</body>
+</html>"""
+        return HTMLResponse(content=html, status_code=200)
+    except Exception as e:
+        err_html = f"""<!DOCTYPE html>
+<html>
+<head><title>Authorization Failed</title></head>
+<body style="background:#0a0a0a;color:#ed4245;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+  <div style="text-align:center;padding:24px;border:1px solid #ed4245;border-radius:8px;background:#050505;">
+    <h2>Authorization Failed</h2>
+    <p style="font-size:13px;">{str(e)}</p>
+  </div>
+</body>
+</html>"""
+        return HTMLResponse(content=err_html, status_code=400)
+
+@app.post("/oauth/import/{provider_id}")
+def import_session(provider_id: str, current_user: str = Depends(get_current_user)):
+    """Imports an active local CLI/IDE session (e.g. Claude Code or Antigravity Google)."""
+    try:
+        if provider_id == "anthropic":
+            return oauth_engine.import_claude_code_session(current_user)
+        elif provider_id == "google":
+            return oauth_engine.import_google_session(current_user)
+        else:
+            raise HTTPException(status_code=400, detail=f"No local session importer for {provider_id}")
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/personas")
 def get_personas(username: str = "default_user", current_user: str = Depends(get_current_user)):
@@ -531,21 +630,8 @@ async def stream_chat(persona_key: str, req: StreamRequest, current_user: str = 
     
     persona_data = personas[persona_key]
     
-    # Load API keys from the server's .env file as fallbacks
-    api_keys = {
-        "openrouter": os.getenv("OPENROUTER_API_KEY", ""),
-        "openai": os.getenv("OPENAI_API_KEY", ""),
-        "anthropic": os.getenv("ANTHROPIC_API_KEY", ""),
-        "google": os.getenv("GOOGLE_API_KEY", ""),
-        "xai": os.getenv("XAI_API_KEY", ""),
-        "featherless": os.getenv("FEATHERLESS_API_KEY", ""),
-        "perplexity": os.getenv("PERPLEXITY_API_KEY", "")
-    }
-    
-    # Override with any keys provided from the UI
-    for provider, key in req.active_api_keys.items():
-        if key:
-            api_keys[provider] = key
+    # Keys: server .env fallback < credentials connected via /providers < per-request override.
+    api_keys = provider_registry.resolve_api_keys(current_user, req.active_api_keys)
 
     # Immediately save the User's message so it doesn't fade on UI reload.
     # FIX(groupchat-bleed): in group mode the "inbound message" is mapped group
@@ -617,16 +703,10 @@ def create_lore_entry(persona_key: str, payload: LoreEntryPayload, current_user:
         raise HTTPException(status_code=500, detail="Failed to create lore entry")
     
     # Build API keys for the background processing thread
-    api_keys = {
-        "openrouter": os.getenv("OPENROUTER_API_KEY", ""),
-        "openai": os.getenv("OPENAI_API_KEY", ""),
-        "anthropic": os.getenv("ANTHROPIC_API_KEY", ""),
-        "google": os.getenv("GOOGLE_API_KEY", ""),
-        "universal": os.getenv("OPENROUTER_API_KEY", ""),
-    }
-    for provider, key in payload.active_api_keys.items():
-        if key:
-            api_keys[provider] = key
+    api_keys = provider_registry.resolve_api_keys(current_user, payload.active_api_keys)
+    # Preserved behaviour: lore processing's "universal" slot defaults to OpenRouter.
+    if not api_keys.get("universal"):
+        api_keys["universal"] = api_keys.get("openrouter", "")
     
     # Process in background thread (chunking + embedding + LLM entity extraction)
     def _bg_process():
@@ -664,16 +744,10 @@ def update_lore_entry(persona_key: str, entry_id: str, payload: LoreEntryPayload
     if not success:
         raise HTTPException(status_code=400, detail="Failed to update lore entry")
     
-    api_keys = {
-        "openrouter": os.getenv("OPENROUTER_API_KEY", ""),
-        "openai": os.getenv("OPENAI_API_KEY", ""),
-        "anthropic": os.getenv("ANTHROPIC_API_KEY", ""),
-        "google": os.getenv("GOOGLE_API_KEY", ""),
-        "universal": os.getenv("OPENROUTER_API_KEY", ""),
-    }
-    for provider, key in payload.active_api_keys.items():
-        if key:
-            api_keys[provider] = key
+    api_keys = provider_registry.resolve_api_keys(current_user, payload.active_api_keys)
+    # Preserved behaviour: lore processing's "universal" slot defaults to OpenRouter.
+    if not api_keys.get("universal"):
+        api_keys["universal"] = api_keys.get("openrouter", "")
     
     def _bg_process():
         try:
@@ -855,6 +929,7 @@ async def get_settings_telemetry(username: str, current_user: str = Depends(get_
             SELECT id, persona, event_type, content, reflection_score, timestamp 
             FROM observations 
             WHERE username=? 
+              AND event_type IN ('entropic_gap','semantic_contradiction','internal_reflection')
             ORDER BY id DESC LIMIT 10
         """, (username,))
         rows = c.fetchall()
@@ -988,7 +1063,9 @@ async def update_settings(payload: SettingsPayload, current_user: str = Depends(
     if payload.username != current_user:
         raise HTTPException(status_code=403, detail="Username mismatch")
     db_conn = db.UserManager()
-    db_conn.update_user_settings(payload.username, payload.model_dump())
+    # None = "field not provided" (the daemon model fields). Without this filter
+    # every ordinary settings save would overwrite the stored daemon model with NULL.
+    db_conn.update_user_settings(payload.username, {k: v for k, v in payload.model_dump().items() if v is not None})
     return {"status": "success"}
 
 # --- STATIC FRONTEND SERVING (For "One-Click" Distributed Releases) ---

@@ -10,6 +10,7 @@ from datetime import datetime
 
 import database as db
 import llm_engine
+import provider_registry
 
 # Global neuromodulator coupling (optional — degrades to legacy behavior if absent)
 try:
@@ -208,17 +209,22 @@ def _holder_is_alive(raw) -> bool:
 # 2.5-flash (the old hardcode) is gone from both sites.
 DAEMON_NLI_MODEL_OPENROUTER = "google/gemini-3.5-flash"
 DAEMON_MONOLOGUE_MODEL_OPENROUTER = "google/gemini-3.7-flash"
-DAEMON_MODEL_VERTEX = "google/gemini-3-flash-preview"
 
 
-def _daemon_model(env_var, openrouter_default, keys):
-    """Model id for a daemon call: env override, else by which route the keys
-    select. An OpenRouter key disables the Vertex route in llm_engine
-    (has_openrouter_key), so the default has to follow the same switch."""
+def _daemon_model(env_var, default_model, keys=None, username=None, setting=None):
+    """Model id for a daemon call: env override, else the user's 'background
+    tasks' setting (a model id; its prefix selects the provider), else the default."""
     override = (os.getenv(env_var) or "").strip()
     if override:
         return override
-    return openrouter_default if keys.get("openrouter") else DAEMON_MODEL_VERTEX
+    if username and setting:
+        try:
+            chosen = (db.UserManager().get_user_settings(username).get(setting) or "").strip()
+            if chosen:
+                return chosen
+        except Exception:
+            pass
+    return default_model
 
 
 def _derive_stale_ttl(observed_cycle, interval):
@@ -714,6 +720,15 @@ class ConsciousnessWorker:
             )
             return None
 
+        # Resolve keys once for the whole sweep. With nothing usable, every one of
+        # the (up to ~153) blocking calls would 401 and retry; stand down instead.
+        _sweep_keys = provider_registry.resolve_api_keys(username)
+        if not provider_registry.has_usable_key(_sweep_keys):
+            logger.warning(
+                f"[CONSCIOUSNESS_DAEMON] No usable provider key for {username} "
+                f"-- NLI sweep for {persona} skipped (connect a provider).")
+            return None
+
         conn = self.get_db_connection()
         c = conn.cursor()
         
@@ -750,7 +765,7 @@ class ConsciousnessWorker:
                         logger.info(f"[CONSCIOUSNESS_DAEMON] Running NLI check for overlap ({jaccard:.2f}) between '{node_a['title']}' and '{node_b['title']}'")
                         
                         # NLI check via micro-LLM callback
-                        nli_decision = self.call_nli_gate(node_a["content"], node_b["content"])
+                        nli_decision = self.call_nli_gate(node_a["content"], node_b["content"], username=username, api_keys=_sweep_keys)
                         
                         if nli_decision == "CONTRADICT":
                             logger.error(f"[CONSCIOUSNESS_DAEMON] Cognitive Dissonance Found! '{node_a['title']}' conflicts with '{node_b['title']}'")
@@ -764,15 +779,11 @@ class ConsciousnessWorker:
             
         return None
 
-    def call_nli_gate(self, statement_a: str, statement_b: str) -> str:
+    def call_nli_gate(self, statement_a: str, statement_b: str, username: str = None, api_keys: dict = None) -> str:
         """Asks a micro-LLM model to perform an NLI check."""
-        # Retrieve keys from database/env
-        env_keys = {
-            "google": os.getenv("GOOGLE_API_KEY", ""),
-            "openrouter": os.getenv("OPENROUTER_API_KEY", ""),
-            "openai": os.getenv("OPENAI_API_KEY", ""),
-            "anthropic": os.getenv("ANTHROPIC_API_KEY", ""),
-        }
+        # Keys: shared provider store (env < connected credentials). The sweep
+        # resolves once and passes them in; a bare call resolves for itself.
+        env_keys = api_keys if api_keys is not None else provider_registry.resolve_api_keys(username)
         
         nli_prompt = (
             "Analyze the relationship between Statement A and Statement B.\n"
@@ -786,7 +797,7 @@ class ConsciousnessWorker:
             # Not the cheapest model: a wrong verdict here becomes a
             # semantic_contradiction row that the resolver acts on.
             res = llm_engine.call_llm(
-                model_id=_daemon_model("DAEMON_NLI_MODEL", DAEMON_NLI_MODEL_OPENROUTER, env_keys),
+                model_id=_daemon_model("DAEMON_NLI_MODEL", DAEMON_NLI_MODEL_OPENROUTER, username=username, setting="daemon_nli_model"),
                 system_prompt="You are a precise logic evaluation system.",
                 messages=[{"role": "user", "content": nli_prompt}],
                 api_keys=env_keys,
@@ -1012,6 +1023,16 @@ class ConsciousnessWorker:
                 f"-- resting, no monologue.")
             self._mark_monologue_processed(username, persona, last_user_time_str)
             return
+        # Keys come from the shared provider store (env < connected credentials).
+        # With nothing usable, every call would 401 and retry; stand down instead.
+        # Deliberately NOT marking the monologue processed, so it fires as soon as
+        # a provider is connected.
+        daemon_keys = provider_registry.resolve_api_keys(username)
+        if not provider_registry.has_usable_key(daemon_keys):
+            logger.warning(
+                f"[CONSCIOUSNESS_DAEMON] No usable provider key for {username} "
+                f"-- monologue for {persona} skipped (connect a provider).")
+            return
         # 1. Fetch persona custom info
         conn = self.get_db_connection()
         c = conn.cursor()
@@ -1061,16 +1082,11 @@ class ConsciousnessWorker:
                 "integrate this concept into your understanding. Write your reflection."
             )
             
-        env_keys = {
-            "google": os.getenv("GOOGLE_API_KEY", ""),
-            "openrouter": os.getenv("OPENROUTER_API_KEY", ""),
-            "openai": os.getenv("OPENAI_API_KEY", ""),
-            "anthropic": os.getenv("ANTHROPIC_API_KEY", ""),
-        }
+        env_keys = daemon_keys
         
         try:
             res = llm_engine.call_llm(
-                model_id=_daemon_model("DAEMON_MONOLOGUE_MODEL", DAEMON_MONOLOGUE_MODEL_OPENROUTER, env_keys),
+                model_id=_daemon_model("DAEMON_MONOLOGUE_MODEL", DAEMON_MONOLOGUE_MODEL_OPENROUTER, username=username, setting="daemon_monologue_model"),
                 system_prompt=f"{persona_system_prompt}\n\n{monologue_system_prompt}",
                 messages=[{"role": "user", "content": monologue_prompt}],
                 api_keys=env_keys,
