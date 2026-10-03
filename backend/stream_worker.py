@@ -8,6 +8,13 @@ import re
 import threading
 from datetime import datetime
 
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+_APP_ROOT = os.path.dirname(_BACKEND_DIR)
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+if _APP_ROOT not in sys.path:
+    sys.path.insert(1, _APP_ROOT)
+
 import database as db
 import llm_engine
 import provider_registry

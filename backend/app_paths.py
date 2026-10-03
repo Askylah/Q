@@ -48,7 +48,7 @@ import sys
 from datetime import datetime
 
 # ── Project location (source tree — still the MCP/git root, deliberately) ──────
-APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Where the database used to live, and may still live on an un-migrated install.
 LEGACY_DB_PATH = os.path.join(APP_ROOT, "users.db")

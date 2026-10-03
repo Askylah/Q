@@ -77,6 +77,13 @@ def _resolve(path: str) -> str:
     if not path:
         return ""
     if not os.path.isabs(path):
+        try:
+            from app_paths import APP_ROOT
+            cand = os.path.join(APP_ROOT, path)
+            if os.path.exists(cand):
+                return cand
+        except Exception:
+            pass
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), path)
     return path
 

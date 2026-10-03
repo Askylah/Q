@@ -18,7 +18,8 @@ from data_sanitizer import DataSanitizer
 _MCP_TOOLS_CACHE = None
 _MCP_TOOLS_CACHE_TIME = 0.0
 # Initialize and Load Plugins
-PLUGIN_DIR = os.path.join(os.path.dirname(__file__), "plugins")
+from app_paths import APP_ROOT
+PLUGIN_DIR = os.path.join(APP_ROOT, "plugins")
 manager = get_plugin_manager()
 manager.load_plugins(PLUGIN_DIR)
 
@@ -1473,7 +1474,7 @@ async def intercepting_stream_generator(model_id, system_prompt, messages, api_k
                     print(f"[MCP_ROUTER] Routing namespaced tool call: '{name}'")
                     result = await asyncio.to_thread(_get_mcp_router().route_call_sync, name, args)
                 else:
-                    garage_py_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "garage", f"{name}.py")
+                    garage_py_path = os.path.join(APP_ROOT, "garage", f"{name}.py")
                     if os.path.exists(garage_py_path):
                         print(f"[GARAGE PROTOCOL] Executing dynamic tool script '{name}'...")
                         result = await asyncio.to_thread(execute_garage_tool_safe, garage_py_path, args)
@@ -1634,7 +1635,7 @@ async def build_context_and_stream(
 
     # --- INJECT GLOBAL RULES ---
     try:
-        global_rules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "personas", "global_rules.txt")
+        global_rules_path = os.path.join(APP_ROOT, "personas", "global_rules.txt")
         with open(global_rules_path, "r", encoding="utf-8") as gf:
             global_rules_content = gf.read()
             # Append global rules to ensure they govern the character's core behavior

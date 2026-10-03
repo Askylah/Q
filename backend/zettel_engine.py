@@ -634,7 +634,8 @@ def _truncate_at_sentence(text: str, max_chars: int = 200) -> str:
 
 def load_persona_on_demand_files(persona_key: str) -> list:
     import json
-    json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "personas.json")
+    from app_paths import APP_ROOT
+    json_path = os.path.join(APP_ROOT, "personas.json")
     if not os.path.exists(json_path):
         return []
     try:

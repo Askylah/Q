@@ -96,7 +96,8 @@ class SkillOrchestrator:
         return "\n\n".join(filter(None, prompts))
 
 # Global Instance
-SKILLS_DIR = os.path.join(os.path.dirname(__file__), "skills")
+from app_paths import APP_ROOT
+SKILLS_DIR = os.path.join(APP_ROOT, "skills")
 orchestrator = SkillOrchestrator(SKILLS_DIR)
 
 def register(manager: PluginManager):

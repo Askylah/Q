@@ -41,7 +41,8 @@ async def search_web(query: str, max_results: int = 5) -> str:
         return f"SEARCH_ERROR: {str(e)}"
 
 # --- UNIVERSAL API EXPOSURE ---
-sys.path.append(os.path.join(os.path.dirname(__file__), "plugins"))
+from app_paths import APP_ROOT
+sys.path.append(os.path.join(APP_ROOT, "plugins"))
 from api_parser import load_universal_schemas
 
 def get_universal_tools():

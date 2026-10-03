@@ -4,8 +4,17 @@ Unit tests for external OAuth flows, session detection, and PKCE exchange.
 """
 
 import os
+import sys
 import unittest
 from unittest.mock import patch, MagicMock
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_BACKEND = os.path.join(_ROOT, "backend")
+if _BACKEND not in sys.path:
+    sys.path.insert(0, _BACKEND)
+if _ROOT not in sys.path:
+    sys.path.insert(1, _ROOT)
+
 from fastapi.testclient import TestClient
 
 import oauth_engine

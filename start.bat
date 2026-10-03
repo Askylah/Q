@@ -1,6 +1,6 @@
 @echo off
-echo [*] PersonaApp Launcher
-echo [*] Starting Streamlit...
+title Q Unified Server
 cd /d "%~dp0"
-python -m streamlit run app.py --server.port 8501
+echo [*] Launching Q Server...
+py run.py
 pause

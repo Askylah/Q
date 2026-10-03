@@ -13,7 +13,12 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_BACKEND = os.path.join(_ROOT, "backend")
+if _BACKEND not in sys.path:
+    sys.path.insert(0, _BACKEND)
+if _ROOT not in sys.path:
+    sys.path.insert(1, _ROOT)
 os.environ.pop("PERSONA_MASTER_KEY", None)
 
 import provider_registry as pr

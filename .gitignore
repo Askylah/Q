@@ -63,7 +63,7 @@ diff.txt
 uvicorn.log
 
 # ─── Diagnostic & Helper Scripts ─────────────────────────
-scripts/
+scripts/maintenance/
 check_commit_files.py
 check_environment_keys.py
 check_session_usage.py

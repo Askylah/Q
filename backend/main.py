@@ -1,3 +1,13 @@
+import os
+import sys
+
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+_APP_ROOT = os.path.dirname(_BACKEND_DIR)
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+if _APP_ROOT not in sys.path:
+    sys.path.insert(1, _APP_ROOT)
+
 from fastapi import FastAPI, HTTPException, File, UploadFile, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -8,7 +18,6 @@ import database as db
 import provider_registry
 import oauth_engine
 import json
-import os
 import shutil
 import uvicorn
 from dotenv import load_dotenv
@@ -78,7 +87,7 @@ def reap_observations_on_start():
 def verify_governance_registry():
     import sys
     import os
-    plugins_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
+    plugins_dir = os.path.join(_APP_ROOT, "plugins")
     if plugins_dir not in sys.path:
         sys.path.append(plugins_dir)
         
@@ -98,7 +107,7 @@ def verify_governance_registry():
     
     # 4. Get dynamic garage tools
     garage_tools = []
-    garage_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "garage")
+    garage_dir = os.path.join(_APP_ROOT, "garage")
     if os.path.exists(garage_dir):
         for f_name in os.listdir(garage_dir):
             if f_name.endswith(".json"):
@@ -118,7 +127,7 @@ def start_consciousness_daemon():
         try:
             import subprocess
             import sys
-            worker_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stream_worker.py")
+            worker_path = os.path.join(_BACKEND_DIR, "stream_worker.py")
             if os.path.exists(worker_path):
                 print(f"[SYSTEM] Spawning Consciousness Daemon background process: {worker_path}", flush=True)
                 subprocess.Popen([sys.executable, worker_path])
@@ -263,12 +272,12 @@ def load_personas_logic(username: str = None):
     personas = {}
     try:
         # Resolve path to ensure it finds personas.json even if run from parent
-        p_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "personas.json")
+        p_path = os.path.join(_APP_ROOT, "personas.json")
         with open(p_path, "r", encoding="utf-8") as f:
             personas = json.load(f)
             
         # Hydrate built-in personas with their text files
-        base_dir = os.path.dirname(os.path.abspath(__file__))
+        base_dir = _APP_ROOT
         for key, p in personas.items():
             if "file" in p:
                 full_path = p["file"] if os.path.isabs(p["file"]) else os.path.join(base_dir, p["file"])
@@ -463,7 +472,7 @@ async def delete_persona(persona_key: str, username: str = "default_user", curre
     return {"status": "success", "message": f"Persona {persona_key} deleted"}
 
 
-UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
+UPLOAD_DIR = os.path.join(_APP_ROOT, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @app.post("/upload")
@@ -1069,7 +1078,7 @@ async def update_settings(payload: SettingsPayload, current_user: str = Depends(
     return {"status": "success"}
 
 # --- STATIC FRONTEND SERVING (For "One-Click" Distributed Releases) ---
-FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vite-project", "dist")
+FRONTEND_DIST = os.path.join(_APP_ROOT, "vite-project", "dist")
 if os.path.exists(FRONTEND_DIST):
     # Mount the assets directory specifically
     assets_dir = os.path.join(FRONTEND_DIST, "assets")
