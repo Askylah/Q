@@ -28,9 +28,19 @@ sanitizer_config.json
 # ─── Database (Private User Data) ─────────────────────────
 users.db
 *.db
+*.db.*
+*.db-*
 *.db-shm
 *.db-wal
 *.db-journal
+*.migrated*
+*.backup*
+users.db.*
+
+# ─── Distributables & Build Artifacts ─────────────────────
+dist_installer/
+Q_Installer.zip
+*.zip
 
 # ─── Knowledge Bases (Vector Store) ──────────────────────
 knowledge_bases/*
@@ -49,8 +59,10 @@ garage/*
 *.tmpbak
 *.log
 diff.txt
+uvicorn.log
 
 # ─── Diagnostic & Helper Scripts ─────────────────────────
+scripts/
 check_commit_files.py
 check_environment_keys.py
 check_session_usage.py
