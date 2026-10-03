@@ -406,6 +406,7 @@ conversation* runs hotter. It is a guess. The replay sets it.
   conversation is actually repetitive, `REFLECT_SIM_CEIL` is too low.
 - §6.4 showed repetition never opened the gate on its own (tonic 0.48). The headline
   live check needs the gate open *first*: run `bad_tool` before `repetition`.
+> **[Session 2026-09-18, 2026-09-18 — CORRECTION]** First live run 20260918_214952 (§10) read against §7.3 and §7.4. **§7.3:** `REFLECT_SIM_CEIL` 0.85 separated the two regimes with room on both sides — moved windows read nearest 0.342 / 0.559 / 0.546 (reflect), dull windows 0.930 / 0.893 (shrug; intensity 0.534 / 0.289). One run, so the constant stays PROPOSED, but nothing in it argues for moving it. **§7.4 hazard 1** was already corrected by §8.1: the unit is user turns, replies are never raw events (checked again in the live DB — gaba_live has 26 `user_message`, 4 `dense_observation`, 1 `internal_reflection`, 0 `assistant_response`). **Hazard 3** is confirmed, and it matters more than the hand-off of 2026-09-18 22:16 read it: after the first shrug the watermark stays put, so EVERY further dull user turn is another shrug — turn 16 shrugged at `new_events=5` and turn 17 at `new_events=6`. The first shrug after a store costs five user turns; each one after costs one. Crossing 0.50 at weight ≈ 1 takes about 5 + 4 = 9 dull user turns, not the "~25" the hand-off said. **Hazard 4** held: tonic sat at 0.62 → 0.51 for the whole run and the daemon gate was open on every one of its 20 cycles, so the headline was testable. It did not fire only because the 17-turn plan gives phase C five turns, which is one shrug.
 
 ---
 
@@ -689,12 +690,113 @@ behavioral above + 185 `KB (n)` lore chunks + 8 dated `Reflection:` nodes. The 1
 `[[CONCEPT-KB-n-001]]` tags and no links — a duplicate of the knowledge base sitting next
 to the compiled modules. Deleting that entry (`zettel_entries` title "KB", 2026-05-25) is
 destructive and Sky's call; until then the daemon's "gaps" are mostly that duplicate.
+> **[Session 2026-09-16, 2026-09-16 — CORRECTION]** §9.11's "ARG-005, DOM-PSYCH-001, RESEARCH-003, FALL-META-001 link to nothing and nothing links to them" did not reproduce against the live DB on 2026-09-16 (read-only probe, app down). Each of the four already had a `links_to` edge: ARG-005 → MODE-001, RESEARCH-003 → RESEARCH-001, FALL-META-001 → FALL-INF-001, and DOM-CROSS-001 → DOM-PSYCH-001. What they lacked was reciprocity — nothing pointed *at* the first three, and DOM-PSYCH-001's own targets (TRAUMA-001, COPE-001) live in the system prompt, not the files, so it had no out-edge. Fixed in the source files (both copies CRLF-preserved, mirrored to the CLI copies under ~/.claude, originals in Desktop/Personas/src_backup_20260916_214108): ARG-005 +ARG-002 +TOOL-ARG-001; DOM-PSYCH-001 +PSYCH-RICK-001 +WOUND-004 +SCAR-007; RESEARCH-003 +RESEARCH-002; FALL-META-001 +FALL-DET-001 +ARG-002; reciprocal edges added on ARG-003, RESEARCH-001, FALL-DET-001, PSYCH-RICK-001, TOOL-ARG-001. `parse_on_demand_file` reads 104/104, zero unresolved tags outside the five system-prompt modules, no duplicate IDs and no duplicate bodies in either file. Edges materialise on the next recompile (file hash changed). The lore ingest is 215 `KB (n)` chunks, not 185: 214 match the CLI copy of Rick_kb.txt on three 120-char windows each and the 215th is the file's attribution footer — an actual duplicate. Deletion script (backup via sqlite backup API into backups/, then the same cascade as `delete_zettel_entry`) was prepared but not run from the agent side; Sky runs it.
+> **[Session 2026-09-18, 2026-09-18 — CORRECTION]** Run 20260918_214952 (§10) read against §9.7–9.10. **§9.7** grading is live and weights as designed: intensity 0.534 → weight 1.034, increment 0.0517 (streak 1); intensity 0.289 → weight 0.789, increment 0.0592 (streak 2 — the 1.5 growth beat the lower weight). Inhibition 0 → 0.0517 → 0.0188 after the silence → 0.078. The drain over the 608 s wait, 0.0517 → 0.0188, is exp(−608/600) = 0.36: `GABA_TAU_SEC` 600 reproduces to two decimals, and tonic over the same silence (0.561 → 0.508 = 0.3 + 0.261·exp(−608/2700)) reproduces dopamine's baseline and tau too. **§9.8:** `crossed` false on both rows; no `daemon/gate_close` or `gate_open` row in the run — the gate never closed by either source. **§9.9:** both shrugs at `gate_open=True` (tonic 0.561, 0.508), so the moot-shrug split has zero rows on its low-tonic side so far. **§9.10:** 20 `daemon/gate` rows with `exploring=True` and not one `da/boost` row — the daemon explored gaba_live/rick for 24 minutes and picked nothing, so `daemon_gap` redundancy was never exercised. Why it picked nothing (fresh persona instance, the 24 h cooldown, `DISSONANCE_CAP`) is not investigated here; it is on the 2026-09-18 list.
+
+---
+
+## Session 2026-09-18
+
+### 10. First live run — 2026-09-18, run 20260918_214952 **[D]**
+
+> Driver `labs/gaba_live.py` (live repo, `labs/` is reload-excluded), account `gaba_live/rick`,
+> model `google/gemini-3-flash-preview`, thinking Off, 17 turns at 30 s, 600 s silence after
+> turn 16, Redis up (`q-redis`), daemon pid 23496 on the §9 code. Sky drove it through Gemini.
+> Output `labs/live_out/20260918_214952/` (digest.txt, turns.csv, raw_sse.txt,
+> telemetry_rows.jsonl, meta.json); `python labs/gaba_live.py --digest-only 20260918_214952`
+> re-reads the sink. Run 20260918_214310 before it was killed at turn 8 and its ten user rows
+> stayed on the same account (10.5). ONE run: nothing below tunes a constant.
+
+**10.1 What the sink says.** 52 rows. Reflect verdicts: reflect 3 / shrug 2 / wait 12.
+Reflections at turns 1, 6, 11 (nearest 0.342, 0.559, 0.546 → stored, `gaba/novel`), shrugs at
+16 and 17 (nearest 0.930, 0.893; intensity 0.534, 0.289; streak 1, 2; inhibition
+0 → 0.052 → 0.078). `crossed` never, `gaba_shut` never, no gate edge rows. Daemon: 20
+`daemon/gate` rows, tonic 0.622 max and 0.508 min, `exploring=True` throughout, zero
+`da/boost`. Novelty paid on 2 of 3 stores (0.0885, 0.0043, then predicted → 0). One
+`da/tool_reward` at turn 17 (successes 1, tonic 0.508 → 0.562). Across the 608 s wait,
+inhibition drained 0.0517 → 0.0188 (= exp(−608/600): `GABA_TAU_SEC` reproduces) and tonic
+0.561 → 0.508 (= 0.3 + 0.261·exp(−608/2700): dopamine baseline and tau reproduce).
+
+**10.2 The cadence, measured, and the hand-off's arithmetic corrected.** Only `user_message`
+is ever written as a raw event (`llm_engine.py:1955`; this account has 26 `user_message`,
+4 `dense_observation`, 1 `internal_reflection`, 0 `assistant_response` — §8.1 stands). A
+window is five user messages against the five before them. The first shrug after a store
+costs five user turns; but the watermark does not advance on a shrug, so turn 17 was checked
+at `new_events=6` and shrugged again. Every further dull turn is a shrug. Reaching 0.50 takes
+five shrugs at weight ≈ 1 (§7.3 arithmetic, §9.7 grading), so about 5 + 4 = 9 dull user turns
+after the last store. The 2026-09-18 22:16 hand-off said "~25 repetitive user turns"; that
+assumed each shrug costs a fresh five, and the turn-17 row disproves it. The 17-turn plan
+gives phase C five turns, so this run could produce at most one shrug out of C (turn 16) and
+one more from the window that still held four verbatim turns (17). That is the whole reason
+the headline did not fire. 0.85 is not the problem.
+
+**10.3 The §8.1 decision, restated with these numbers.** Three ways to see a crossing:
+(a) change nothing and give phase C ten turns — the driver now takes `--c-turns 10` (22 turns,
+~28 min); this tests the organ exactly as built. (b) Log `assistant_response` as a raw event,
+so a turn is two events: halves the turn cost of a window but changes what the cosine compares
+(Rick's replies enter it, §7.4's worry comes back) and moves every constant. (c) Lower
+`om_turn_threshold` for the run: same organ, smaller window, noisier cosine. Recommendation:
+(a) first, because it produces the crossing with the constants untouched and the drain and tau
+numbers in 10.1 already reproduce. (b) is a design change and Sky's call; it should not be made
+to pass a test.
+
+**10.4 Dirt in the run, with the mechanism for the worst of it.** Turns 3 and 6 got the
+41-char string `⚠️ Connection Error: No API key provided.` as the whole reply (1.8 s each);
+turn 8 was blank (not saved); turn 11 stopped at 129 chars after 52 s with no finish_reason.
+The error string is `llm_engine.call_llm` line 446, and on the Vertex route it can ONLY be
+reached on a retry: attempt 1 carries the ADC token; the 429 and 401/403 handlers (lines
+~589–640) print `[VERTEX FALLBACK]`, swap `provider` to `anthropic` because the request
+carries no OpenRouter or universal key, and `continue`; attempt 2 then takes the key-pool
+branch, finds no Anthropic key, and emits the string. So "No API key provided" means "Vertex
+refused attempt 1". The real status and body sit in `last_error` and in the
+`[VERTEX FALLBACK]` / `[ROUTER] attempt 2 … key=EMPTY` lines on the app terminal; the sink has
+no row at that site. Which status is not measurable from here. Timing points at 429 from
+concurrency: the reflector's summariser is an LLM call in a thread of the app process
+(`memory_plugin.invoke_reflector`; `reflector_llm_callback` in `llm_engine` passes the chat
+turn's own `model_id`, so it is the same model on the same Vertex route), it fired 0.3 s after the turn-6 and turn-11 requests, and
+two of the three turns that overlapped a summariser call went bad (6: the error string; 11: the
+stalled stream) — §6 already records that Vertex 429s two probes in parallel. Turn 3 overlapped
+nothing in-process (no reflection; the daemon's monologue rows are at 22:06 and 22:16), so
+concurrency does not cover all three. Three failures; per the 2026-09-06 rule a cause gets
+named when the terminal lines or a telemetry row at the fallback site say which status it was.
+Harmless to the window (replies are not events). The driver now refuses to save a reply that
+starts with ⚠️ and counts it as an error turn.
+
+**10.5 Run residue.** The killed run 20260918_214310 left obs 5743–5752 (ten user rows, one
+`dense_observation` at 21:46) on the same account, so run 214952's turn 1 already had five new
+raw events and reflected at once; the cadence then fell on turns 1/6/11/16 instead of 5/10/15,
+one turn off the phase plan (window 12–16 was four verbatim turns plus one new topic, not five
+verbatim). The driver now registers `gaba_live_<stamp>` per run; `--user gaba_live` reuses the
+old account. The driver's docstring also claimed "Rick's replies are IN that window"; it does
+not any more.
+
+---
+
+## Next session — start here (2026-09-18)
+
+~~1. Before the next run, get the status behind "No API key provided" (§10.4): Sky reads the~~ — RESOLVED 2026-09-30 (Sky): the API key was in the wrong place, a config slip, not an API fault. Skip this item.
+   app terminal for the `[VERTEX FALLBACK]` lines at 21:51:08 and 21:54:02, or one
+   `telemetry.emit("llm", "fallback", status=…, body=…)` goes in at the two Vertex fallback
+   sites in `llm_engine.call_llm` (that edit reloads uvicorn and bounces the daemon; it
+   recovers, §40 of the livelock note).
+2. Decide §10.3. If (a): `python labs/gaba_live.py --c-turns 10` (22 turns, ~28 min, fresh
+   account), Redis and daemon up first. Expect reflections at 5 and 10, shrugs from 15 on,
+   `crossed=true` around turn 19–20, `daemon/gate_close closed_by=gaba`, the D turn's
+   `gaba/novel` with the gate still shut, then the reopen time across the 600 s wait.
+3. Then fill §7.3 for real: with two runs' shrug and moved `nearest` values, decide whether
+   0.85 stays; write the closure and reopen numbers into §9.8 / §9.9.
+4. Why did the daemon pick nothing for gaba_live/rick in 24 min of `exploring=True` (§10.1)?
+   Check `analyze_entropic_gaps` on that instance's graph, the 24 h cooldown and
+   `DISSONANCE_CAP` before calling it a bug.
+5. Carry the 2026-09-13 list from item 2.
+
+---
 
 ---
 
 ## Next session — start here (2026-09-13)
 
-1. After Sky's next session: `python telemetry.py 60` from the repo root (or
+1. ~~After Sky's next session~~ — done 2026-09-18, §10: `python telemetry.py 60` from the repo root (or
    `telemetry.read()` in a notebook). Expect one `reflect/wait` per user turn (each with
    `tonic` and `gate_open`), a `reflect/reflect` + `reflect/stored` + `gaba/novel` at
    turn 5, and the first real `nearest` values. Make turns 6–10 deliberately same-topic to
@@ -711,7 +813,7 @@ destructive and Sky's call; until then the daemon's "gaps" are mostly that dupli
    Remaining, Sky's calls: (a) delete the duplicate lore ingest of the KB (the 185 `KB (n)`
    chunks) so the daemon's census means something; (b) put the missing `---` separators
    back in the two source files (§9.12 lists them); (c) give ARG-005, DOM-PSYCH-001,
-   RESEARCH-003, FALL-META-001 a `Links:` line or accept them as leaves.
+   ~~RESEARCH-003, FALL-META-001 a `Links:` line or accept them as leaves.~~ — done 2026-09-16, correction under §9; (a) script ready for Sky, (b) untouched
 5. The summariser is blind to tool calls (§9.1). Either feed `tool_output` rows into the
    window (ties to the 2026-09-11 item 2 question about raw event types) or accept it.
 6. Then the 2026-09-11 list below, from item 2.

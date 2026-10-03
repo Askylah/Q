@@ -9,10 +9,11 @@ dist/
 build/
 
 # ─── Private Character Files ──────────────────────────────
-personas/rick.txt
-personas/rick_ondemand.txt
+personas/*rick*
+personas/*Rick*
 personas.json
 !personas/global_rules.txt
+labs/live_out/
 
 # ─── Environment & Secrets ────────────────────────────────
 .env
