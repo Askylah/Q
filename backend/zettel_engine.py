@@ -20,6 +20,7 @@ import json
 import uuid
 import re
 import os
+import functools
 import threading
 import numpy as np
 from collections import OrderedDict
@@ -395,6 +396,175 @@ def _generate_node_id(category: str, title: str, existing_ids: set) -> str:
 
 
 # ═══════════════════════════════════════════════════════════
+# HANDWRITTEN LORE (on-demand-format modules pasted into the lorebook)
+# ═══════════════════════════════════════════════════════════
+
+# Lesion: ZETTEL_LORE_HANDWRITTEN_OFF=1 sends every lore entry down the old
+# auto-split + LLM path, exactly as before 2026-10-04.
+LORE_HANDWRITTEN_OFF_ENV = "ZETTEL_LORE_HANDWRITTEN_OFF"
+
+
+def _env_flag(name: str) -> bool:
+    """Lesion flags are read per call, so a test (or an operator with a
+    debugger) can flip one without reloading the module."""
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _bare_tag(tag: str) -> str:
+    """Comparable node_id: lore tags carry [[brackets]], module IDs do not;
+    case is not a distinction anyone means."""
+    return (tag or "").strip().strip("[]").strip().upper()
+
+
+def _import_handwritten_entry(db_conn, model, username: str, persona: str, entry_id: str,
+                              entry_title: str, raw_content: str, modules: list, parse_stats: dict) -> str:
+    """Store each parsed module as one behavioral node, the way
+    compile_behavioral_zettels stores on-demand files: node_id = the module's
+    own ID, its title, content `TRIGGERS: ...` + body, DETERMINISTIC, embedding
+    of the body. source_entry_id = the lore entry. Returns the import note.
+
+    An ID this user+persona already has from another source (an on-demand file
+    or another lore entry) is SKIPPED and reported -- the existing module stays.
+    Two modules with one ID was never a thing the graph could represent: typed
+    links resolve a tag to one node, and a silent second copy is how the "KB"
+    entry ended up duplicating Rick_kb.txt."""
+    import sqlite3
+    import hashlib
+    name = f"lore entry '{entry_title}'"
+
+    conn = sqlite3.connect(db.DB_PATH)
+    c = conn.cursor()
+    # Re-processing replaces the entry's own nodes (update_zettel_entry already
+    # deleted them; this keeps a retry idempotent). Edges go with their nodes.
+    c.execute("""DELETE FROM zettel_links
+                 WHERE source_node_id IN (SELECT id FROM zettel_nodes WHERE source_entry_id=?)
+                    OR target_node_id IN (SELECT id FROM zettel_nodes WHERE source_entry_id=?)""",
+              (entry_id, entry_id))
+    c.execute("DELETE FROM zettel_fts WHERE node_db_id IN (SELECT id FROM zettel_nodes WHERE source_entry_id=?)",
+              (entry_id,))
+    c.execute("DELETE FROM zettel_nodes WHERE source_entry_id=?", (entry_id,))
+    conn.commit()
+    c.execute("""SELECT node_id, source_entry_id FROM zettel_nodes
+                 WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?""", (username, persona))
+    owner = {}
+    for tag, src in c.fetchall():
+        owner.setdefault(_bare_tag(tag), src)
+    c.execute("""SELECT id, title FROM zettel_entries
+                 WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?""", (username, persona))
+    entry_titles = dict(c.fetchall())
+    conn.close()
+
+    def source_label(src):
+        if src in entry_titles:
+            return f"lore entry '{entry_titles[src]}'"
+        if src and ("/" in src or "\\" in src):
+            return os.path.basename(src)
+        return src or "an unknown source"
+
+    kept, dup_self, failed = [], [], []
+    dup_other = OrderedDict()          # source label -> [IDs]
+    seen = set()
+    for mod in modules:
+        key = _bare_tag(mod.id)
+        if key in seen:
+            dup_self.append(mod.id)
+            print(f"[ZETTEL LORE] !!! DUPLICATE ID {mod.id} appears twice in {name}; "
+                  f"the first is kept, this one is SKIPPED.")
+            continue
+        seen.add(key)
+        if key in owner:
+            label = source_label(owner[key])
+            dup_other.setdefault(label, []).append(mod.id)
+            print(f"[ZETTEL LORE] !!! DUPLICATE ID {mod.id} in {name} is already defined by {label} "
+                  f"for {username}/{persona}; this module is SKIPPED and the existing one stays.")
+            continue
+        kept.append(mod)
+
+    vecs = []
+    if model and kept:
+        try:
+            vecs = list(model.encode([m.content for m in kept], convert_to_numpy=True))
+        except Exception as e:
+            print(f"[ZETTEL LORE ERROR] embedding failed for {name}: {e}; modules stored without vectors")
+            vecs = []
+    content_hash = (hashlib.sha256((raw_content or "").encode("utf-8")).hexdigest()
+                    + f":p{ON_DEMAND_PARSER_VERSION}:lore")
+    written = []
+    for i, mod in enumerate(kept):
+        blob = np.asarray(vecs[i], dtype=np.float32).tobytes() if i < len(vecs) else None
+        ok = db_conn.add_zettel_node(
+            node_id_pk=str(uuid.uuid4()),
+            username=username,
+            persona=persona,
+            node_id_tag=mod.id,
+            title=mod.title,
+            content=f"TRIGGERS: {','.join(mod.triggers)}\n\n{mod.content}",
+            category="CONCEPT",
+            embedding_blob=blob,
+            source_entry_id=entry_id,
+            node_class='behavioral',
+            trigger_type='DETERMINISTIC',
+            content_hash=content_hash,
+            trigger_match=mod.match
+        )
+        (written if ok else failed).append(mod)
+
+    # Nodes changed under the caches: drop the vector matrix AND the trigger
+    # cache (invalidate_zettel_cache does both, plus Redis), then give the new
+    # modules their typed edges -- in both directions, since a file module can
+    # link INTO a lore module as well.
+    invalidate_zettel_cache(username, persona)
+    try:
+        rebuild_typed_links(username, persona, load_persona_on_demand_files(persona))
+        _TYPED_LINKS_OK.add((username.lower(), persona.lower()))
+    except Exception as e:
+        print(f"[ZETTEL LORE] typed-link rebuild failed (non-fatal): {e}")
+
+    conn = sqlite3.connect(db.DB_PATH)
+    c = conn.cursor()
+    c.execute("""SELECT count(*) FROM zettel_links l JOIN zettel_nodes n ON n.id = l.source_node_id
+                 WHERE n.source_entry_id=? AND l.relationship=?""", (entry_id, TYPED_LINK_RELATIONSHIP))
+    edges = c.fetchone()[0]
+    c.execute("""SELECT node_id FROM zettel_nodes
+                 WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?""", (username, persona))
+    known = {_bare_tag(r[0]) for r in c.fetchall()}
+    conn.close()
+    unresolved = []
+    for mod in written:
+        for l in mod.links:
+            if l and _bare_tag(l) not in known and l not in unresolved:
+                unresolved.append(l)
+
+    parts = [f"handwritten: {len(written)} module(s) imported, {edges} typed link(s)"]
+    exact_only = [m.id for m in written if m.match == "exact"]
+    if exact_only:
+        parts.append(f"{len(exact_only)} exact-trigger-only (Match: exact): {', '.join(exact_only)}")
+    for label, ids in dup_other.items():
+        parts.append(f"skipped {len(ids)} duplicate ID(s) already defined by {label}: {', '.join(ids)}")
+    if dup_self:
+        parts.append(f"skipped {len(dup_self)} ID(s) repeated inside this entry: {', '.join(dup_self)}")
+    if failed:
+        parts.append(f"FAILED to store {len(failed)}: {', '.join(m.id for m in failed)}")
+    if parse_stats.get("no_body"):
+        parts.append(f"skipped {len(parse_stats['no_body'])} header(s) with no body: "
+                     f"{', '.join(parse_stats['no_body'])}")
+    if parse_stats.get("preamble_chars"):
+        parts.append(f"ignored {parse_stats['preamble_chars']} chars before the first header")
+    if parse_stats.get("orphan_chars"):
+        parts.append(f"ignored {parse_stats['orphan_chars']} chars of body text with no header "
+                     f"(a '---' inside a module body?)")
+    if unresolved:
+        parts.append(f"unresolved links: {', '.join('[[' + u + ']]' for u in unresolved)}")
+    if kept and not vecs:
+        parts.append("stored without vectors (no embedding model); triggers and keyword search still work")
+    note = "; ".join(parts)
+    print(f"[ZETTEL LORE] {name}: {note}")
+    if parse_stats.get("preamble_chars") or parse_stats.get("orphan_chars"):
+        print(f"[ZETTEL LORE] {name}: text outside any module was NOT imported (see note above).")
+    return note
+
+
+# ═══════════════════════════════════════════════════════════
 # ENTRY PROCESSING (Write Path)
 # ═══════════════════════════════════════════════════════════
 
@@ -424,11 +594,40 @@ def process_entry(username: str, persona: str, entry_id: str, api_keys: dict, mo
     
     raw_content = entry["content"]
     entry_title = entry["title"]
-    
+
+    # 1b. Handwritten modules stay whole (2026-10-04). This endpoint used to
+    # chunk EVERY entry by paragraph and let an LLM file the chunks under
+    # fiction categories with invented IDs -- Rick_kb.txt pasted as lore entry
+    # "KB" became 229 nodes like [[ABILITY-MULTIVERSAL-DEBUGGIN-001]], headers
+    # severed from bodies, no triggers. Text in the on-demand format (ID: /
+    # Title: / Links: / Triggers: headers) now becomes one behavioral node per
+    # module, exactly as an on_demand_files entry would. Anything else still
+    # takes the auto-split + LLM path below. Lesion: ZETTEL_LORE_HANDWRITTEN_OFF=1.
+    if not _env_flag(LORE_HANDWRITTEN_OFF_ENV):
+        parse_stats = {}
+        modules = parse_on_demand_text(raw_content or "", f"lore entry '{entry_title}'", stats=parse_stats)
+        if modules:
+            print(f"[ZETTEL] Entry '{entry_title}': handwritten format, {len(modules)} module(s) -- "
+                  f"kept intact (own IDs, links, triggers); no chunking, no LLM")
+            try:
+                note = _import_handwritten_entry(db_conn, model, username, persona, entry_id,
+                                                 entry_title, raw_content, modules, parse_stats)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                note = f"handwritten import FAILED: {e}"
+                print(f"[ZETTEL LORE ERROR] '{entry_title}': {note}")
+            # Processed either way: a failed import must not leave the UI's lore
+            # poll spinning forever. The note says what happened.
+            db_conn.set_zettel_entry_import_note(entry_id, note)
+            db_conn.mark_zettel_entry_processed(entry_id)
+            return
+
     # 2. Chunk
     chunks = chunk_text(raw_content)
     if not chunks:
         print(f"[ZETTEL] No chunks generated for entry {entry_id}")
+        db_conn.set_zettel_entry_import_note(entry_id, "auto-split: nothing to index (every chunk was 10 chars or less)")
         db_conn.mark_zettel_entry_processed(entry_id)
         return
     
@@ -586,6 +785,10 @@ def process_entry(username: str, persona: str, entry_id: str, api_keys: dict, mo
                     print(f"[ZETTEL]   Cross-link: new[{i}] → {existing_node['node_id']} (sim: {sims[idx]:.2f})")
     
     # 7. Mark entry as processed
+    llm_tagged = len({n.get("chunk_index") for n in all_nodes if isinstance(n, dict)})
+    db_conn.set_zettel_entry_import_note(
+        entry_id, f"auto-split: {len(created_node_ids)} chunk(s) as lore nodes; "
+                  f"LLM categorised {min(llm_tagged, len(created_node_ids))} of them")
     db_conn.mark_zettel_entry_processed(entry_id)
     print(f"[ZETTEL] ✅ Entry '{entry_title}' fully processed: {len(created_node_ids)} nodes")
 
@@ -646,12 +849,22 @@ def load_persona_on_demand_files(persona_key: str) -> list:
         if not files and persona_data.get("on_demand_file"):
             files = [persona_data.get("on_demand_file")]
             
+        # FIX(backend-move): relative paths in personas.json are relative to the
+        # project root ("personas/rick_ondemand.txt"). They used to be joined to
+        # this file's directory, which WAS the root until the 2026-10-03 move into
+        # backend/; after it every path pointed at backend/personas/..., which does
+        # not exist, so no on-demand file was ever recompiled again (an edited
+        # rick_ondemand.txt never reached the graph) and a typed-link rebuild would
+        # have parsed nothing. Root first -- the same join the pre-move code made,
+        # so the stored source_entry_id strings still match -- then backend/.
         base_dir = os.path.dirname(os.path.abspath(__file__))
         resolved = []
         for p in files:
             if p:
                 if not os.path.isabs(p):
-                    p = os.path.join(base_dir, p)
+                    root_p = os.path.join(APP_ROOT, p)
+                    local_p = os.path.join(base_dir, p)
+                    p = root_p if (os.path.exists(root_p) or not os.path.exists(local_p)) else local_p
                 resolved.append(p)
         return resolved
     except Exception:
@@ -688,10 +901,11 @@ def get_file_hash_cached(filepath: str) -> str:
 
 class OnDemandModule:
     """Single parsed ON_DEMAND module."""
-    __slots__ = ("id", "title", "type", "links", "triggers", "content", "priority", "token_estimate", "regex")
+    __slots__ = ("id", "title", "type", "links", "triggers", "content", "priority", "token_estimate", "regex",
+                 "match")
 
     def __init__(self, id: str, title: str, type: str, links: list,
-                 triggers: list, content: str, priority: str = "NORMAL"):
+                 triggers: list, content: str, priority: str = "NORMAL", match: str = "all"):
         self.id = id
         self.title = title
         self.type = type
@@ -699,6 +913,9 @@ class OnDemandModule:
         self.triggers = [t.strip().lower() for t in triggers if t.strip()]
         self.content = content.strip()
         self.priority = priority
+        # "exact": only the exact trigger regex may fire this module; the
+        # inflected and semantic trigger layers skip it (header `Match: exact`)
+        self.match = match
         self.token_estimate = int(len(self.content) / 4)
         
         if self.triggers:
@@ -734,10 +951,30 @@ def _parse_header(header_text: str) -> dict:
             
     return header
 
-ON_DEMAND_PARSER_VERSION = 2
+# v3 (2026-10-04): `Match:` is a header key. Before it was one, a `Match:` line
+# ENDED the header and became the first line of the body (the same way any
+# unknown key line does), so every file must be re-parsed once.
+ON_DEMAND_PARSER_VERSION = 3
 
 
-_HEADER_KEYS = ("ID", "Title", "Type", "Links", "Triggers", "Priority")
+_HEADER_KEYS = ("ID", "Title", "Type", "Links", "Triggers", "Priority", "Match")
+
+# `Match:` header values. "all" (default) = exact, inflected and semantic
+# trigger layers; "exact" = the exact `\b<trigger>\b` regex only. For modules
+# that must stay rare -- Rick's WALL: SCAR/REL/WOUND/TRAUMA/FAIL/VULN/COPE fire
+# on their exact words or not at all.
+MATCH_MODES = ("all", "exact")
+
+
+def _match_mode(value, module_id: str = "?", name: str = "?", quiet: bool = False) -> str:
+    """Normalise a `Match:` header value; anything unknown is 'all', loudly."""
+    v = (value or "all").strip().lower()
+    if v in MATCH_MODES:
+        return v
+    if not quiet:
+        print(f"[ZETTEL PARSER] {name}: module {module_id} has unknown Match value {value!r} "
+              f"(expected one of {', '.join(MATCH_MODES)}); treating it as 'all'.")
+    return "all"
 
 
 def _is_header_key_line(line: str) -> bool:
@@ -745,7 +982,7 @@ def _is_header_key_line(line: str) -> bool:
     return any(l.startswith(k + ":") for k in _HEADER_KEYS)
 
 
-def _split_embedded_header(block: str, filepath: str = "") -> list:
+def _split_embedded_header(block: str, filepath: str = "", name: str = None, quiet: bool = False) -> list:
     """Classify a '---'-delimited block into [(kind, text)...], kind in
     {"header", "body"}, tolerating missing separators in either position:
 
@@ -757,7 +994,11 @@ def _split_embedded_header(block: str, filepath: str = "") -> list:
     ends at the last consecutive known key line (ID/Title/Type/Links/Triggers/
     Priority). Text before it is body; text after it is fed back through this
     function, so a run of fused modules yields every one of them. Each
-    recovery is logged so the author can put the separators back."""
+    recovery is logged so the author can put the separators back.
+
+    `name` labels the log lines (default: the basename of `filepath`), so text
+    that never lived in a file (a lorebook entry) can be parsed too. `quiet`
+    silences the recovery lines for re-parses that already reported them."""
     lines = block.split("\n")
     n = len(lines)
     start = None
@@ -786,25 +1027,27 @@ def _split_embedded_header(block: str, filepath: str = "") -> list:
     header = "\n".join(lines[start:last_key + 1]).strip()
     before = "\n".join(lines[:start]).strip()
     after = "\n".join(lines[last_key + 1:]).strip()
-    name = os.path.basename(filepath) or "?"
+    label = (name if name is not None else os.path.basename(filepath)) or "?"
     first = header.splitlines()[0][:40]
-    if before:
-        print(f"[ZETTEL PARSER] {name}: recovered a header without a '---' before it ({first}); "
+    if before and not quiet:
+        print(f"[ZETTEL PARSER] {label}: recovered a header without a '---' before it ({first}); "
               f"put the separator back in the source file.")
-    if after:
-        print(f"[ZETTEL PARSER] {name}: recovered a header without a '---' after it ({first}); "
+    if after and not quiet:
+        print(f"[ZETTEL PARSER] {label}: recovered a header without a '---' after it ({first}); "
               f"put the separator back in the source file.")
     out = []
     if before:
         out.append(("body", before))
     out.append(("header", header))
     if after:
-        out.extend(_split_embedded_header(after, filepath))
+        out.extend(_split_embedded_header(after, filepath, name, quiet))
     return out
 
 
 def parse_on_demand_file(filepath: str) -> list:
-    """Parse a Markdown/text file containing multiple YAML-header modules."""
+    """Parse a Markdown/text file containing multiple YAML-header modules.
+    Thin wrapper: the format lives in parse_on_demand_text, which the
+    lorebook also uses for handwritten entries (2026-10-04)."""
     if not os.path.exists(filepath):
         return []
 
@@ -814,6 +1057,29 @@ def parse_on_demand_file(filepath: str) -> list:
     except Exception:
         return []
 
+    return parse_on_demand_text(raw_content, os.path.basename(filepath))
+
+
+def parse_on_demand_text(text: str, name: str = "?", stats: dict = None, quiet: bool = False) -> list:
+    """Parse text containing multiple YAML-header modules -- the on-demand file
+    format, which is also Sky's handwritten-lore format:
+
+        ---
+        ID: X-001 / Title: ... / Type: ... / Links: [[Y-001]] / Triggers: a, b
+        ---
+        body
+
+    `name` labels the log lines. `stats`, if a dict is passed, receives what
+    the parser set aside without saying so in its own log (files have always
+    been silent about it, and their log stays byte-identical):
+        preamble_chars  body text before the first header
+        orphan_chars    body text after a module's body with no header of its
+                        own (usually a '---' used as a rule INSIDE a body)
+        no_body         IDs whose header had no body (these ARE logged)
+    `quiet` suppresses every log line (re-parses of text already reported)."""
+    # Files arrive newline-normalised (text mode); a lorebook paste may carry
+    # CRLF, which would otherwise leave '\r' on every body line.
+    raw_content = (text or "").replace("\r\n", "\n")
     modules = []
     # FIX(parser-eats-module): the old test for "is this block a header" was
     # `"ID:" in block and "Title:" in block`. When an author forgets the '---'
@@ -830,16 +1096,21 @@ def parse_on_demand_file(filepath: str) -> list:
     blocks = re.split(r"^---\s*$", raw_content, flags=re.MULTILINE)
 
     current_header = None
+    preamble_chars = 0
+    orphan_chars = 0
+    no_body = []
     for block in blocks:
         block = block.strip()
         if not block:
             continue
-        for kind, text in _split_embedded_header(block, filepath):
+        for kind, part in _split_embedded_header(block, "", name=name, quiet=quiet):
             if kind == "header":
                 if current_header is not None:
-                    print(f"[ZETTEL PARSER] {os.path.basename(filepath)}: module "
-                          f"{current_header.get('ID', '?')} has no body (header followed by header); skipped.")
-                current_header = _parse_header(text)
+                    no_body.append(current_header.get('ID', '?'))
+                    if not quiet:
+                        print(f"[ZETTEL PARSER] {name}: module "
+                              f"{current_header.get('ID', '?')} has no body (header followed by header); skipped.")
+                current_header = _parse_header(part)
             elif current_header is not None:
                 modules.append(OnDemandModule(
                     id=current_header.get("ID", "UNKNOWN"),
@@ -847,15 +1118,28 @@ def parse_on_demand_file(filepath: str) -> list:
                     type=current_header.get("Type", "ON_DEMAND"),
                     links=current_header.get("Links", []),
                     triggers=current_header.get("Triggers", []),
-                    content=text,
-                    priority=current_header.get("Priority", "NORMAL")
+                    content=part,
+                    priority=current_header.get("Priority", "NORMAL"),
+                    match=_match_mode(current_header.get("Match"), current_header.get("ID", "?"),
+                                      name, quiet)
                 ))
                 current_header = None
-            # else: body text before any header -- preamble, ignored
+            # else: body text with no header -- preamble (before the first
+            # module) or an orphan (after one), ignored; counted for `stats`
+            elif modules or no_body:
+                orphan_chars += len(part)
+            else:
+                preamble_chars += len(part)
     if current_header is not None:
-        print(f"[ZETTEL PARSER] {os.path.basename(filepath)}: module "
-              f"{current_header.get('ID', '?')} has no body (end of file); skipped.")
+        no_body.append(current_header.get('ID', '?'))
+        if not quiet:
+            print(f"[ZETTEL PARSER] {name}: module "
+                  f"{current_header.get('ID', '?')} has no body (end of file); skipped.")
 
+    if stats is not None:
+        stats["preamble_chars"] = preamble_chars
+        stats["orphan_chars"] = orphan_chars
+        stats["no_body"] = no_body
     return modules
 
 def compile_behavioral_zettels(username: str, persona: str, on_demand_paths: list):
@@ -960,7 +1244,8 @@ def compile_behavioral_zettels(username: str, persona: str, on_demand_paths: lis
                 source_entry_id=path,
                 node_class='behavioral',
                 trigger_type='DETERMINISTIC',
-                content_hash=file_hash
+                content_hash=file_hash,
+                trigger_match=mod.match
             )
             
         any_recompiled = True
@@ -1013,45 +1298,83 @@ def _ensure_typed_links(username: str, persona: str, on_demand_paths: list, forc
 
 
 def rebuild_typed_links(username: str, persona: str, on_demand_paths: list) -> dict:
-    """Parse every on-demand file for the persona, resolve each module's typed
-    Links against the persona's node_id tags, replace all `links_to` edges for
-    the persona with the result, and prune any edge whose end no longer exists.
-    Returns {"edges": int, "unresolved": [tag...], "pruned": int}. Pure SQLite,
-    no model, no LLM."""
+    """Parse every on-demand file for the persona AND every handwritten
+    lorebook entry (2026-10-04), resolve each module's typed Links against the
+    persona's node_id tags, replace the `links_to` edges of every source that
+    was parsed with the result, and prune any edge whose end no longer exists.
+    Returns {"edges": int, "unresolved": [tag...], "pruned": int,
+    "lore_modules": int}. Pure SQLite, no model, no LLM.
+
+    Edges are replaced per SOURCE, not per persona: a file that could not be
+    read this time (missing, mid-save) keeps the edges it already had instead
+    of losing every one of them. That was the failure waiting in the old
+    wholesale delete -- with the 2026-10-03 path regression, one rebuild would
+    have wiped all of Rick's typed edges."""
     import sqlite3, uuid
     wanted = {}
+    sources = set()
     for path in on_demand_paths or []:
         if not path or not os.path.exists(path):
             continue
-        for mod in parse_on_demand_file(path):
+        mods = parse_on_demand_file(path)
+        if mods:
+            sources.add(path)
+        for mod in mods:
             if mod.links:
                 wanted.setdefault(mod.id, [])
                 wanted[mod.id].extend(l for l in mod.links if l and l != mod.id)
     conn = sqlite3.connect(db.DB_PATH)
     c = conn.cursor()
-    c.execute("""SELECT node_id, id FROM zettel_nodes
+    c.execute("""SELECT node_id, id, source_entry_id, node_class FROM zettel_nodes
                  WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?""", (username, persona))
     tag_to_pk = {}
-    for tag, pk in c.fetchall():
+    entry_tag_to_pk = {}
+    behavioral_sources = set()
+    for tag, pk, src, ncls in c.fetchall():
         tag_to_pk.setdefault(tag, pk)
         # lore nodes carry their brackets in node_id; typed links do not
         tag_to_pk.setdefault(tag.strip("[]"), pk)
+        entry_tag_to_pk.setdefault((src, tag), pk)
+        if ncls == "behavioral":
+            behavioral_sources.add(src)
+    # Handwritten lorebook entries: an entry counts once it owns behavioral
+    # nodes (process_entry's handwritten path). An entry whose text merely
+    # LOOKS handwritten but went through the old auto-split path owns lore
+    # nodes with invented IDs; its Links header describes nodes it does not
+    # have, so it contributes nothing.
+    lore_wanted = []
+    if behavioral_sources:
+        c.execute("""SELECT id, title, raw_content FROM zettel_entries
+                     WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?""", (username, persona))
+        for eid, etitle, raw in c.fetchall():
+            if eid not in behavioral_sources:
+                continue
+            sources.add(eid)
+            for mod in parse_on_demand_text(raw or "", f"lore entry '{etitle}'", quiet=True):
+                if mod.links:
+                    lore_wanted.append((eid, mod.id, [l for l in mod.links if l and l != mod.id]))
     # prune edges with a missing end (global: a dangling edge is garbage for everyone)
     c.execute("""DELETE FROM zettel_links
                  WHERE source_node_id NOT IN (SELECT id FROM zettel_nodes)
                     OR target_node_id NOT IN (SELECT id FROM zettel_nodes)""")
     pruned = c.rowcount
-    # replace this persona's typed edges wholesale (the file is the source of truth)
-    c.execute("""DELETE FROM zettel_links
-                 WHERE relationship=? AND source_node_id IN
-                       (SELECT id FROM zettel_nodes WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?)""",
-              (TYPED_LINK_RELATIONSHIP, username, persona))
+    # replace the typed edges of every source parsed above (its text is the source of truth)
+    for src in sources:
+        c.execute("""DELETE FROM zettel_links
+                     WHERE relationship=? AND source_node_id IN
+                           (SELECT id FROM zettel_nodes WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?
+                                                          AND source_entry_id=?)""",
+                  (TYPED_LINK_RELATIONSHIP, username, persona, src))
     edges = 0
     unresolved = set()
     seen = set()
     ts = str(__import__("datetime").datetime.now())
-    for src_tag, targets in wanted.items():
-        src_pk = tag_to_pk.get(src_tag)
+    # file modules resolve their source tag persona-wide (unchanged); a lore
+    # module resolves it only among its own entry's nodes, so a module skipped
+    # as a duplicate never grafts its Links onto the copy that won
+    resolved_wanted = [(tag_to_pk.get(s), t) for s, t in wanted.items()]
+    resolved_wanted += [(entry_tag_to_pk.get((eid, s)), t) for eid, s, t in lore_wanted]
+    for src_pk, targets in resolved_wanted:
         if not src_pk:
             continue
         for tgt_tag in targets:
@@ -1069,9 +1392,350 @@ def rebuild_typed_links(username: str, persona: str, on_demand_paths: list) -> d
     conn.commit()
     conn.close()
     print(f"[ZETTEL COMPILER] typed links for {username}/{persona}: {edges} edge(s) from "
-          f"{len(wanted)} module(s); {len(unresolved)} unresolved tag(s); {pruned} dangling edge(s) pruned"
+          f"{len(wanted)} module(s)"
+          + (f" + {len(lore_wanted)} handwritten lore module(s)" if lore_wanted else "")
+          + f"; {len(unresolved)} unresolved tag(s); {pruned} dangling edge(s) pruned"
           + (f" | unresolved: {sorted(unresolved)[:8]}" if unresolved else ""), flush=True)
-    return {"edges": edges, "unresolved": sorted(unresolved), "pruned": pruned}
+    return {"edges": edges, "unresolved": sorted(unresolved), "pruned": pruned,
+            "lore_modules": len(lore_wanted)}
+
+
+# ═══════════════════════════════════════════════════════════
+# TRIGGER MATCHING (Phase 0 of the read path)
+# ═══════════════════════════════════════════════════════════
+#
+# Three layers, strictly ordered, sharing the MAX_DETERMINISTIC cap:
+#   1. exact     the original `\b<trigger>\b` regex on the lowercased query.
+#                Unchanged and always first: anything that fired before still
+#                fires, ahead of everything below.
+#   2. inflected query and trigger tokens normalised by a small explicit suffix
+#                stripper; multi-word triggers match as token sequences. Fixes
+#                "debug" vs "debugging", "bugs" vs "bug", "errors" vs "error".
+#                Lesion: ZETTEL_TRIGGER_INFLECT_OFF=1.
+#   3. semantic  each module's trigger phrases are embedded once (shared
+#                MiniLM, cached); the query vector the vector path already
+#                computes is compared against them and the result blended with
+#                that path's own query-vs-body similarity. A module at or above
+#                SEMANTIC_TRIGGER_THRESHOLD becomes a trigger seed AFTER exact
+#                and inflected hits. The same score gates layer 2 (see
+#                INFLECT_SEMANTIC_GATE). Lesion: ZETTEL_TRIGGER_SEMANTIC_OFF=1.
+#
+# Measured 2026-10-04 on Rick's two files, 18 realistic prompts: the exact
+# regex fired nothing on 10 of 18 ("can you debug this for me", "it throws
+# errors on startup", "the fix didn't work"...), while the body-embedding
+# vector path ranked the right modules top at 0.17-0.37, under its 0.40 floor.
+
+TRIGGER_INFLECT_OFF_ENV = "ZETTEL_TRIGGER_INFLECT_OFF"
+TRIGGER_SEMANTIC_OFF_ENV = "ZETTEL_TRIGGER_SEMANTIC_OFF"
+TRIGGER_INFLECT_GATE_OFF_ENV = "ZETTEL_TRIGGER_INFLECT_GATE_OFF"
+
+# All four constants below are PROPOSED (2026-10-04): picked from a labelled
+# sweep on Rick's two files (labs/trigger_calibration.py -- positives: every
+# module's own trigger phrases, 65 hand-written paraphrases that avoid the
+# trigger words, the 18 audit prompts; negatives: 62 small-talk / family /
+# philosophy / everyday lines). Synthetic data, not live chat. Re-measure.
+#
+# Semantic score of a module = BODY_WEIGHT * cos(query, module body embedding;
+# the vector path's own number) + (1 - BODY_WEIGHT) * best cos(query, one of
+# its trigger phrases). Youden J (recall on paraphrases+probes minus the
+# negative fire rate) on that sweep: one card embedding 0.38 @ 0.26, best
+# single phrase 0.22 @ 0.40-0.45, this 50/50 blend 0.51 @ 0.29-0.30. Phrases
+# alone confuse senses ("security vulnerability" -> Rick's emotional
+# VULN-* modules); the body says what the module is about.
+SEMANTIC_TRIGGER_MODE = "phrase_max"       # or "card": one "Title: a, b, c" embedding
+SEMANTIC_TRIGGER_BODY_WEIGHT = 0.5
+# Re-picked 2026-10-04 (round 2) on the files as Sky's WALL rewrite left them
+# (33 SCAR/REL/WOUND/TRAUMA/FAIL/VULN/COPE modules `Match: exact`), by the rule
+# "best J among thresholds where the full pipeline fires outside the acceptable
+# set on <= 4/62 negatives and a CODE/DEBUG/SEC/ARCH module on <= 1/62": 0.34
+# (3/62 and 1/62, the old exact matcher's own counts on those files). 0.30 had
+# the best unconstrained J but 8/62 and 3/62.
+SEMANTIC_TRIGGER_THRESHOLD = 0.34
+# An inflected-only hit must also clear this semantic score, when one exists.
+# On the sweep every wanted inflected hit scored >= 0.30 ("debug" -> debugging
+# 0.41-0.45, "bugs"/"errors" 0.30-0.35) and every unwanted one <= 0.24 ("what
+# do you mean" -> meaning 0.22, "log in" -> logging 0.19, "my parents" ->
+# parenting 0.16, "on a scale of" -> scaling 0.14). Lesion:
+# ZETTEL_TRIGGER_INFLECT_GATE_OFF=1 (plain inflection, as first specified).
+INFLECT_SEMANTIC_GATE = 0.25
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)*")
+_INFLECT_MIN_LEN = 4        # shorter tokens ("bug", "ai", "cve") only match as-is...
+_VOWELS = "aeiou"           # ...but "bugs" -> "bug" still reaches them
+
+# (model, phrase) -> unit vector, shared by every user/persona (Sky's test
+# accounts carry the same Rick modules). LRU so a long-running process cannot
+# grow it forever.
+_TRIGGER_VEC_CACHE = OrderedDict()
+_TRIGGER_VEC_CACHE_MAX = 20000
+_TRIGGER_VEC_LOCK = threading.Lock()
+
+
+def _tokenize(text: str) -> list:
+    text = (text or "").lower().replace("’", "'").replace("‘", "'")
+    return _TOKEN_RE.findall(text)
+
+
+def _is_cvc(s: str) -> bool:
+    """consonant-vowel-consonant ending, last not w/x/y (Porter's *o): the
+    stems that lost a silent e -- cod(e), cop(e), tim(e) -- but not fix, act."""
+    return (len(s) >= 3 and s[-3] not in _VOWELS and s[-2] in _VOWELS
+            and s[-1] not in _VOWELS and s[-1] not in "wxy")
+
+
+def _verbal_bases(b: str) -> set:
+    """-ing / -ed / -er -> candidate base(s). One suffix, explicit rules."""
+    for suf in ("ing", "ed", "er"):
+        if not b.endswith(suf):
+            continue
+        if suf == "ed" and b.endswith("eed"):
+            return set()                  # need, speed, proceed: not a past tense
+        stem = b[:-len(suf)]
+        if len(stem) < 3 or not any(ch in _VOWELS + "y" for ch in stem):
+            return set()                  # string, bring, used, red
+        if (stem[-1] == stem[-2] and stem[-1] not in _VOWELS + "ylsz"
+                and len(stem) - 1 >= (4 if suf == "er" else 3)):
+            return {stem[:-1]}            # debugg -> debug, logg -> log (not fall, miss, buzz)
+        if suf == "er":
+            # agent/comparative -er only with a 4+ letter stem: tester -> test,
+            # hacker -> hack; power, summer, matter keep their own form
+            return {stem} if len(stem) >= 4 else set()
+        if len(stem) == 3:
+            return {stem + "e"} if _is_cvc(stem) else {stem}    # coding -> code; fixing -> fix
+        return {stem, stem + "e"}         # caching -> cach | cache; testing -> test | teste
+    return set()
+
+
+@functools.lru_cache(maxsize=65536)
+def _token_forms(tok: str) -> frozenset:
+    """The token plus every base it could be an inflection of. Two tokens
+    match when their form sets intersect, so "debug" meets "debugging"
+    ({debugging, debug}) and "bugs" meets "bug". Explicit rules, no dictionary:
+      possessive  rick's -> rick, users' -> users
+      apostrophe  can't  -> cant (so the apostrophe-less spelling meets it)
+      plural/3rd  bugs -> bug, crashes -> crash, vulnerabilities -> vulnerability
+      -ied        tried -> try
+      -ing/-ed/-er  see _verbal_bases (consonant undoubling, silent e)
+    Different words CAN share a base ("meaning" and "mean" both reach mean).
+    That is the price of this layer; the 2026-10-04 report measures it."""
+    forms = {tok}
+    t = tok.replace("’", "'")
+    if t.endswith("'s"):
+        t = t[:-2]
+        forms.add(t)
+    elif t.endswith("s'") and len(t) > 3:
+        t = t[:-1]
+        forms.add(t)
+    if "'" in t:
+        forms.add(t.replace("'", ""))
+        return frozenset(f for f in forms if f)
+    if len(t) < _INFLECT_MIN_LEN or not t.isalpha():
+        return frozenset(f for f in forms if f)
+    bases = {t}
+    if t.endswith(("ies", "ied")) and len(t) > 4:
+        bases.add(t[:-3] + "y")
+    if t.endswith(("sses", "shes", "ches", "xes", "zes")):
+        bases.add(t[:-2])
+    if t.endswith("s") and not t.endswith(("ss", "us", "is")):
+        bases.add(t[:-1])
+    for b in list(bases):
+        bases |= _verbal_bases(b)
+    forms |= bases
+    return frozenset(f for f in forms if f)
+
+
+def _node_triggers(node: dict):
+    """Trigger phrases of a compiled behavioral node, or None if its content
+    is not in the `TRIGGERS: a,b\\n\\nbody` shape."""
+    content = node.get("content", "") or ""
+    # FIX(defensive-unpack): the old `header, _ = content.split("\n\n", 1)`
+    # raised ValueError on any behavioral node without a blank line.
+    # The compiler guarantees the format today, but guard anyway.
+    if not content.startswith("TRIGGERS:") or "\n\n" not in content:
+        return None
+    header = content.split("\n\n", 1)[0]
+    return [t for t in (t.strip().lower() for t in header[len("TRIGGERS:"):].split(",")) if t]
+
+
+def _build_trigger_cache(signature, det_nodes: list) -> dict:
+    """Everything Phase 0 needs that depends only on the deterministic node
+    set: the exact regexes (unchanged), the inflected token index, and the
+    rows for the semantic trigger cards (embedded lazily, on first use).
+    A node with trigger_match == 'exact' (header `Match: exact`) gets its
+    regexes and nothing else: neither fuzzy layer can ever reach it."""
+    patterns = []
+    phrases = []          # (trigger, node_pk, order) in file order
+    cards = []            # (node_pk, title, [triggers])
+    for node in det_nodes:
+        triggers = _node_triggers(node)
+        if triggers is None:
+            continue
+        fuzzy = (node.get("trigger_match") or "all") != "exact"
+        for t in triggers:
+            # FIX(word-boundary): \b misbehaves when a trigger starts/ends
+            # with a non-word char ("!roll", "..."). Use whitespace
+            # lookarounds on those edges instead.
+            left = r"\b" if (t[0].isalnum() or t[0] == "_") else r"(?<!\S)"
+            right = r"\b" if (t[-1].isalnum() or t[-1] == "_") else r"(?!\S)"
+            patterns.append((re.compile(left + re.escape(t) + right), node["id"]))
+            if fuzzy:
+                phrases.append((t, node["id"], len(patterns) - 1))
+        if triggers and fuzzy:
+            cards.append((node["id"], node.get("title", "") or "", triggers))
+    index = {}
+    for phrase, pk, order in phrases:
+        toks = _tokenize(phrase)
+        if not toks:
+            continue
+        seq = tuple(_token_forms(tok) for tok in toks)
+        entry = (seq, pk, order)
+        for f in seq[0]:
+            index.setdefault(f, []).append(entry)
+    return {"signature": signature, "patterns": patterns, "inflect_index": index,
+            "cards": cards, "card_vecs": {}}
+
+
+def _match_inflected(trig_cache: dict, query_text: str) -> list:
+    """Node pks whose trigger matches the query as an inflection-tolerant
+    token sequence, in trigger (file) order."""
+    index = trig_cache.get("inflect_index") or {}
+    if not index:
+        return []
+    qforms = [_token_forms(t) for t in _tokenize(query_text)]
+    hits = {}
+    for i, fs in enumerate(qforms):
+        seen_entries = set()
+        for f in fs:
+            for entry in index.get(f, ()):
+                if id(entry) in seen_entries:
+                    continue
+                seen_entries.add(id(entry))
+                seq, pk, order = entry
+                n = len(seq)
+                if i + n > len(qforms):
+                    continue
+                if all(seq[j] & qforms[i + j] for j in range(1, n)):
+                    if pk not in hits or order < hits[pk]:
+                        hits[pk] = order
+    return [pk for pk, _ in sorted(hits.items(), key=lambda kv: kv[1])]
+
+
+def _embed_unit(model, texts: list) -> np.ndarray:
+    """Unit vectors for `texts`, through the shared (model, text)->vector LRU.
+    Keyed by model identity too: a vector from one model is noise to another."""
+    out = [None] * len(texts)
+    missing = []
+    mkey = id(model)
+    with _TRIGGER_VEC_LOCK:
+        for i, t in enumerate(texts):
+            v = _TRIGGER_VEC_CACHE.get((mkey, t))
+            if v is not None:
+                _TRIGGER_VEC_CACHE.move_to_end((mkey, t))
+                out[i] = v
+            else:
+                missing.append(i)
+    if missing:
+        vecs = np.asarray(model.encode([texts[i] for i in missing], convert_to_numpy=True), dtype=np.float32)
+        vecs = vecs / np.maximum(np.linalg.norm(vecs, axis=1, keepdims=True), 1e-12)
+        with _TRIGGER_VEC_LOCK:
+            for k, i in enumerate(missing):
+                out[i] = vecs[k]
+                _TRIGGER_VEC_CACHE[(mkey, texts[i])] = vecs[k]
+            while len(_TRIGGER_VEC_CACHE) > _TRIGGER_VEC_CACHE_MAX:
+                _TRIGGER_VEC_CACHE.popitem(last=False)
+    if not out:
+        return np.zeros((0, 0), dtype=np.float32)
+    return np.vstack(out)
+
+
+def _trigger_card_texts(title: str, triggers: list, mode: str) -> list:
+    if mode == "card":
+        return [f"{title}: {', '.join(triggers)}" if title else ", ".join(triggers)]
+    return list(triggers)                 # phrase_max
+
+
+def _semantic_trigger_scores(trig_cache: dict, model, query_vec, mode: str = None,
+                             body_sims: dict = None, body_weight: float = None) -> dict:
+    """node_pk -> semantic trigger score of that module for this query.
+    Without `body_sims`: the best similarity between the query and the
+    module's trigger card(s). With it (node_pk -> cos to the module's body
+    embedding, i.e. the vector path's own numbers): the PROPOSED blend
+    body_weight * body + (1 - body_weight) * card; a module missing from
+    `body_sims` counts its body as 0. Card vectors are built once per
+    deterministic-node signature (the cache this lives in is dropped whenever
+    the node set changes)."""
+    mode = mode or SEMANTIC_TRIGGER_MODE
+    cards = trig_cache.get("cards") or []
+    if not cards or model is None or query_vec is None:
+        return {}
+    built = trig_cache["card_vecs"].get(mode)
+    if built is None:
+        owners, texts = [], []
+        for pk, title, triggers in cards:
+            for text in _trigger_card_texts(title, triggers, mode):
+                owners.append(pk)
+                texts.append(text)
+        built = (owners, _embed_unit(model, texts))
+        trig_cache["card_vecs"][mode] = built
+    owners, mat = built
+    if not owners:
+        return {}
+    q = np.asarray(query_vec, dtype=np.float32).reshape(-1)
+    q = q / max(float(np.linalg.norm(q)), 1e-12)
+    sims = mat @ q
+    scores = {}
+    for pk, s in zip(owners, sims):
+        s = float(s)
+        if s > scores.get(pk, -2.0):
+            scores[pk] = s
+    if body_sims:
+        w = SEMANTIC_TRIGGER_BODY_WEIGHT if body_weight is None else body_weight
+        scores = {pk: w * float(body_sims.get(pk, 0.0)) + (1.0 - w) * s for pk, s in scores.items()}
+    return scores
+
+
+def soft_trigger_hits(trig_cache: dict, query_text: str, exclude: set, model=None, query_vec=None,
+                      body_sims: dict = None, threshold: float = None, gate: float = None,
+                      mode: str = None, report: dict = None) -> list:
+    """Layers 2 and 3, in rank order, excluding `exclude` (the exact hits):
+    [(node_pk, "inflected", score|None), ..., (node_pk, "semantic", score), ...].
+
+    Semantic scores exist only with a model, a query vector AND the vector
+    path's body similarities (`body_sims`); without them layer 3 is silent and
+    layer 2 runs ungated. Each layer honours its lesion flag at call time;
+    ZETTEL_TRIGGER_SEMANTIC_OFF=1 means no embeddings in trigger matching at
+    all, so it also lifts the gate. `report`, if given, receives
+    {"gated": [(pk, score)]} -- inflected hits the gate turned away."""
+    out = []
+    taken = set(exclude or ())
+    scores = None
+    if (not _env_flag(TRIGGER_SEMANTIC_OFF_ENV) and model is not None
+            and query_vec is not None and body_sims):
+        scores = _semantic_trigger_scores(trig_cache, model, query_vec, mode, body_sims=body_sims)
+    gated = []
+    if not _env_flag(TRIGGER_INFLECT_OFF_ENV):
+        bar = INFLECT_SEMANTIC_GATE if gate is None else gate
+        use_gate = scores is not None and not _env_flag(TRIGGER_INFLECT_GATE_OFF_ENV)
+        for pk in _match_inflected(trig_cache, query_text):
+            if pk in taken:
+                continue
+            s = scores.get(pk) if scores is not None else None
+            if use_gate and (s is None or s < bar):
+                gated.append((pk, s))
+                continue
+            taken.add(pk)
+            out.append((pk, "inflected", s))
+    if scores:
+        thr = SEMANTIC_TRIGGER_THRESHOLD if threshold is None else threshold
+        for pk, s in sorted(scores.items(), key=lambda kv: -kv[1]):
+            if s < thr:
+                break
+            if pk not in taken:
+                taken.add(pk)
+                out.append((pk, "semantic", s))
+    if report is not None:
+        report["gated"] = gated
+    return out
 
 
 def query_knowledge_graph(username: str, persona: str, query_text: str, top_k: int = 5) -> str:
@@ -1140,6 +1804,8 @@ def query_knowledge_graph(username: str, persona: str, query_text: str, top_k: i
     
     # ── VECTOR PATH ──
     vector_ranked = []
+    query_vec = None   # reused by the semantic trigger layer in Phase 0...
+    body_sims = {}     # ...with these: node pk -> cos(query, node body), every node
     if model and cache:
         query_vec = model.encode([query_text], convert_to_numpy=True).reshape(1, -1)
         
@@ -1152,6 +1818,7 @@ def query_knowledge_graph(username: str, persona: str, query_text: str, top_k: i
             node_vecs = cache["embeddings"]
             node_ids = list(cache["node_ids"])
         sims = cosine_similarity(query_vec, node_vecs).flatten()
+        body_sims = dict(zip(node_ids, sims.tolist()))
 
         ranked_indices = np.argsort(sims)[::-1]
         
@@ -1184,26 +1851,14 @@ def query_knowledge_graph(username: str, persona: str, query_text: str, top_k: i
 
     trig_cache = _TRIGGER_REGEX_CACHE.get(cache_key)
     if not trig_cache or trig_cache["signature"] != signature:
-        patterns = []
-        for node in det_nodes:
-            content = node.get("content", "")
-            # FIX(defensive-unpack): the old `header, _ = content.split("\n\n", 1)`
-            # raised ValueError on any behavioral node without a blank line.
-            # The compiler guarantees the format today, but guard anyway.
-            if not content.startswith("TRIGGERS:") or "\n\n" not in content:
-                continue
-            header = content.split("\n\n", 1)[0]
-            for t in (t.strip().lower() for t in header[len("TRIGGERS:"):].split(",")):
-                if not t:
-                    continue
-                # FIX(word-boundary): \b misbehaves when a trigger starts/ends
-                # with a non-word char ("!roll", "..."). Use whitespace
-                # lookarounds on those edges instead.
-                left = r"\b" if (t[0].isalnum() or t[0] == "_") else r"(?<!\S)"
-                right = r"\b" if (t[-1].isalnum() or t[-1] == "_") else r"(?!\S)"
-                patterns.append((re.compile(left + re.escape(t) + right), node["id"]))
-        trig_cache = {"signature": signature, "patterns": patterns}
+        # exact regexes + inflection index + semantic card rows, all keyed to
+        # this node set (see _build_trigger_cache)
+        trig_cache = _build_trigger_cache(signature, det_nodes)
         _TRIGGER_REGEX_CACHE[cache_key] = trig_cache
+
+    # Sanity cap on trigger seeds per turn (see Phase 2). Exact hits fill it
+    # first, exactly as before; inflected, then semantic hits get what is left.
+    MAX_DETERMINISTIC = 3
 
     behav_seeds = []
     seen_behav_ids = set()
@@ -1214,6 +1869,41 @@ def query_knowledge_graph(username: str, persona: str, query_text: str, top_k: i
         if pattern.search(query_lower):
             seen_behav_ids.add(node_pk)
             behav_seeds.append(node_lookup[node_pk])
+
+    # Layers 2 + 3 (inflected, semantic). Only the hits that fit under the cap
+    # become seeds; the rest stay eligible for ordinary vector/keyword ranking
+    # below instead of being swallowed the way over-cap exact hits are.
+    exact_count = len(behav_seeds)
+    soft_report = {}
+    try:
+        soft = soft_trigger_hits(trig_cache, query_text, seen_behav_ids, model=model,
+                                 query_vec=query_vec, body_sims=body_sims, report=soft_report)
+    except Exception as e:
+        print(f"[ZETTEL] soft trigger layers failed (non-fatal, exact triggers unaffected): {e}")
+        soft = []
+    if soft_report.get("gated"):
+        print(f"[ZETTEL] inflected trigger hit(s) under the semantic gate "
+              f"(INFLECT_SEMANTIC_GATE={INFLECT_SEMANTIC_GATE}), not seeded: "
+              f"{[(node_lookup[pk].get('node_id', '?'), None if s is None else round(s, 2)) for pk, s in soft_report['gated'] if pk in node_lookup]}")
+    room = max(0, MAX_DETERMINISTIC - exact_count)
+    for node_pk, layer, score in soft[:room]:
+        seen_behav_ids.add(node_pk)
+        behav_seeds.append(node_lookup[node_pk])
+    if behav_seeds:
+        def _tag(n):
+            return n.get("node_id", "?")
+        fired = [_tag(n) for n in behav_seeds[:exact_count]]
+        parts = [f"exact={fired}"] if fired else []
+        for layer in ("inflected", "semantic"):
+            got = [f"{_tag(node_lookup[pk])}" + (f" {s:.2f}" if s is not None else "")
+                   for pk, lay, s in soft[:room] if lay == layer]
+            if got:
+                parts.append(f"{layer}={got}")
+        print(f"[ZETTEL] Trigger seeds: " + " ".join(parts))
+    if len(soft) > room:
+        print(f"[ZETTEL] {len(soft) - room} inflected/semantic trigger hit(s) over the "
+              f"MAX_DETERMINISTIC={MAX_DETERMINISTIC} cap left to vector/keyword ranking: "
+              f"{[node_lookup[pk].get('node_id', '?') for pk, _, _ in soft[room:]]}")
 
     # ── Phase 1: RECIPROCAL RANK FUSION & PARTITIONING ──
     fused = []
@@ -1246,8 +1936,9 @@ def query_knowledge_graph(username: str, persona: str, query_text: str, top_k: i
     # FIX(dropped-triggers): deterministic modules are author-mandated ("must
     # fire"), so they get guaranteed slots even above BEHAV_FLOOR — previously
     # a 3rd simultaneous trigger was silently cut by the floor of 2. The cap
-    # below is a sanity limit against trigger-word pileups, not a floor.
-    MAX_DETERMINISTIC = 3
+    # (MAX_DETERMINISTIC = 3, now set in Phase 0 because the inflected and
+    # semantic layers share it) is a sanity limit against trigger-word
+    # pileups, not a floor.
     EXPAND_FANOUT = 2
     HARD_CEILING = 9
     LINK_FLOOR = 0.70

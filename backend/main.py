@@ -695,6 +695,7 @@ async def stream_chat(persona_key: str, req: StreamRequest, current_user: str = 
 # LORE (ZETTEL KNOWLEDGE GRAPH) ENDPOINTS
 # ============================================================
 from zettel_engine import process_entry as zettel_process_entry
+from zettel_engine import invalidate_zettel_cache as zettel_invalidate_cache
 
 @app.post("/personas/{persona_key}/lore")
 def create_lore_entry(persona_key: str, payload: LoreEntryPayload, current_user: str = Depends(get_current_user)):
@@ -730,7 +731,9 @@ def create_lore_entry(persona_key: str, payload: LoreEntryPayload, current_user:
 
 @app.get("/personas/{persona_key}/lore")
 def get_lore_entries(persona_key: str, username: str = "default_user", current_user: str = Depends(get_current_user)):
-    """List all lore entries for a persona."""
+    """List all lore entries for a persona. Each entry carries `import_note`:
+    what processing did with it (handwritten modules imported / duplicate IDs
+    skipped / auto-split chunk count), or null while pending."""
     if username != current_user:
         raise HTTPException(status_code=403, detail="Username mismatch")
     db_conn = db.UserManager()
@@ -752,7 +755,10 @@ def update_lore_entry(persona_key: str, entry_id: str, payload: LoreEntryPayload
     )
     if not success:
         raise HTTPException(status_code=400, detail="Failed to update lore entry")
-    
+    # The entry's old nodes are gone; drop their vectors and trigger regexes
+    # now rather than serving them until the background re-process finishes.
+    zettel_invalidate_cache(payload.username, persona_key)
+
     api_keys = provider_registry.resolve_api_keys(current_user, payload.active_api_keys)
     # Preserved behaviour: lore processing's "universal" slot defaults to OpenRouter.
     if not api_keys.get("universal"):
@@ -777,6 +783,10 @@ def delete_lore_entry(persona_key: str, entry_id: str, username: str = "default_
     success = db_conn.delete_zettel_entry(username, persona_key, entry_id)
     if not success:
         raise HTTPException(status_code=400, detail="Failed to delete lore entry")
+    # Its nodes (and every edge touching them) are deleted; the cached vector
+    # matrix and trigger regexes still held them. invalidate_zettel_cache's own
+    # docstring says this MUST follow a lore deletion -- it never did.
+    zettel_invalidate_cache(username, persona_key)
     return {"status": "success", "message": "Lore entry deleted"}
 
 # ============================================================

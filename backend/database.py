@@ -712,6 +712,19 @@ class UserManager:
             c.execute("ALTER TABLE zettel_nodes ADD COLUMN trigger_type TEXT DEFAULT 'PROBABILISTIC'")
         if 'content_hash' not in node_columns:
             c.execute("ALTER TABLE zettel_nodes ADD COLUMN content_hash TEXT")
+        # Migration: a behavioral module's `Match:` header. 'all' = exact,
+        # inflected and semantic trigger layers; 'exact' = exact regex only.
+        # Kept out of `content` on purpose: content is what gets injected.
+        if 'trigger_match' not in node_columns:
+            c.execute("ALTER TABLE zettel_nodes ADD COLUMN trigger_match TEXT DEFAULT 'all'")
+
+        # Migration: what the lorebook did with an entry ("handwritten: 41
+        # modules imported", "skipped 3 duplicate IDs: ...", "auto-split: 12
+        # chunks"). NULL = processed before this column existed, or pending.
+        c.execute("PRAGMA table_info(zettel_entries)")
+        entry_columns = [column[1] for column in c.fetchall()]
+        if 'import_note' not in entry_columns:
+            c.execute("ALTER TABLE zettel_entries ADD COLUMN import_note TEXT")
 
         # Migration: Ensure label column exists on zettel_links
         c.execute("PRAGMA table_info(zettel_links)")
@@ -1456,14 +1469,15 @@ class UserManager:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             c.execute("""
-                SELECT id, title, raw_content, processed, created_at 
-                FROM zettel_entries 
+                SELECT id, title, raw_content, processed, created_at, import_note
+                FROM zettel_entries
                 WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?
                 ORDER BY created_at DESC
             """, (username, persona))
             rows = c.fetchall()
             conn.close()
-            return [{"id": r[0], "title": r[1], "content": r[2], "processed": bool(r[3]), "created_at": r[4]} for r in rows]
+            return [{"id": r[0], "title": r[1], "content": r[2], "processed": bool(r[3]), "created_at": r[4],
+                     "import_note": r[5]} for r in rows]
         except Exception as e:
             print(f"DB ERROR (get_zettel_entries): {e}")
             return []
@@ -1477,9 +1491,9 @@ class UserManager:
             c.execute("DELETE FROM zettel_links WHERE source_node_id IN (SELECT id FROM zettel_nodes WHERE source_entry_id=?) OR target_node_id IN (SELECT id FROM zettel_nodes WHERE source_entry_id=?)", (entry_id, entry_id))
             c.execute("DELETE FROM zettel_fts WHERE node_db_id IN (SELECT id FROM zettel_nodes WHERE source_entry_id=?)", (entry_id,))
             c.execute("DELETE FROM zettel_nodes WHERE source_entry_id=?", (entry_id,))
-            # Update the entry
+            # Update the entry (the old import note described the old text)
             c.execute("""
-                UPDATE zettel_entries SET title=?, raw_content=?, processed=0
+                UPDATE zettel_entries SET title=?, raw_content=?, processed=0, import_note=NULL
                 WHERE id=? AND username COLLATE NOCASE=? AND persona COLLATE NOCASE=?
             """, (title, raw_content, entry_id, username, persona))
             conn.commit()
@@ -1505,7 +1519,7 @@ class UserManager:
             print(f"DB ERROR (delete_zettel_entry): {e}")
             return False
 
-    def add_zettel_node(self, node_id_pk, username, persona, node_id_tag, title, content, category, embedding_blob, source_entry_id, node_class='lore', trigger_type='PROBABILISTIC', content_hash=None):
+    def add_zettel_node(self, node_id_pk, username, persona, node_id_tag, title, content, category, embedding_blob, source_entry_id, node_class='lore', trigger_type='PROBABILISTIC', content_hash=None, trigger_match='all'):
         """Insert a chunked atomic node into the knowledge graph."""
         # ── Step 1: Insert the actual node row (committed independently) ──
         try:
@@ -1513,9 +1527,9 @@ class UserManager:
             c = conn.cursor()
             timestamp = str(datetime.now())
             c.execute("""
-                INSERT INTO zettel_nodes (id, username, persona, node_id, title, content, category, embedding, source_entry_id, created_at, node_class, trigger_type, content_hash)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (node_id_pk, username, persona, node_id_tag, title, content, category, embedding_blob, source_entry_id, timestamp, node_class, trigger_type, content_hash))
+                INSERT INTO zettel_nodes (id, username, persona, node_id, title, content, category, embedding, source_entry_id, created_at, node_class, trigger_type, content_hash, trigger_match)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (node_id_pk, username, persona, node_id_tag, title, content, category, embedding_blob, source_entry_id, timestamp, node_class, trigger_type, content_hash, trigger_match or 'all'))
             conn.commit()
             conn.close()
         except Exception as e:
@@ -1565,22 +1579,22 @@ class UserManager:
             c = conn.cursor()
             if include_embeddings:
                 c.execute("""
-                    SELECT id, node_id, title, content, category, embedding, source_entry_id, created_at, node_class, trigger_type
+                    SELECT id, node_id, title, content, category, embedding, source_entry_id, created_at, node_class, trigger_type, trigger_match
                     FROM zettel_nodes
                     WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?
                 """, (username, persona))
                 rows = c.fetchall()
                 conn.close()
-                return [{"id": r[0], "node_id": r[1], "title": r[2], "content": r[3], "category": r[4], "embedding": r[5], "source_entry_id": r[6], "created_at": r[7], "node_class": r[8], "trigger_type": r[9]} for r in rows]
+                return [{"id": r[0], "node_id": r[1], "title": r[2], "content": r[3], "category": r[4], "embedding": r[5], "source_entry_id": r[6], "created_at": r[7], "node_class": r[8], "trigger_type": r[9], "trigger_match": r[10] or "all"} for r in rows]
             else:
                 c.execute("""
-                    SELECT id, node_id, title, content, category, source_entry_id, created_at, node_class, trigger_type
+                    SELECT id, node_id, title, content, category, source_entry_id, created_at, node_class, trigger_type, trigger_match
                     FROM zettel_nodes
                     WHERE username COLLATE NOCASE=? AND persona COLLATE NOCASE=?
                 """, (username, persona))
                 rows = c.fetchall()
                 conn.close()
-                return [{"id": r[0], "node_id": r[1], "title": r[2], "content": r[3], "category": r[4], "embedding": None, "source_entry_id": r[5], "created_at": r[6], "node_class": r[7], "trigger_type": r[8]} for r in rows]
+                return [{"id": r[0], "node_id": r[1], "title": r[2], "content": r[3], "category": r[4], "embedding": None, "source_entry_id": r[5], "created_at": r[6], "node_class": r[7], "trigger_type": r[8], "trigger_match": r[9] or "all"} for r in rows]
         except Exception as e:
             print(f"DB ERROR (get_zettel_nodes_for_persona): {e}")
             return []
@@ -1691,6 +1705,19 @@ class UserManager:
             return True
         except Exception as e:
             print(f"DB ERROR (mark_zettel_entry_processed): {e}")
+            return False
+
+    def set_zettel_entry_import_note(self, entry_id, note):
+        """Record what the lorebook did with an entry (returned by GET /lore)."""
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("UPDATE zettel_entries SET import_note=? WHERE id=?", (note, entry_id))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"DB ERROR (set_zettel_entry_import_note): {e}")
             return False
     def get_user_settings(self, username: str) -> dict:
         """Fetches the governance and UI settings for a user."""

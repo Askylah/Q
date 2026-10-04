@@ -1211,7 +1211,7 @@ class ConsciousnessWorker:
                 node_id_tag = zettel_engine._generate_node_id("CONCEPT", "Internal Monologue", existing_node_tags)
                 node_id_pk = str(uuid.uuid4())
                 
-                self.db_manager.add_zettel_node(
+                node_written = self.db_manager.add_zettel_node(
                     node_id_pk=node_id_pk,
                     username=username,
                     persona=persona,
@@ -1222,7 +1222,20 @@ class ConsciousnessWorker:
                     embedding_blob=embedding_blob,
                     source_entry_id=entry_id
                 )
-                
+                # FIX(stuck-processed): this path writes the entry AND its node
+                # itself -- process_entry never sees it -- and never marked the
+                # entry processed. Every monologue entry sat at processed=0
+                # forever, and the lorebook UI polls every 5 s while any entry is
+                # unprocessed (Sky/rick had 25 of them on 2026-10-04).
+                if entry_id and node_written:
+                    self.db_manager.set_zettel_entry_import_note(
+                        entry_id, f"daemon monologue: stored as 1 lore node ({node_id_tag})")
+                    self.db_manager.mark_zettel_entry_processed(entry_id)
+                elif entry_id:
+                    logger.error(
+                        f"[CONSCIOUSNESS_DAEMON] Monologue node insert failed; lore entry "
+                        f"{entry_id} has no node and stays unprocessed.")
+
                 # Update cache
                 if shared_model and embedding is not None:
                     # FIX(F6-fanout-isolation): every db_manager writer in this fan-out
