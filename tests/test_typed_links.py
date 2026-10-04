@@ -14,6 +14,11 @@ os.environ["PERSONAAPP_DB_PATH"] = os.path.join(TMP, "users.db")
 os.environ["TELEMETRY_OFF"] = "1"
 
 import database as db
+# Section [5] runs `DELETE FROM zettel_links` with no WHERE. On 2026-10-03 this suite
+# ran against the live users.db and wiped every graph link for every user. Refuse to
+# run unless the database really is the throwaway one.
+if not os.path.abspath(db.DB_PATH).startswith(os.path.abspath(TMP)):
+    raise SystemExit(f"REFUSING TO RUN: database.DB_PATH is {db.DB_PATH!r}, not inside {TMP!r}")
 import zettel_engine as ze
 
 ze.get_shared_model = lambda: None          # no embeddings needed for edges
