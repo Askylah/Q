@@ -16,7 +16,9 @@ the only recovery.
 import os, sys, time, fnmatch, ast
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT)
+BACKEND = os.path.join(ROOT, "backend")     # the modules live here since 2026-10-03
+sys.path.insert(0, BACKEND)
+sys.path.insert(1, ROOT)
 
 FAILS = []
 
@@ -237,7 +239,7 @@ check_true("last error reported", "403" in row["last_error"])
 
 # -- 12. the call sites cannot regress to an unconditional burn ------------
 print("\n[12] llm_engine no longer burns on sight")
-_eng = open(os.path.join(ROOT, "llm_engine.py"), "rb").read().decode("utf-8")
+_eng = open(os.path.join(BACKEND, "llm_engine.py"), "rb").read().decode("utf-8")
 check("no unconditional BURNED release survives",
       _eng.count('release_key(provider, key_id, "BURNED")'), 0)
 check("both auth branches route through the classifier",
@@ -330,7 +332,7 @@ check("the cursor lives in redis, not in the process "
       "(three checkouts happened above, so it sits past k3)",
       shared.get("q:pool:key_cursor:google"), b"3")
 
-_pool_src = open(os.path.join(ROOT, "redis_pool.py"), "rb").read().decode("utf-8")
+_pool_src = open(os.path.join(BACKEND, "redis_pool.py"), "rb").read().decode("utf-8")
 check_true("checkout_key no longer returns the first match it finds",
            "q:pool:key_cursor:" in _pool_src)
 check_true("the candidate list is sorted, so the cycle is stable",

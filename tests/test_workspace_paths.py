@@ -29,7 +29,9 @@ so a future session cannot re-narrow it by accident.
 import os, sys, ast, shutil, tempfile, pathlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT)
+BACKEND = os.path.join(ROOT, "backend")     # the modules live here since 2026-10-03
+sys.path.insert(0, BACKEND)
+sys.path.insert(1, ROOT)
 
 FAILS = []
 
@@ -95,7 +97,7 @@ finally:
 
 # -- 3. the endpoint reach is a DECISION, not an oversight -----------------
 print("\n[3] the workspace endpoints are deliberately unrestricted (51.1)")
-_main = open(os.path.join(ROOT, "main.py"), "rb").read().decode("utf-8")
+_main = open(os.path.join(BACKEND, "main.py"), "rb").read().decode("utf-8")
 _tree = ast.parse(_main)
 WANT = {"save_workspace_file", "create_workspace_item", "delete_workspace_item"}
 for fn in ast.walk(_tree):

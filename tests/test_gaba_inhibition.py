@@ -13,13 +13,27 @@ touches a real persona, the database, the embedding model or an LLM.
 
 Each check names the failure it exists to prevent.
 """
-import os, sys, math, time, json
+import os, sys, math, time, json, tempfile, shutil, atexit
 os.environ["TELEMETRY_OFF"] = "1"   # fixtures must never land in the real telemetry sink
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT)
+BACKEND = os.path.join(ROOT, "backend")     # the modules live here since 2026-10-03
+sys.path.insert(0, BACKEND)
+sys.path.insert(1, ROOT)
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/1")
+# Section [10] imports stream_worker, and that import opens the DB (llm_engine
+# -> plugin_manager -> memory_engine._ensure_table). A throwaway file keeps
+# "never touches the database" true; the guard runs before any import that can.
+TMP = tempfile.mkdtemp(prefix="gaba_inhibition_")
+os.environ["PERSONAAPP_DATA_DIR"] = TMP
+os.environ["PERSONAAPP_DB_PATH"] = os.path.join(TMP, "users.db")
+atexit.register(shutil.rmtree, TMP, ignore_errors=True)
+import app_paths
+if not os.path.normcase(os.path.realpath(app_paths.DB_PATH)).startswith(
+        os.path.normcase(os.path.realpath(TMP)) + os.sep):
+    raise SystemExit(f"REFUSING TO RUN: DB path resolved to {app_paths.DB_PATH!r}, "
+                     f"outside the temp dir {TMP!r}. This suite would touch a real database.")
 
 FAILS = []
 
@@ -69,7 +83,7 @@ _wipe()
 
 # ── 0. the organ does not know dopamine exists ───────────────────────────
 print("\n[0] isolation by construction")
-src = open(os.path.join(ROOT, "gaba_state.py"), encoding="utf-8").read()
+src = open(os.path.join(BACKEND, "gaba_state.py"), encoding="utf-8").read()
 check_true("gaba_state.py never imports dopamine_state (rule 1: not negative dopamine)",
            "import dopamine_state" not in src and "from dopamine_state" not in src)
 check("cold state is zero inhibition, zero streak", gs.get_state(U, P), {"inhibition": 0.0, "streak": 0})

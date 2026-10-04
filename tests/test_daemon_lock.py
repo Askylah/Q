@@ -14,10 +14,19 @@ Windows because CPython implements that via TerminateProcess.
 Each check names the failure it exists to prevent. Three of these shipped
 broken at least once.
 """
-import os, sys, threading, time, types
+import os, sys, threading, time, types, tempfile, shutil, atexit
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT)
+BACKEND = os.path.join(ROOT, "backend")     # the modules live here since 2026-10-03
+sys.path.insert(0, BACKEND)
+sys.path.insert(1, ROOT)
+# Importing stream_worker opens the DB (llm_engine -> plugin_manager ->
+# memory_engine._ensure_table runs its CREATE TABLE at import), so it gets a
+# throwaway file. The guard below runs before that import.
+TMP = tempfile.mkdtemp(prefix="daemon_lock_")
+os.environ["PERSONAAPP_DATA_DIR"] = TMP
+os.environ["PERSONAAPP_DB_PATH"] = os.path.join(TMP, "users.db")
+atexit.register(shutil.rmtree, TMP, ignore_errors=True)
 
 FAILS = []
 
@@ -32,6 +41,12 @@ def check(name, got, want):
 def check_true(name, got):
     check(name, bool(got), True)
 
+
+import app_paths
+if not os.path.normcase(os.path.realpath(app_paths.DB_PATH)).startswith(
+        os.path.normcase(os.path.realpath(TMP)) + os.sep):
+    raise SystemExit(f"REFUSING TO RUN: DB path resolved to {app_paths.DB_PATH!r}, "
+                     f"outside the temp dir {TMP!r}. This suite would touch a real database.")
 
 import stream_worker as sw
 import dopamine_state as ds
@@ -281,7 +296,7 @@ print()
 print("[6] monologue idempotency mark (note 14.1, F6)")
 import ast
 
-_src = open(os.path.join(ROOT, "stream_worker.py"), "rb").read().decode("utf-8")
+_src = open(os.path.join(BACKEND, "stream_worker.py"), "rb").read().decode("utf-8")
 _fn = next(n for n in ast.walk(ast.parse(_src))
            if isinstance(n, ast.FunctionDef) and n.name == "generate_idle_monologue")
 _tries = [n for n in _fn.body if isinstance(n, ast.Try)]
@@ -395,13 +410,15 @@ check("NLI gate on OpenRouter gets the smartest flash, not the cheapest",
       sw.DAEMON_NLI_MODEL_OPENROUTER, "google/gemini-3.5-flash")
 check("monologue on OpenRouter gets 3.7-flash",
       sw.DAEMON_MONOLOGUE_MODEL_OPENROUTER, "google/gemini-3.7-flash")
-check("the Vertex id did not move -- that route was never the problem (note 28)",
-      sw.DAEMON_MODEL_VERTEX, "google/gemini-3-flash-preview")
-
+# 3548e27 (2026-10-03, provider registry) removed the Vertex route from
+# llm_engine, and with it DAEMON_MODEL_VERTEX and the key-based switch in
+# _daemon_model. Selection is now: env override > the user's "background tasks"
+# setting > the default, whatever keys are present. The setting branch is
+# covered by tests/test_provider_wiring.py (DaemonModelTest).
 _saved_env = os.environ.pop("DAEMON_NLI_MODEL", None)
-check("no OpenRouter key -> Vertex id (matches llm_engine.has_openrouter_key)",
-      sw._daemon_model("DAEMON_NLI_MODEL", "or-default", {"openrouter": ""}), sw.DAEMON_MODEL_VERTEX)
-check("OpenRouter key present -> the OpenRouter default",
+check("no OpenRouter key -> the default (keys no longer pick the model)",
+      sw._daemon_model("DAEMON_NLI_MODEL", "or-default", {"openrouter": ""}), "or-default")
+check("OpenRouter key present -> the same default",
       sw._daemon_model("DAEMON_NLI_MODEL", "or-default", {"openrouter": "sk-or-x"}), "or-default")
 os.environ["DAEMON_NLI_MODEL"] = "  z-ai/glm-5.3-flash  "
 check("an env override wins on either route, whitespace stripped",
@@ -431,7 +448,7 @@ print()
 print("[9] idle monologue rest gate (session 9)")
 
 # re-read: sections 6-8 parsed the file before this session's edit
-_src = open(os.path.join(ROOT, "stream_worker.py"), "rb").read().decode("utf-8")
+_src = open(os.path.join(BACKEND, "stream_worker.py"), "rb").read().decode("utf-8")
 _tree = ast.parse(_src)
 _gm = next(n for n in ast.walk(_tree)
            if isinstance(n, ast.FunctionDef) and n.name == "generate_idle_monologue")
@@ -489,6 +506,11 @@ _orig_call = sw.llm_engine.call_llm
 def _llm_touched(*a, **k):
     raise AssertionError("LLM touched")
 sw.llm_engine.call_llm = _llm_touched
+# Since 3548e27 a non-idle monologue stands down before its DB work when no
+# provider key resolves. A fake usable key keeps the gap check about the rest
+# gate, and keeps resolve_api_keys off the database.
+_orig_resolve = sw.provider_registry.resolve_api_keys
+sw.provider_registry.resolve_api_keys = lambda *a, **k: {"openrouter": "sk-or-test"}
 try:
     _ret = _w.generate_idle_monologue("_t", "_p", "2000-01-01 00:00:00", None, None, exploring=False)
     check("rest: returns nothing", _ret, None)
@@ -505,6 +527,7 @@ try:
     check_true("a gap with the gate shut still proceeds (the gate is for idle only)", _passed)
 finally:
     sw.llm_engine.call_llm = _orig_call
+    sw.provider_registry.resolve_api_keys = _orig_resolve
 
 
 print("\n" + ("ALL PASS" if not FAILS else f"{len(FAILS)} FAILURE(S): {FAILS}"))

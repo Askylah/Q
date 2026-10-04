@@ -18,7 +18,9 @@ os.environ["TELEMETRY_OFF"] = "1"   # fixtures must never land in the real telem
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT)
+BACKEND = os.path.join(ROOT, "backend")     # the modules live here since 2026-10-03
+sys.path.insert(0, BACKEND)
+sys.path.insert(1, ROOT)
 
 FAILS = []
 
@@ -154,7 +156,7 @@ check_true("ten ordinary observations do NOT (predicted novelty is not rewarding
 
 # ── 4. wiring: DeepMemory.store fires it, non-fatally, after the write ────
 print("\n[4] memory_engine.store wiring")
-_src = open(os.path.join(ROOT, "memory_engine.py"), "rb").read().decode("utf-8")
+_src = open(os.path.join(BACKEND, "memory_engine.py"), "rb").read().decode("utf-8")
 _tree = ast.parse(_src)
 _cls = next(n for n in ast.walk(_tree) if isinstance(n, ast.ClassDef) and n.name == "DeepMemory")
 _store = next(n for n in _cls.body if isinstance(n, ast.FunctionDef) and n.name == "store")

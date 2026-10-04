@@ -1,11 +1,44 @@
-﻿import sys
+﻿"""
+Curated observations and links: store and resolve by title or tag, link two
+nodes, refuse a self-link, fail loud on an ambiguous title.
+
+Runs against a throwaway SQLite file (PERSONAAPP_DB_PATH) and Redis db 1. It
+used to run against the live users.db; the guard below refuses to start if the
+override does not take.
+
+    python tests/test_curation_tools.py
+"""
+import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import atexit
+import shutil
+import tempfile
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "backend"))
+sys.path.insert(1, ROOT)
+# Throwaway DB. Must be set before database/app_paths are imported: app_paths
+# reads PERSONAAPP_DB_PATH once, at import.
+TMP = tempfile.mkdtemp(prefix="curation_tools_")
+os.environ["PERSONAAPP_DATA_DIR"] = TMP
+os.environ["PERSONAAPP_DB_PATH"] = os.path.join(TMP, "users.db")
+os.environ["TELEMETRY_OFF"] = "1"
+os.environ.setdefault("REDIS_URL", "redis://localhost:6379/1")
+atexit.register(shutil.rmtree, TMP, ignore_errors=True)
 
 import unittest
 import uuid
 import sqlite3
+import app_paths
 import database as db
+
+# Guard: before any DB work, the resolved DB must live inside TMP. Abort otherwise.
+_TMP_PREFIX = os.path.normcase(os.path.realpath(TMP)) + os.sep
+for _label, _path in (("database.DB_PATH", db.DB_PATH), ("app_paths.DB_PATH", app_paths.DB_PATH)):
+    if not os.path.normcase(os.path.realpath(_path)).startswith(_TMP_PREFIX):
+        raise SystemExit(f"REFUSING TO RUN: {_label} resolved to {_path!r}, outside the "
+                         f"temp dir {TMP!r}. This suite would write to a real database.")
+
 import zettel_engine
 
 class TestCurationTools(unittest.TestCase):
