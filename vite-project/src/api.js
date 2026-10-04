@@ -466,6 +466,15 @@ class PersonaAPI {
         }
     }
 
+    // What the daemon really runs per slot: { daemon_nli_model: { model, source, default, env }, ... }
+    async fetchDaemonModels(username) {
+        try {
+            return await this._fetch(`/settings/${encodeURIComponent(username)}/daemon-models`);
+        } catch (e) {
+            return null;
+        }
+    }
+
     async registerProfile(username, secretKey) {
         return await this._fetch('/auth/register', {
             method: 'POST',

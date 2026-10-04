@@ -259,11 +259,14 @@ class LoreEntryPayload(BaseModel):
 class SettingsPayload(BaseModel):
     model_config = {"extra": "forbid"}
     username: str = "default_user"
-    review_policy: str = "ask"
-    auto_execute_terminal: int = 0
-    active_persona_key: str = ""
-    security_level: str = "strict"
-    global_direct_wire: int = 1
+    # Every field is optional: a missing field means "leave it alone". With the old
+    # defaults ("ask", 0, "", "strict", 1) a partial save, e.g. the Providers panel
+    # saving only the daemon models, silently reset all of these.
+    review_policy: Optional[str] = None
+    auto_execute_terminal: Optional[int] = None
+    active_persona_key: Optional[str] = None
+    security_level: Optional[str] = None
+    global_direct_wire: Optional[int] = None
     daemon_nli_model: Optional[str] = None
     daemon_monologue_model: Optional[str] = None
 
@@ -900,6 +903,16 @@ async def get_settings(username: str, current_user: str = Depends(get_current_us
     db_conn = db.UserManager()
     return db_conn.get_user_settings(username)
 
+@app.get("/settings/{username}/daemon-models")
+async def get_daemon_models(username: str, current_user: str = Depends(get_current_user)):
+    """What the daemon really runs per slot (env > saved setting > default), for the
+    Providers panel. A separate route on purpose: the general settings save posts
+    the whole GET /settings object back, and SettingsPayload forbids extra fields."""
+    if username != current_user:
+        raise HTTPException(status_code=403, detail="Username mismatch")
+    import daemon_models
+    return daemon_models.effective(db.UserManager().get_user_settings(username))
+
 class KeyPayload(BaseModel):
     model_config = {"extra": "forbid"}
     provider: str
@@ -1082,8 +1095,8 @@ async def update_settings(payload: SettingsPayload, current_user: str = Depends(
     if payload.username != current_user:
         raise HTTPException(status_code=403, detail="Username mismatch")
     db_conn = db.UserManager()
-    # None = "field not provided" (the daemon model fields). Without this filter
-    # every ordinary settings save would overwrite the stored daemon model with NULL.
+    # None = "field not provided". Without this filter a partial save would
+    # overwrite every field it didn't send.
     db_conn.update_user_settings(payload.username, {k: v for k, v in payload.model_dump().items() if v is not None})
     return {"status": "success"}
 

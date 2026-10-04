@@ -204,18 +204,12 @@ def _holder_is_alive(raw) -> bool:
     return True
 
 
-# Daemon model selection. This process reads ONLY the environment -- the UI's
-# key box travels in each chat request body and never reaches the daemon -- so
-# the model has to be chosen here as well. Two call sites, two jobs: the NLI
-# gate returns a one-word verdict that resolve_semantic_conflict then acts on,
-# so a wrong answer is a wrong row, and it gets the smartest flash; the
-# monologue is persona prose. Both are overridable from .env without a source
-# edit (which kills the daemon, note 26). The Vertex id is untouched: that path
-# routes on ADC and was never the problem (note 28). Prices per M tokens as of
-# 2026-09-01 on OpenRouter: 3.5-flash $1.50/$9.00, 3.7-flash $0.75/$3.75.
-# 2.5-flash (the old hardcode) is gone from both sites.
-DAEMON_NLI_MODEL_OPENROUTER = "google/gemini-3.5-flash"
-DAEMON_MONOLOGUE_MODEL_OPENROUTER = "google/gemini-3.7-flash"
+# Daemon model selection: env override (DAEMON_NLI_MODEL / DAEMON_MONOLOGUE_MODEL,
+# settable in .env without a source edit, which kills the daemon, note 26), else
+# the user's saved setting from the Providers panel, else the default. The
+# defaults live in daemon_models so the settings UI can show what actually runs.
+# Keys come from provider_registry (connected accounts), not the chat request.
+from daemon_models import DAEMON_NLI_MODEL_OPENROUTER, DAEMON_MONOLOGUE_MODEL_OPENROUTER
 
 
 def _daemon_model(env_var, default_model, keys=None, username=None, setting=None):

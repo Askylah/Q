@@ -5,25 +5,23 @@ import Editor from '@monaco-editor/react'
 
 function ModelSelector({ value, onChange, placeholder, style, openRouterModels, appTheme }) {
   const [isOpen, setIsOpen] = useState(false);
+  // What the user types to narrow the list, kept apart from `value` on purpose.
+  // Typing used to call onChange on every keystroke, so searching "opus" and
+  // clicking away left the model set to the literal string "opus".
   const [searchQuery, setSearchQuery] = useState("");
-  const [isSearching, setIsSearching] = useState(false);
   const containerRef = useRef(null);
-
-  useEffect(() => {
-    setSearchQuery(value || "");
-  }, [value]);
+  const inputRef = useRef(null);
 
   useEffect(() => {
     const handleOutsideClick = (e) => {
       if (containerRef.current && !containerRef.current.contains(e.target)) {
         setIsOpen(false);
-        setIsSearching(false);
-        setSearchQuery(value || "");
+        setSearchQuery("");
       }
     };
     document.addEventListener("mousedown", handleOutsideClick);
     return () => document.removeEventListener("mousedown", handleOutsideClick);
-  }, [value]);
+  }, []);
 
   const directGoogle = [
     { id: "google/gemini-3.5-flash-preview", name: "Gemini 3.5 Flash Preview" },
@@ -66,9 +64,9 @@ function ModelSelector({ value, onChange, placeholder, style, openRouterModels, 
 
   const allLocalPresets = [...directGoogle, ...directAnthropic, ...directOpenAI, ...directGrok, ...openRouterPresets];
 
-  // If user hasn't actively typed, show the full catalog!
-  const query = isSearching ? searchQuery.toLowerCase().trim() : "";
-  
+  // An empty query shows the full catalog.
+  const query = searchQuery.toLowerCase().trim();
+
   const filteredGoogle = directGoogle.filter(m => !query || m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query));
   const filteredAnthropic = directAnthropic.filter(m => !query || m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query));
   const filteredOpenAI = directOpenAI.filter(m => !query || m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query));
@@ -80,21 +78,42 @@ function ModelSelector({ value, onChange, placeholder, style, openRouterModels, 
     (!query || m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query))
   );
 
-  const totalMatches = filteredGoogle.length + filteredAnthropic.length + filteredOpenAI.length + filteredGrok.length + filteredORPresets.length + filteredORList.length;
+  const visibleMatches = [...filteredGoogle, ...filteredAnthropic, ...filteredOpenAI, ...filteredGrok, ...filteredORPresets, ...filteredORList];
+  const totalMatches = visibleMatches.length;
+  const catalogSize = allLocalPresets.length + (openRouterModels || []).filter(m => !allLocalPresets.some(p => p.id === m.id)).length;
+  const typed = searchQuery.trim();
+  const exactMatch = typed
+    ? [...allLocalPresets, ...(openRouterModels || [])].find(m => m.id.toLowerCase() === typed.toLowerCase())
+    : null;
+
+  const closeList = () => {
+    setIsOpen(false);
+    setSearchQuery("");
+  };
 
   const handleSelect = (id) => {
-    onChange(id);
-    setSearchQuery(id);
-    setIsSearching(false);
-    setIsOpen(false);
+    if (id) onChange(id);
+    closeList();
   };
 
   const handleInputChange = (e) => {
-    const val = e.target.value;
-    setSearchQuery(val);
-    setIsSearching(true);
-    onChange(val);
+    setSearchQuery(e.target.value);
     setIsOpen(true);
+  };
+
+  // Enter: an exact id, else the only match, else (no matches) the typed text as a
+  // custom id. With several matches the list stays open for a click.
+  const handleKeyDown = (e) => {
+    if (e.key === 'Escape') {
+      closeList();
+      e.target.blur();
+      return;
+    }
+    if (e.key !== 'Enter' || !typed) return;
+    e.preventDefault();
+    if (exactMatch) handleSelect(exactMatch.id);
+    else if (visibleMatches.length === 1) handleSelect(visibleMatches[0].id);
+    else if (visibleMatches.length === 0) handleSelect(typed);
   };
 
   const isDark = appTheme !== 'q-light';
@@ -139,24 +158,24 @@ function ModelSelector({ value, onChange, placeholder, style, openRouterModels, 
   return (
     <div ref={containerRef} style={{ position: 'relative', width: '100%' }}>
       <div style={{ display: 'flex', position: 'relative', alignItems: 'center', width: '100%' }}>
+        {/* The field only shows the current model; typing happens in the search box at the top of the list. */}
         <input
           type="text"
-          style={style}
+          readOnly
+          style={{ ...style, cursor: 'pointer' }}
           placeholder={placeholder}
-          value={searchQuery}
-          onChange={handleInputChange}
-          onFocus={(e) => {
-            setIsSearching(false);
-            setIsOpen(true);
-            e.target.select();
+          value={value || ""}
+          onClick={() => setIsOpen(true)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
+              e.preventDefault();
+              setIsOpen(true);
+            }
           }}
         />
         <button
           type="button"
-          onClick={() => {
-            setIsSearching(false);
-            setIsOpen(!isOpen);
-          }}
+          onClick={() => (isOpen ? closeList() : setIsOpen(true))}
           style={{
             position: 'absolute',
             right: '8px',
@@ -187,13 +206,36 @@ function ModelSelector({ value, onChange, placeholder, style, openRouterModels, 
             maxHeight: '260px',
             overflowY: 'auto',
             zIndex: 99999,
-            padding: '4px 0'
+            padding: '0 0 4px 0'
           }}
         >
-          {/* Custom typed model option if user is searching and typed text doesn't match an existing preset */}
-          {isSearching && searchQuery.trim() && !allLocalPresets.some(p => p.id.toLowerCase() === searchQuery.trim().toLowerCase()) && (
+          {/* Search box, pinned to the top of the list and focused when it opens. */}
+          <div style={{ position: 'sticky', top: 0, zIndex: 1, background: dropdownBg, padding: '6px 8px', borderBottom: `1px solid ${borderCol}`, display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span className="material-icons" style={{ fontSize: '16px', color: textMuted }}>search</span>
+            <input
+              ref={inputRef}
+              autoFocus
+              type="text"
+              value={searchQuery}
+              onChange={handleInputChange}
+              onKeyDown={handleKeyDown}
+              placeholder={`Search ${catalogSize} models…`}
+              style={{ flex: 1, minWidth: 0, background: 'transparent', border: 'none', outline: 'none', color: textColor, fontSize: '12px', fontFamily: 'Inter, sans-serif', padding: '2px 0' }}
+            />
+            {searchQuery && (
+              <span
+                className="material-icons"
+                title="Clear search"
+                onClick={() => { setSearchQuery(""); inputRef.current && inputRef.current.focus(); }}
+                style={{ fontSize: '14px', color: textMuted, cursor: 'pointer' }}
+              >close</span>
+            )}
+          </div>
+
+          {/* Use the typed text as a custom model id when it isn't an existing id. */}
+          {typed && !exactMatch && (
             <div
-              onClick={() => handleSelect(searchQuery.trim())}
+              onClick={() => handleSelect(typed)}
               style={{
                 padding: '8px 12px',
                 fontSize: '12px',
@@ -209,13 +251,13 @@ function ModelSelector({ value, onChange, placeholder, style, openRouterModels, 
               onMouseLeave={e => e.currentTarget.style.background = isDark ? 'rgba(0,204,102,0.1)' : 'rgba(35,165,90,0.1)'}
             >
               <span className="material-icons" style={{ fontSize: '15px', color: 'inherit' }}>edit</span>
-              <span>Use custom model: <strong>{searchQuery.trim()}</strong></span>
+              <span>Use custom model: <strong>{typed}</strong></span>
             </div>
           )}
 
           {totalMatches === 0 ? (
             <div style={{ padding: '8px 12px', fontSize: '12px', color: textMuted, fontStyle: 'italic' }}>
-              No presets found matching "{searchQuery}". Press Enter or click above to use custom model.
+              No models match "{typed}". Press Enter or click above to use it as a custom model id.
             </div>
           ) : (
             <>
@@ -942,9 +984,12 @@ function ProviderManagementPanel({ appTheme, USERNAME, S, userSettings, setUserS
   const [manualKeys, setManualKeys] = useState({});
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
-  // Daemon background models state
-  const [daemonNli, setDaemonNli] = useState(userSettings?.daemon_nli_model || 'google/gemini-3-flash-preview');
-  const [daemonMonologue, setDaemonMonologue] = useState(userSettings?.daemon_monologue_model || 'google/gemini-3-flash-preview');
+  // Daemon background models state. An empty field means "use the daemon's default";
+  // the old hardcoded 'google/gemini-3-flash-preview' was not that default, so saving
+  // the panel untouched used to change the model.
+  const [daemonNli, setDaemonNli] = useState(userSettings?.daemon_nli_model || '');
+  const [daemonMonologue, setDaemonMonologue] = useState(userSettings?.daemon_monologue_model || '');
+  const [daemonEffective, setDaemonEffective] = useState(null);
   const [savingDaemon, setSavingDaemon] = useState(false);
   const [daemonStatus, setDaemonStatus] = useState(null);
 
@@ -956,6 +1001,13 @@ function ProviderManagementPanel({ appTheme, USERNAME, S, userSettings, setUserS
       setDaemonMonologue(userSettings.daemon_monologue_model);
     }
   }, [userSettings]);
+
+  // What the daemon really runs (env override > saved setting > default), from the server.
+  useEffect(() => {
+    let active = true;
+    api.fetchDaemonModels(USERNAME).then(res => { if (active && res) setDaemonEffective(res); });
+    return () => { active = false; };
+  }, [USERNAME]);
 
   // Load both OAuth overview and provider registry status
   useEffect(() => {
@@ -1135,16 +1187,16 @@ function ProviderManagementPanel({ appTheme, USERNAME, S, userSettings, setUserS
     setSavingDaemon(true);
     setDaemonStatus(null);
     try {
-      const newSettings = {
-        ...userSettings,
-        daemon_nli_model: daemonNli,
-        daemon_monologue_model: daemonMonologue
+      const picked = {
+        daemon_nli_model: daemonNli.trim(),
+        daemon_monologue_model: daemonMonologue.trim()
       };
-      if (setUserSettings) setUserSettings(newSettings);
-      await api.updateUserSettings(USERNAME, {
-        daemon_nli_model: daemonNli,
-        daemon_monologue_model: daemonMonologue
-      });
+      // updateUserSettings returns null on any failure instead of throwing.
+      const res = await api.updateUserSettings(USERNAME, picked);
+      if (!res) throw new Error('The server did not accept the save');
+      if (setUserSettings) setUserSettings({ ...userSettings, ...picked });
+      const eff = await api.fetchDaemonModels(USERNAME);
+      if (eff) setDaemonEffective(eff);
       setDaemonStatus({ type: 'success', text: 'Daemon background models updated' });
     } catch (err) {
       setDaemonStatus({ type: 'error', text: err.message || 'Failed to save settings' });
@@ -1152,6 +1204,20 @@ function ProviderManagementPanel({ appTheme, USERNAME, S, userSettings, setUserS
       setSavingDaemon(false);
       setTimeout(() => setDaemonStatus(null), 4000);
     }
+  };
+
+  // One status line per daemon slot: what actually runs, and why.
+  const daemonRunsLine = (slot, field) => {
+    const eff = daemonEffective?.[slot];
+    if (!eff) return null;
+    if (eff.source === 'env') {
+      return { warn: true, text: `Daemon runs ${eff.model}: ${eff.env_var} in .env overrides this setting.` };
+    }
+    const saved = (userSettings?.[slot] || '').trim();
+    if (field.trim() !== saved) {
+      return { warn: false, text: `Unsaved. The daemon still runs ${eff.model}.` };
+    }
+    return { warn: false, text: `Daemon runs ${eff.model} (${eff.source === 'setting' ? 'your setting' : 'default'}).` };
   };
 
   // THEME COLOR TOKENS
@@ -1788,7 +1854,7 @@ function ProviderManagementPanel({ appTheme, USERNAME, S, userSettings, setUserS
             <ModelSelector
               value={daemonNli}
               onChange={val => setDaemonNli(val)}
-              placeholder="e.g. google/gemini-3-flash-preview"
+              placeholder={daemonEffective?.daemon_nli_model?.default ? `Default: ${daemonEffective.daemon_nli_model.default}` : 'Daemon default'}
               style={S.input}
               openRouterModels={openRouterModels}
               appTheme={appTheme}
@@ -1796,6 +1862,17 @@ function ProviderManagementPanel({ appTheme, USERNAME, S, userSettings, setUserS
             <div style={{ fontSize: '11px', color: textMuted, marginTop: '-10px' }}>
               Scores narrative divergence and triggers memory consolidation.
             </div>
+            {(() => {
+              const line = daemonRunsLine('daemon_nli_model', daemonNli);
+              return line && (
+                <div style={{ fontSize: '11px', marginTop: '4px', color: line.warn ? '#ffa726' : textMuted, display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                  <span>{line.text}</span>
+                  {daemonNli && (
+                    <span onClick={() => setDaemonNli('')} style={{ cursor: 'pointer', textDecoration: 'underline' }}>Use default</span>
+                  )}
+                </div>
+              );
+            })()}
           </div>
 
           <div>
@@ -1803,7 +1880,7 @@ function ProviderManagementPanel({ appTheme, USERNAME, S, userSettings, setUserS
             <ModelSelector
               value={daemonMonologue}
               onChange={val => setDaemonMonologue(val)}
-              placeholder="e.g. google/gemini-3-flash-preview"
+              placeholder={daemonEffective?.daemon_monologue_model?.default ? `Default: ${daemonEffective.daemon_monologue_model.default}` : 'Daemon default'}
               style={S.input}
               openRouterModels={openRouterModels}
               appTheme={appTheme}
@@ -1811,6 +1888,17 @@ function ProviderManagementPanel({ appTheme, USERNAME, S, userSettings, setUserS
             <div style={{ fontSize: '11px', color: textMuted, marginTop: '-10px' }}>
               Generates spontaneous reflections and subconscious monologues.
             </div>
+            {(() => {
+              const line = daemonRunsLine('daemon_monologue_model', daemonMonologue);
+              return line && (
+                <div style={{ fontSize: '11px', marginTop: '4px', color: line.warn ? '#ffa726' : textMuted, display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                  <span>{line.text}</span>
+                  {daemonMonologue && (
+                    <span onClick={() => setDaemonMonologue('')} style={{ cursor: 'pointer', textDecoration: 'underline' }}>Use default</span>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         </div>
 
@@ -1859,6 +1947,12 @@ function ProviderManagementPanel({ appTheme, USERNAME, S, userSettings, setUserS
     </div>
   );
 }
+
+// The consciousness daemon writes its reflections as lore entries titled
+// "Internal Monologue - YYYY-MM-DD HH:MM". The Studio's Lorebook shows them as a
+// separate read-only Journal group, and they never keep the lore poll alive.
+const JOURNAL_TITLE_PREFIX = 'Internal Monologue - ';
+const isJournalEntry = (entry) => typeof entry?.title === 'string' && entry.title.startsWith(JOURNAL_TITLE_PREFIX);
 
 function App() {
   const [personas, setPersonas] = useState({});
@@ -2111,6 +2205,8 @@ function App() {
   const [loreEditId, setLoreEditId] = useState(null);
   const [loreLoading, setLoreLoading] = useState(false);
   const [loreSaving, setLoreSaving] = useState(false);
+  const [journalOpen, setJournalOpen] = useState(false);
+  const [journalExpanded, setJournalExpanded] = useState({});
 
   // --- WORKSHOP ADVANCED SETTINGS ---
   const [apiKeys, setApiKeys] = useState(() => {
@@ -2912,11 +3008,14 @@ function App() {
     loadLore();
     setLoreForm({ title: '', content: '' });
     setLoreEditId(null);
+    setJournalOpen(false);
+    setJournalExpanded({});
   }, [newPersona.originalKey, USERNAME]);
 
-  // Polling for Lore Sync (Zettel Hyperscaling visibility)
+  // Polling for Lore Sync (Zettel Hyperscaling visibility).
+  // Only authored lore keeps the poll alive; Journal entries never do.
   useEffect(() => {
-    const anyUnprocessed = loreEntries.some(e => !e.processed);
+    const anyUnprocessed = loreEntries.some(e => !e.processed && !isJournalEntry(e));
     if (anyUnprocessed && currentView === 'studio' && newPersona.originalKey) {
       const t = setTimeout(async () => {
         const updated = await api.fetchLoreEntries(newPersona.originalKey, USERNAME);
@@ -2925,6 +3024,23 @@ function App() {
       return () => clearTimeout(t);
     }
   }, [loreEntries, currentView, newPersona.originalKey, USERNAME]);
+
+  // Lorebook list split: authored lore vs. the daemon's Journal (newest first).
+  const allLoreEntries = newPersona.originalKey ? loreEntries : tempLoreEntries;
+  const authoredLoreEntries = allLoreEntries.filter(e => !isJournalEntry(e));
+  const journalEntries = allLoreEntries.filter(isJournalEntry)
+    .sort((a, b) => String(b.created_at || b.title).localeCompare(String(a.created_at || a.title)));
+  const deleteLoreEntryWithConfirm = async (entry) => {
+    if (!window.confirm(`Delete "${entry.title}"? This cannot be undone.`)) return;
+    if (newPersona.originalKey) {
+      await api.deleteLoreEntry(newPersona.originalKey, entry.id, USERNAME);
+      const entries = await api.fetchLoreEntries(newPersona.originalKey, USERNAME);
+      setLoreEntries(entries);
+    } else {
+      setTempLoreEntries(prev => prev.filter(e => e.id !== entry.id));
+    }
+    if (loreEditId === entry.id) { setLoreEditId(null); setLoreForm({ title: '', content: '' }); }
+  };
 
   // When persona changes, load their chat history
   useEffect(() => {
@@ -4408,12 +4524,12 @@ function App() {
                       </div>
                     </div>
 
-                    {/* Lore Entry List */}
+                    {/* Lore Entry List (authored lore only; the Journal group follows) */}
                     {newPersona.originalKey && loreLoading ? (
                       <div style={{ opacity: 0.5, fontSize: '13px', textAlign: 'center', padding: '10px' }}>Loading entries...</div>
-                    ) : (newPersona.originalKey ? loreEntries : tempLoreEntries).length > 0 && (
+                    ) : authoredLoreEntries.length > 0 && (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '300px', overflowY: 'auto' }}>
-                        {(newPersona.originalKey ? loreEntries : tempLoreEntries).map(entry => (
+                        {authoredLoreEntries.map(entry => (
                           <div
                             key={entry.id}
                             className="glass-panel"
@@ -4468,25 +4584,83 @@ function App() {
                                   className="material-icons"
                                   style={{ background: 'transparent', border: 'none', color: '#af52ff', cursor: 'pointer', fontSize: '16px', padding: '2px' }}
                                   title="Delete"
-                                  onClick={async () => {
-                                    if (!window.confirm(`Delete "${entry.title}"? This cannot be undone.`)) return;
-                                    if (newPersona.originalKey) {
-                                      await api.deleteLoreEntry(newPersona.originalKey, entry.id, USERNAME);
-                                      const entries = await api.fetchLoreEntries(newPersona.originalKey, USERNAME);
-                                      setLoreEntries(entries);
-                                    } else {
-                                      setTempLoreEntries(prev => prev.filter(e => e.id !== entry.id));
-                                    }
-                                    if (loreEditId === entry.id) { setLoreEditId(null); setLoreForm({ title: '', content: '' }); }
-                                  }}
+                                  onClick={() => deleteLoreEntryWithConfirm(entry)}
                                 >delete_forever</button>
                               </div>
                             </div>
                             <div style={{ fontSize: '12px', opacity: 0.6, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                               {entry.content.slice(0, 100)}{entry.content.length > 100 ? '...' : ''}
                             </div>
+                            {entry.import_note && (/skipped/i.test(entry.import_note) ? (
+                              <div style={{ fontSize: '11px', color: '#ffa726', background: 'rgba(255,167,38,0.1)', border: '1px solid rgba(255,167,38,0.4)', borderRadius: '4px', padding: '4px 8px', display: 'flex', alignItems: 'flex-start', gap: '6px', wordBreak: 'break-word' }}>
+                                <span className="material-icons" style={{ fontSize: '13px' }}>warning</span>
+                                <span>{entry.import_note}</span>
+                              </div>
+                            ) : (
+                              <div style={{ fontSize: '11px', opacity: 0.45, wordBreak: 'break-word' }}>
+                                {entry.import_note}
+                              </div>
+                            ))}
                           </div>
                         ))}
+                      </div>
+                    )}
+
+                    {/* Journal: the daemon's Internal Monologue entries. Collapsed by default, newest first, read-only. */}
+                    {!(newPersona.originalKey && loreLoading) && journalEntries.length > 0 && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        <button
+                          type="button"
+                          title="Reflections the persona writes between conversations. Read-only."
+                          style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, textAlign: 'left', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.05em', color: '#ff007f', opacity: 0.85 }}
+                          onClick={() => setJournalOpen(open => !open)}
+                        >
+                          <span className="material-icons" style={{ fontSize: '16px', transition: 'transform 0.15s ease', transform: journalOpen ? 'rotate(90deg)' : 'none' }}>chevron_right</span>
+                          Journal
+                          <span style={{ fontSize: '10px', fontWeight: 'normal', letterSpacing: 0, background: 'rgba(255,0,127,0.1)', border: '1px solid rgba(255,0,127,0.3)', borderRadius: '10px', padding: '1px 8px' }}>{journalEntries.length}</span>
+                        </button>
+                        {journalOpen && (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '400px', overflowY: 'auto' }}>
+                            {journalEntries.map(entry => {
+                              const expanded = !!journalExpanded[entry.id];
+                              const text = entry.content || '';
+                              return (
+                                <div
+                                  key={entry.id}
+                                  className="glass-panel"
+                                  style={{ padding: '12px', borderRadius: '8px', background: 'rgba(0,0,0,0.2)', display: 'flex', flexDirection: 'column', gap: '6px', border: '1px solid transparent' }}
+                                >
+                                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                                    <button
+                                      type="button"
+                                      title={expanded ? 'Collapse' : 'Read entry'}
+                                      style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: '6px', textAlign: 'left', flex: 1, minWidth: 0 }}
+                                      onClick={() => setJournalExpanded(prev => ({ ...prev, [entry.id]: !prev[entry.id] }))}
+                                    >
+                                      <span className="material-icons" style={{ fontSize: '14px', color: '#00e5ff', transition: 'transform 0.15s ease', transform: expanded ? 'rotate(90deg)' : 'none' }}>chevron_right</span>
+                                      <span style={{ fontWeight: 'bold', fontSize: '13px', color: '#00e5ff' }}>{entry.title.slice(JOURNAL_TITLE_PREFIX.length)}</span>
+                                    </button>
+                                    <button
+                                      className="material-icons"
+                                      style={{ background: 'transparent', border: 'none', color: '#af52ff', cursor: 'pointer', fontSize: '16px', padding: '2px' }}
+                                      title="Delete"
+                                      onClick={() => deleteLoreEntryWithConfirm(entry)}
+                                    >delete_forever</button>
+                                  </div>
+                                  {expanded ? (
+                                    <div style={{ fontSize: '12px', opacity: 0.85, lineHeight: '1.5', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                                      {text}
+                                    </div>
+                                  ) : (
+                                    <div style={{ fontSize: '12px', opacity: 0.6, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                      {text.slice(0, 100)}{text.length > 100 ? '...' : ''}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
                     )}
                   </>
