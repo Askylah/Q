@@ -67,6 +67,7 @@ something is non-identity.
 
 `rick_tail.txt` as of this note: CONTRAST-001..005 (ALWAYS_LOAD), CONTRAST-BORED-001 and
 CONTRAST-ENGAGED-001 (BAND), DISP-INHIBITED / RESTLESS / SPIKE / EXPLORING.
+> **[Session tail removal, 2026-10-28 — CORRECTION]** Removed. No persona ever had a tail: `personas/rick_tail.txt` was not on disk, `personas.json` has no `tail_file`, and `custom_personas` can't carry one (§5.6). Sky: "it was not my boy". Deleted `backend/persona_tail.py` and `tests/test_persona_tail.py` (copies in `Desktop/Personas/_bak_20261028_tail_strings/`). `llm_engine` now appends efferent's stance alone, last. `efferent.render_stance(overrides=)` and its tests stay; nothing passes overrides.
 
 ### 3. Wiring and suites **[D]**
 
