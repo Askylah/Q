@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, StreamingResponse, Response, HTMLRes
 from pydantic import BaseModel
 import asyncio
 import database as db
+import persona_files
 import provider_registry
 import oauth_engine
 import json
@@ -303,7 +304,13 @@ def load_personas_logic(username: str = None):
         custom = db_conn.get_custom_personas(username)
         # Merge dictionaries
         personas = {**personas, **custom}
-        
+        # The prompt file beats the DB row; the file is what gets edited (persona_files.py).
+        specs = persona_files.load_specs()
+        for key in custom:
+            text = persona_files.read_prompt(key, specs)
+            if text is not None:
+                personas[key]["system_prompt"] = text
+
     return personas
 
 from llm_engine import build_context_and_stream
@@ -461,6 +468,11 @@ def create_persona(payload: PersonaCreatePayload, current_user: str = Depends(ge
     )
     if not success:
         raise HTTPException(status_code=400, detail=result)
+    # Reads come from the prompt file when there is one, so the edit has to land there too.
+    try:
+        persona_files.write_prompt(payload.key, payload.system_prompt)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Saved to the database, but the prompt file was not written: {e}")
     return {"status": "success", "message": "Persona created/updated"}
 
 @app.delete("/personas/{persona_key}")
@@ -1117,4 +1129,11 @@ if os.path.exists(FRONTEND_DIST):
         raise HTTPException(status_code=404, detail="Frontend build missing index.html")
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, http="h11", reload=True, reload_excludes=["*labs*", "*labs\\*", "labs\\*", "*lab_exec*"])
+    uvicorn.run(
+        "main:app",
+        host="127.0.0.1",
+        port=8000,
+        http="h11",
+        reload=True,
+        reload_excludes=["*labs*", "*labs\\*", "labs\\*", "*lab_exec*", "*garage*", "*garage\\*", "garage\\*"]
+    )

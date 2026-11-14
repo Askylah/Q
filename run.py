@@ -17,4 +17,11 @@ if _ROOT_DIR not in sys.path:
 if __name__ == "__main__":
     import uvicorn
     print("[SYSTEM] Starting Q Server from backend/main:app...", flush=True)
-    uvicorn.run("backend.main:app", host="127.0.0.1", port=8000, http="h11", reload=True, reload_excludes=["*labs*", "*labs\\*", "labs\\*", "*lab_exec*"])
+    uvicorn.run(
+        "backend.main:app",
+        host="127.0.0.1",
+        port=8000,
+        http="h11",
+        reload=True,
+        reload_excludes=["*labs*", "*labs\\*", "labs\\*", "*lab_exec*", "*garage*", "*garage\\*", "garage\\*"]
+    )
