@@ -9,8 +9,7 @@ dist/
 build/
 
 # ─── Private Character Files ──────────────────────────────
-personas/*rick*
-personas/*Rick*
+personas/*
 personas.json
 !personas/global_rules.txt
 labs/live_out/
@@ -80,6 +79,7 @@ tests/test_openrouter_ping.py
 tests/test_zettel_scaling.py
 verify_garage_pipeline.py
 memory_dump.txt
+chat_viewer.html
 
 # ─── Staged Writes (Approval Scratch) ────────────────────
 .staging/
