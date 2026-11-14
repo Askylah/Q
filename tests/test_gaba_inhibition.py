@@ -281,6 +281,53 @@ check_true("daemon rows and reflections are not raw events",
            rg.plan_reflection([ev("entropic_gap")] * 30 + [ev("dense_observation")], T,
                               similarity=lambda a, b: 0.0)["verdict"] == "wait")
 
+# 7d. fix (b): the newest event on its own (gaba note §11-§12, run 20261011_110043).
+# The chunks said 0.991 on a frame break because the newest event was truncated out
+# and diluted; scored alone it sat at 0.112.
+logs7d = []
+for i in range(6):
+    logs7d += turn(i)     # 12 raw events: newest is "answer 5"
+nf_calls = []
+
+
+def nearest_novel(text, cands):
+    nf_calls.append((text, list(cands)))
+    return 0.11
+
+
+plan = rg.plan_reflection(logs7d, T, similarity=lambda a, b: 0.99, sim_ceil=0.85, nearest_fn=nearest_novel)
+check("window at 0.99 but the newest event alone at 0.11 -> reflect (the frame break is seen)",
+      plan["verdict"], "reflect")
+check_true("...and it reports both numbers",
+           approx(plan["nearest"], 0.99) and approx(plan["newest_nearest"], 0.11))
+check("nearest_fn asked once (one batched encode)", len(nf_calls), 1)
+check("candidates are the other 2N-1 raw events of the window", len(nf_calls[0][1]), 2 * T - 1)
+check_true("the scored text is the newest raw event only, and never its own candidate",
+           "answer 5" in nf_calls[0][0] and "question 5" not in nf_calls[0][0]
+           and all("answer 5" not in c for c in nf_calls[0][1]))
+plan = rg.plan_reflection(logs7d, T, similarity=lambda a, b: 0.99, sim_ceil=0.85, nearest_fn=lambda t, c: 0.995)
+check("window 0.99 and newest alone 0.995 -> still shrug (repetition stays repetition)", plan["verdict"], "shrug")
+check_true("...and the shrug carries newest_nearest", approx(plan["newest_nearest"], 0.995))
+
+
+def nearest_boom(text, cands):
+    raise RuntimeError("model gone")
+
+
+plan = rg.plan_reflection(logs7d, T, similarity=lambda a, b: 0.99, sim_ceil=0.85, nearest_fn=nearest_boom)
+check("nearest_fn raising keeps the chunk verdict (shrug), no crash", plan["verdict"], "shrug")
+check("...with newest_nearest None", plan["newest_nearest"], None)
+plan = rg.plan_reflection(logs7d, T, similarity=lambda a, b: 0.99, sim_ceil=0.85, nearest_fn=lambda t, c: None)
+check("nearest_fn returning None (no model) keeps the shrug", plan["verdict"], "shrug")
+nf_calls.clear()
+plan = rg.plan_reflection(logs7d, T, similarity=lambda a, b: 0.5, sim_ceil=0.85, nearest_fn=nearest_novel)
+check("chunks already moved -> nearest_fn never asked (no extra encode)", len(nf_calls), 0)
+plan = rg.plan_reflection(logs7d, T, similarity=lambda a, b: 0.99, sim_ceil=0.85,
+                          nearest_fn=lambda t, c: 0.80, newest_ceil=0.75)
+check("newest_ceil is honoured on its own (0.80 >= 0.75 -> shrug)", plan["verdict"], "shrug")
+plan = rg.plan_reflection(logs7d[:3], T, similarity=lambda a, b: 0.99, nearest_fn=nearest_novel)
+check("watermark still wins: too few new events -> wait, before any newest check", plan["verdict"], "wait")
+
 # ── 8. the composed gate the daemon uses ──────────────────────────────────
 print("\n[8] gate composition: tonic says open, inhibition says shut, shut wins")
 check("tonic 0.60 / inhibition 0.10 -> open", ds.should_explore(0.60) and not gs.is_inhibited(0.10), True)

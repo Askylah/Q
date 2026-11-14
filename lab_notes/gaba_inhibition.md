@@ -1,6 +1,8 @@
 # GABA Inhibition — Lab Notes
 
-## Status: BUILT (§7), UNIT-VERIFIED, NOT YET REPLAYED — §6 BASELINE INVALIDATED (2026-09-09)
+## Status: BUILT (§7), LIVE-CROSSED (§11) — WINDOW TRUNCATION FOUND, CONSTANTS STILL PROPOSED
+
+> ✅ **2026-10-11 (§11):** crossing run 20261011_110043. GABA crossed at turn 19 and closed the gate at tonic 0.68 (closed_by=gaba, the §5 headline); the drain matches tau 600. ❌ The D and E frame breaks were scored as redundancy: MiniLM's 256-token limit cut the newest event out of the Reflector's window, and the 5-vs-5 dilution would hide one new turn even without the cut. Fix options in §11; (b) recommended.
 
 > Origin: a scripted model-to-model trace against `dopamine_state.py` on 2026-09-06
 > (isolated copy, `PersonaApp-GABA-Test`). Every line reconciled with the formulas in
@@ -407,6 +409,7 @@ conversation* runs hotter. It is a guess. The replay sets it.
 - §6.4 showed repetition never opened the gate on its own (tonic 0.48). The headline
   live check needs the gate open *first*: run `bad_tool` before `repetition`.
 > **[Session 2026-09-18, 2026-09-18 — CORRECTION]** First live run 20260918_214952 (§10) read against §7.3 and §7.4. **§7.3:** `REFLECT_SIM_CEIL` 0.85 separated the two regimes with room on both sides — moved windows read nearest 0.342 / 0.559 / 0.546 (reflect), dull windows 0.930 / 0.893 (shrug; intensity 0.534 / 0.289). One run, so the constant stays PROPOSED, but nothing in it argues for moving it. **§7.4 hazard 1** was already corrected by §8.1: the unit is user turns, replies are never raw events (checked again in the live DB — gaba_live has 26 `user_message`, 4 `dense_observation`, 1 `internal_reflection`, 0 `assistant_response`). **Hazard 3** is confirmed, and it matters more than the hand-off of 2026-09-18 22:16 read it: after the first shrug the watermark stays put, so EVERY further dull user turn is another shrug — turn 16 shrugged at `new_events=5` and turn 17 at `new_events=6`. The first shrug after a store costs five user turns; each one after costs one. Crossing 0.50 at weight ≈ 1 takes about 5 + 4 = 9 dull user turns, not the "~25" the hand-off said. **Hazard 4** held: tonic sat at 0.62 → 0.51 for the whole run and the daemon gate was open on every one of its 20 cycles, so the headline was testable. It did not fire only because the 17-turn plan gives phase C five turns, which is one shrug.
+> **[Session 2026-10-11, 2026-10-11 — CORRECTION]** §7.3 REFLECT_SIM_CEIL = 0.85 is KEPT (Sky, 2026-10-11, alongside fix (b)): two live runs put repetition shrugs at 0.89–0.997 and real movement at 0.229. The frame-break misses were window construction, not this number (§11, §12).
 
 ---
 
@@ -772,6 +775,150 @@ not any more.
 
 ---
 
+## Session 2026-10-11
+
+### 11. Crossing run — 2026-10-11, run 20261011_110043 **[D]**
+
+**Setup.**
+- Driver and account: `labs/gaba_live.py --c-turns 10` on a fresh account,
+  `gaba_live_20261011_110043`. The account got its own rick copy (45,479 chars from rick.txt)
+  because there are no built-in personas any more.
+- Keys: from Sky's shell (`Q_UNIVERSAL_KEY`, an OpenRouter key).
+- Model: `google/gemini-3-flash-preview`. Thinking was Off, which on OpenRouter means the
+  model's own default.
+- Result: 22/22 turns came back HTTP 200 with `stop`; 0 blanks, 0 errors.
+- The daemon had no key for the lab account (keys are per account; nothing in the vault), so
+  the wait had 0 `da/boost` gap rows.
+- Files: `labs/live_out/20261011_110043/digest.txt` and `telemetry_rows.jsonl`. The run's own
+  end-of-run digest crashed (`import telemetry` from the repo root; telemetry.py has lived in
+  backend/ since 10-03). Fixed in gaba_live.py and the digest re-read with `--digest-only`.
+
+**Predicted (§10 Next, 2026-09-18) vs observed:**
+
+| predicted | observed |
+|---|---|
+| reflections at turns 5 and 10 | ✅ +189 s (cold start, stored, novelty paid 0.12), +506 s (moved, nearest 0.229, stored) |
+| shrugs from turn 15 | ✅ turn 15, nearest 0.891 |
+| `crossed=true` around turn 19–20 | ✅ turn 19 (+946.7 s): streak 5, inhibition 0.397 → 0.771 |
+| `daemon/gate_close closed_by=gaba` | ✅ +988 s, **tonic 0.6846**: the gate closed with tonic well above 0.50. The headline result of §5. The gate had been open 661 s. |
+| the D turn writes `gaba/novel`, gate still shut | ❌ D was a **shrug** (nearest 0.991): `gaba/redundant` streak 7 |
+| reopen time across the 600 s wait | ✅ reopened +1469 s, 481 s after the close. The drain follows `GABA_TAU_SEC` = 600 exactly: 1.0 at +1018 s × e^(−451/600) = 0.4716, as logged. |
+| E: does the gate reopen? | ❌ E was a **shrug** too (nearest 0.954): streak 8, inhibition 0.364 → 1.0, `gate_close closed_by=gaba` again at +1649 s, after only 180 s open |
+
+Tonic got to 0.69 through the tool channel: Rick made 8 tool calls on the bread questions, with
+`da/tool_reward` RPEs from +0.62 down to +0.12. The gate first opened at +327 s on tool reward,
+not on novelty.
+
+**Mechanism: D and E were never seen.** I rebuilt the Reflector's windows from this run's
+logged rows with the app's own `reflect_gate.chunk_text` and the same model (offline, read-only).
+The reproduction matches the live values exactly:
+
+| window ending at | newest chunk | where its last event starts | cos at 256 tokens (the app) | cos at 512 tokens |
+|---|---|---|---|---|
+| turn 20 (C) | 390 tok | ~311 | 0.996 | 0.996 |
+| turn 21 (D) | 362 tok | ~314 | **0.991** (logged 0.9911) | 0.948 |
+| turn 22 (E) | 329 tok | ~283 | **0.954** (logged 0.9539) | 0.866 |
+
+1. **Truncation.** The app loads all-MiniLM-L6-v2 at `max_seq_length` 256, and `chunk_text`
+   runs oldest → newest at up to 500 chars an event. Once the five events pass ~256 tokens,
+   the NEWEST event, the one most likely to be new, is cut out of the embedding entirely. D
+   and E sat past the cut, so the Reflector compared bread with bread.
+2. **Dilution, even without truncation.** One novel event in a five-event chunk still scores
+   0.948, and two score 0.866, both at or above 0.85. That matches the docstring ("N-vs-N
+   bounds the dilution to one threshold's worth"): about 3 of 5 events have to be new before
+   the chunk registers movement.
+3. **Consequence: a frame break after a dull stretch counts as redundancy.** Streak escalation
+   then makes it expensive: E's increment was +0.636, which shut a gate that had just
+   reopened. Rule 4 ("a novel event resets the streak") never fires, because nothing after a
+   dull stretch is ever classed as novel.
+4. **Efferent, same turn:** D went out with `band=inhibited` and `max_tokens` 4096 → 2577.
+   That is the norepinephrine note's origin case, observed live.
+
+**§7.3 (Sky's call).** The shrug nearest values were 0.891, 0.930, 0.942, 0.979, 0.997, 0.996,
+0.991, 0.954, against a "moved" value of 0.229.
+- 0.85 separates phase C from the B reflection with room to spare.
+- Lowering the ceiling would not rescue D or E (0.991 and 0.954 after truncation).
+- The failure is in how the window is built, not in the ceiling. Proposed: keep 0.85 and fix
+  the composition first.
+
+**Fix options [PROPOSED]:**
+- **(a)** Embed each event separately and average. This ends the truncation but keeps the
+  dilution.
+- **(b)** Also score the NEWEST event on its own against the prior chunk. If it falls below
+  the ceiling, it is novel (`on_novel`, streak reset) whatever the chunk says. The chunk check
+  stays for redundancy.
+- **(c)** Raise `max_seq_length` to 512. That fixes truncation only at these lengths; D would
+  still shrug at 0.948.
+
+**Recommendation: (b).** It costs one extra encode per check, it is the GABA-side mirror of
+what norepinephrine does at the output, and it stops a frame break from being counted as
+redundancy. Verify by replaying this run's rows: D and E should come out as novel, and turns
+15–20 should still shrug.
+
+---
+
+### 12. Fix (b) built — 2026-10-11 **[D]**
+
+**Decided (Sky, 2026-10-11):** fix (b). §7.3 `REFLECT_SIM_CEIL` stays at 0.85. Sky locked (b),
+and (b) assumes that ceiling.
+
+**Built (uncommitted):**
+- `backend/reflect_gate.py`: question 3 in `plan_reflection`. When the chunks say "shrug", the
+  newest raw event is scored on its own: its nearest neighbour among the OTHER 2N−1 raw events
+  of the window, one event per text. Below `newest_ceil` (default `sim_ceil`) → "reflect",
+  whatever the chunks say. Details:
+  - It's opt-in through `nearest_fn(text, candidates)`; without it the gate behaves exactly
+    as before, and §7c's "similarity asked once" still holds.
+  - A failing or `None` `nearest_fn` keeps the chunk verdict.
+  - It's never asked when the chunks already moved.
+- `plugins/memory_plugin.py`: `_nearest_among` does the newest check in one batched MiniLM
+  encode, is passed as `nearest_fn`, and records `newest_nearest` on every `reflect/*`
+  telemetry row. The file is CRLF and was byte-patched.
+
+**Where this departs from §11's wording.** §11 said "against the prior chunk". The data
+chose the newest event's nearest single event instead:
+
+| newest event scored against | C turns 15–20 | D, E |
+|---|---|---|
+| the prior chunk | 0.884 – 0.933 (0.034 above 0.85 at turn 15) | 0.102, 0.123 |
+| its nearest single event in the window | 0.992 – 0.998 | 0.112, 0.126 |
+
+The chunk version also carries the same 256-token cut on the prior side. Single events are
+capped at 500 chars and never get near it.
+
+**Verified:**
+- `tests/test_gaba_inhibition.py`: §7d adds 13 checks; the suite is 84 PASS, 0 FAIL.
+- `labs/gaba_window_replay.py` (offline, read-only, the app's own functions and model):
+  - The OLD gate reproduces run 20261011_110043's live verdicts 22/22, so the simulation
+    is trustworthy.
+  - Fix (b): turns 15–20 still shrug. **D → reflect** (newest alone 0.112). **E → wait**,
+    because D's reflection reset the watermark, so it is no longer a shrug.
+
+**Cost:** one extra batched encode (10 short texts) per shrug check. D now triggers one
+reflection LLM call, which is exactly the "pay only when something changed" the gate exists for.
+
+**Not yet seen live.** The backend edit reloads the app. On the next crossing run, D should log
+`reflect/reflect` (with `newest_nearest`), then `reflect/stored`, then `gaba/novel`, with the
+gate still shut; E should log `reflect/wait`.
+
+---
+
+## Next session — start here (2026-10-11)
+
+1. ~~**Sky:** §7.3.~~ — kept 0.85, §12; Keep 0.85 (proposed, §11), or decide otherwise.
+2. ~~**Sky:** pick the window fix~~ — (b), §12;: (a), (b) or (c) in §11. (b) is recommended.
+3. ~~**Build the fix,**~~ — done, §12: replay passed; then replay `labs/live_out/20261011_110043`'s logged rows offline (free,
+   no LLM calls). Pass criteria: D and E come out as `reflect`/novel, and turns 15–20 still
+   shrug.
+4. **Then repeat the crossing run** (`$env:Q_UNIVERSAL_KEY` in Sky's shell,
+   `python labs/gaba_live.py --c-turns 10`). The D turn should now log `gaba/novel` with the
+   gate still shut.
+5. **Open from §10, still pending:** the daemon picking nothing for a lab account (§10.1).
+   It can't be judged while lab accounts have no daemon key. Either connect a key for the lab
+   account or test it on Sky's account.
+
+---
+
 ## Next session — start here (2026-09-18)
 
 ~~1. Before the next run, get the status behind "No API key provided" (§10.4): Sky reads the~~ — RESOLVED 2026-09-30 (Sky): the API key was in the wrong place, a config slip, not an API fault. Skip this item.
@@ -779,7 +926,7 @@ not any more.
    `telemetry.emit("llm", "fallback", status=…, body=…)` goes in at the two Vertex fallback
    sites in `llm_engine.call_llm` (that edit reloads uvicorn and bounces the daemon; it
    recovers, §40 of the livelock note).
-2. Decide §10.3. If (a): `python labs/gaba_live.py --c-turns 10` (22 turns, ~28 min, fresh
+2. ~~Decide §10.3.~~ — done 2026-10-11, §11 If (a): `python labs/gaba_live.py --c-turns 10` (22 turns, ~28 min, fresh
    account), Redis and daemon up first. Expect reflections at 5 and 10, shrugs from 15 on,
    `crossed=true` around turn 19–20, `daemon/gate_close closed_by=gaba`, the D turn's
    `gaba/novel` with the gate still shut, then the reopen time across the 600 s wait.

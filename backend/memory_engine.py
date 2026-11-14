@@ -664,9 +664,8 @@ class DeepMemory:
                 
                 # Associations (involuntary recall)
                 if item["associations"]:
-                    parts.append("  [involuntary_echoes: your brain went there anyway]")
                     for assoc in item["associations"][:2]:
-                        parts.append(f"  → {assoc['content'][:80]}")
+                        parts.append(f"  ↳ Echo: {assoc['content'][:80]}")
             
             parts.append("[/DEEP_MEMORY]")
         

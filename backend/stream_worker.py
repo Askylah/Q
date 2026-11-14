@@ -17,6 +17,7 @@ if _APP_ROOT not in sys.path:
 
 import database as db
 import llm_engine
+import persona_files
 import provider_registry
 
 # Global neuromodulator coupling (optional — degrades to legacy behavior if absent)
@@ -28,6 +29,35 @@ try:
     import gaba_state
 except ImportError:
     gaba_state = None
+try:
+    import norepinephrine_state
+except ImportError:
+    norepinephrine_state = None
+
+
+def ne_hold(username, persona):
+    """lab_notes/norepinephrine.md §7: "hold" | "would_hold" | "".
+
+    While the user has just broken the frame, this persona's whole cycle (gap scan,
+    NLI sweep, monologue) waits, so attention stays on the conversation and a
+    background call cannot win a rate-limit race against the reply. The daemon PULLS
+    the organ's state, like gaba_state.is_inhibited; the organ knows nothing about the
+    daemon. In shadow (the default) it only records what it would have done. A sweep
+    already running is not interrupted. Never raises: a failing organ never stops the
+    daemon."""
+    if norepinephrine_state is None:
+        return ""
+    try:
+        if not norepinephrine_state.alert_active(username, persona):
+            return ""
+        alert = norepinephrine_state.get_state(username, persona)["alert"]
+        if norepinephrine_state.acting():
+            _emit("daemon", "sweep_held", username, persona, alert=alert)
+            return "hold"
+        _emit("daemon", "would_hold", username, persona, alert=alert)
+        return "would_hold"
+    except Exception:
+        return ""
 try:
     import telemetry as _tm
 except Exception:  # telemetry must never be load-bearing
@@ -500,6 +530,12 @@ class ConsciousnessWorker:
                 self._track_gate(username, persona, _exploring, _tonic_ok, _gaba_shut, _da_tonic, _gaba_inh)
             except Exception:
                 pass
+
+            # Norepinephrine hold (norepinephrine.md §7): see ne_hold().
+            if ne_hold(username, persona) == "hold":
+                logger.info(f"[CONSCIOUSNESS_DAEMON] Sweep held for {persona} "
+                            f"(user: {username}): active NE alert")
+                continue
             
             # 1. Scan for Entropic Gaps (Isolated clusters / lack of link density)
             gap = self.analyze_entropic_gaps(username, persona, exploring=_exploring)
@@ -1046,7 +1082,9 @@ class ConsciousnessWorker:
         
         if row:
             persona_name = row["name"]
-            persona_system_prompt = row["system_prompt"]
+            # Same rule as chat (main.load_personas_logic): the prompt file beats the row.
+            file_prompt = persona_files.read_prompt(persona)
+            persona_system_prompt = row["system_prompt"] if file_prompt is None else file_prompt
         else:
             persona_name = persona.capitalize()
             persona_system_prompt = f"You are {persona_name}."

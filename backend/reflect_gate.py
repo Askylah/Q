@@ -34,6 +34,20 @@ the window rolls the prior out entirely. That is a livelock, the exact class
 of bug this codebase has been fighting (§6.7, the rumination loop). N-vs-N
 bounds the dilution to one threshold's worth of events.
 
+3. NEWEST EVENT (fix (b), lab_notes/gaba_inhibition.md §11-§12).  One
+   threshold's worth of dilution was still too much. Crossing run 20261011_110043:
+   the frame-break turns D and E sat at 0.991 / 0.954 and were scored as
+   REDUNDANCY. Two causes: the chunk runs oldest -> newest and MiniLM stops at
+   256 tokens, so the newest event was cut out of the embedding entirely; and
+   even untruncated, one new event in five still scores 0.948. So when the
+   chunks say "shrug", the newest event is also scored on its own: its nearest
+   neighbour among the other 2N-1 events of the window, one event per text,
+   never near the token limit. Below `newest_ceil` -> "reflect" whatever the
+   chunks say. Measured on that run: repetition turns 0.992-0.998, D/E
+   0.112/0.126. Opt-in through `nearest_fn(text, candidates) -> float | None`
+   (one batched encode); without it the gate behaves exactly as before. A
+   failing nearest_fn keeps the chunk verdict.
+
 The "shrug" verdict is the GABA organ's input (gaba_state.on_redundant); the
 "reflect" verdict, once the store succeeds, is its reset (gaba_state.on_novel).
 The reflector looking at the window and declining IS the redundancy event.
@@ -75,12 +89,16 @@ def chunk_text(events) -> str:
     )
 
 
-def plan_reflection(logs, turn_threshold: int, similarity=None, sim_ceil: float = 0.85) -> dict:
+def plan_reflection(logs, turn_threshold: int, similarity=None, sim_ceil: float = 0.85,
+                    nearest_fn=None, newest_ceil=None) -> dict:
     """
     logs: observation rows oldest -> newest, each {"type", "content", ...}.
     Returns {"verdict": "wait" | "shrug" | "reflect", "new_events": int,
-             "nearest": float | None, "intensity": float | None, "reason": str}.
+             "nearest": float | None, "intensity": float | None,
+             "newest_nearest": float | None, "reason": str}.
     intensity is boredom_intensity(nearest, sim_ceil): >0 only on a shrug.
+    newest_nearest is set only when the chunks said "shrug" and nearest_fn ran
+    (docstring, question 3); newest_ceil defaults to sim_ceil.
     """
     t = max(1, int(turn_threshold))
     logs = list(logs or [])
@@ -118,8 +136,23 @@ def plan_reflection(logs, turn_threshold: int, similarity=None, sim_ceil: float 
     nearest = float(nearest)
     intensity = boredom_intensity(nearest, sim_ceil)
     if nearest >= float(sim_ceil):
+        # -- 3. newest event ------------------------------------------------
+        newest_nearest = None
+        if nearest_fn is not None:
+            ceil_n = float(sim_ceil if newest_ceil is None else newest_ceil)
+            others = raw_all[-2 * t:-1]
+            try:
+                got = nearest_fn(chunk_text(raw_all[-1:]), [chunk_text([e]) for e in others])
+                newest_nearest = None if got is None else float(got)
+            except Exception:
+                newest_nearest = None   # keep the chunk verdict: no worse than before fix (b)
+            if newest_nearest is not None and newest_nearest < ceil_n:
+                return {"verdict": "reflect", "new_events": len(new_raw), "nearest": nearest,
+                        "intensity": intensity, "newest_nearest": newest_nearest,
+                        "reason": (f"newest event moved: its nearest of the {len(others)} before it is "
+                                   f"{newest_nearest:.3f} < {ceil_n} (window sat at {nearest:.3f})")}
         return {"verdict": "shrug", "new_events": len(new_raw), "nearest": nearest,
-                "intensity": intensity,
+                "intensity": intensity, "newest_nearest": newest_nearest,
                 "reason": f"newest {t} raw events sit at {nearest:.3f} >= {sim_ceil} to the {t} before them"}
     return {"verdict": "reflect", "new_events": len(new_raw), "nearest": nearest,
             "intensity": intensity,

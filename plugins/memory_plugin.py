@@ -67,6 +67,28 @@ def _chunk_similarity(new_text: str, prior_text: str):
     except Exception:
         return None
 
+def _nearest_among(text: str, candidates):
+    """Highest cosine between `text` and any of `candidates`, one batched encode on
+    the shared MiniLM. Fix (b): reflect_gate scores the newest event on its own
+    (lab_notes/gaba_inhibition.md §11-§12). None when unavailable, so the gate
+    keeps its chunk verdict."""
+    try:
+        cands = [c for c in (candidates or []) if c]
+        if not text or not cands:
+            return None
+        from embedding_model import get_shared_model
+        model = get_shared_model()
+        if not model:
+            return None
+        import numpy as _np
+        v = model.encode([text] + cands, convert_to_numpy=True)
+        n = _np.linalg.norm(v, axis=1, keepdims=True)
+        n[n == 0] = 1.0
+        v = v / n
+        return float(_np.max(v[1:] @ v[0]))
+    except Exception:
+        return None
+
 class Observer:
     def __init__(self, db: UserManager, username: str, persona: str):
         self.db = db
@@ -106,7 +128,8 @@ class Reflector:
         plan = reflect_gate.plan_reflection(
             full, turn_threshold,
             similarity=_chunk_similarity if REFLECT_NOVELTY_GATE else None,
-            sim_ceil=REFLECT_SIM_CEIL)
+            sim_ceil=REFLECT_SIM_CEIL,
+            nearest_fn=_nearest_among if REFLECT_NOVELTY_GATE else None)
         _near = plan["nearest"]
         _near_s = "none" if _near is None else f"{_near:.3f}"
         _intensity = plan.get("intensity")
@@ -126,6 +149,7 @@ class Reflector:
         # cadence trace (one per user turn) and cost nothing.
         _emit("reflect", plan["verdict"], self.username, self.persona,
               nearest=_near, intensity=_intensity, tonic=_tonic, gate_open=_gate_open,
+              newest_nearest=plan.get("newest_nearest"),
               new_events=plan["new_events"], threshold=turn_threshold,
               sim_ceil=REFLECT_SIM_CEIL, novelty_gate=REFLECT_NOVELTY_GATE,
               window_rows=len(full), reason=plan["reason"])

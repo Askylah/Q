@@ -16,7 +16,8 @@ import os, sys, re
 os.environ["TELEMETRY_OFF"] = "1"   # fixtures must never land in the real telemetry sink
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "backend"))
+sys.path.insert(1, ROOT)
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/1")
 for _k in ("EFFERENT_OFF", "EFFERENT_SAMPLING_OFF", "EFFERENT_STANCE_OFF"):
     os.environ.pop(_k, None)
@@ -187,6 +188,65 @@ try:
     check("failure returns the inputs untouched", ef.for_turn(U, P, BASE), (BASE, "", ""))
 finally:
     ef.read_organs = _real
+
+print("[10] norepinephrine alert (norepinephrine.md §3, §8)")
+import norepinephrine_state as ne
+for _k in ("NE_OFF", "NE_SHADOW"):
+    os.environ.pop(_k, None)
+BORED = {"tonic": 0.68, "phasic": 0.06, "inhibition": 0.94, "streak": 6, "baseline": 0.30}
+rest_eff = ef.compute(dict(BORED, alert=0.0))
+
+# Prevents: shadow mode changing the reply before the organ is calibrated.
+sh = ef.compute(dict(BORED, alert=1.0))
+check("shadow (default): an alert leaves the band alone", sh["band"], "inhibited")
+check("shadow: ...and records what it would have done", sh["band_shadow"], "alert")
+check("shadow: sampling identical to no alert",
+      (sh["temperature_delta"], sh["tokens_scale"]), (rest_eff["temperature_delta"], rest_eff["tokens_scale"]))
+check("shadow: ne_acting is False", sh["ne_acting"], False)
+
+# Prevents: the D-turn failure of gaba §11, a frame break answered with the bored stance.
+os.environ["NE_SHADOW"] = "0"
+ac = ef.compute(dict(BORED, alert=1.0))
+check("acting: alert outranks inhibited", ac["band"], "alert")
+check_true("acting: the alert stance is rendered", ef.STANCES["alert"] in ac["stance"])
+check_true("acting: temperature cools by TEMP_ALERT_DELTA x alert",
+           abs(ac["temperature_delta"] - round(ef.temperature_delta(0.68, 0.30) + ef.TEMP_ALERT_DELTA, 4)) < 1e-4)
+check_true("acting: inhibition's token cut is lifted (alert 1.0 leaves phasic only)",
+           abs(ac["tokens_scale"] - round(ef.tokens_scale(0.06, 0.0), 4)) < 1e-4)
+half = ef.compute(dict(BORED, alert=0.2))
+check("acting, alert under NE_ALERT_MIN: no alert band", half["band"], "inhibited")
+check_true("...but the graded lean still applies (temperature x 0.2)",
+           abs(half["temperature_delta"] - round(ef.temperature_delta(0.68, 0.30) + ef.TEMP_ALERT_DELTA * 0.2, 4)) < 1e-4)
+zero = ef.compute(dict(BORED, alert=0.0))
+check("acting, alert 0: identical to the pre-NE result (silent at rest)",
+      (zero["band"], zero["temperature_delta"], zero["tokens_scale"]),
+      (rest_eff["band"], rest_eff["temperature_delta"], rest_eff["tokens_scale"]))
+check_true("rule 3: no number reaches the alert stance text", not re.search(r"\d", ef.STANCES["alert"]))
+os.environ["EFFERENT_STANCE_OFF"] = "1"
+so = ef.compute(dict(BORED, alert=1.0))
+check("EFFERENT_STANCE_OFF still kills the band, alert included", (so["band"], so["band_shadow"]), ("", ""))
+os.environ.pop("EFFERENT_STANCE_OFF", None)
+os.environ["NE_OFF"] = "1"
+off = ef.compute(dict(BORED, alert=1.0))
+check("NE_OFF: alert ignored even with shadow off", (off["band"], off["ne_acting"]), ("inhibited", False))
+os.environ.pop("NE_OFF", None)
+
+# Prevents: efferent reading the organ wrong, or writing the other organs.
+UN = "_t_eff_ne"
+ne._MEM_FALLBACK.pop(ne._key(UN, P), None)
+if ne._RCONN is not None:
+    ne._RCONN.delete(ne._key(UN, P))
+for _i, _v in enumerate([[1.0, 0.0], [1.0, 0.0], [1.0, 0.0], [1.0, 0.0], [0.0, 1.0]]):
+    ne.on_user_message(UN, P, "five words in this message", embedding=_v)
+check_true("read_organs picks up the live NE alert", ef.read_organs(UN, P)["alert"] >= ne.NE_ALERT_MIN)
+g0 = gs.get_state(UN, P)
+_kw, _band, _st = ef.for_turn(UN, P, BASE)
+check("for_turn with a live alert (acting) answers in the alert band", _band, "alert")
+check("for_turn never touches GABA state (rule 1)", gs.get_state(UN, P), g0)
+ne._MEM_FALLBACK.pop(ne._key(UN, P), None)
+if ne._RCONN is not None:
+    ne._RCONN.delete(ne._key(UN, P))
+os.environ.pop("NE_SHADOW", None)
 
 print()
 if FAILS:

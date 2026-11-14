@@ -35,11 +35,19 @@ Each run registers its own account, gaba_live_<stamp>: run 20260918_214952 inher
 ten user rows of the killed run before it, reflected on turn 1 instead of 5, and every
 window after that sat one turn off the phase plan.
 
-A reply that is exactly "⚠️ Connection Error: No API key provided." is not Rick: on the
-Vertex route llm_engine.call_llm only reaches that string on attempt 2, after a 429 or
-401/403 from Vertex made the fallback swap the provider to anthropic with no key. The real
-status is on the app terminal ([VERTEX FALLBACK] / [ROUTER] lines), not in the sink. The
-driver counts such a turn as an error and does not save it as an assistant message.
+KEYS (since 3548e27, 2026-10-03): the backend has no Vertex route and no key of its own.
+resolve_api_keys merges .env < the account's vault < the request, and the UI sends the
+browser's keys with every chat request. A lab account has neither, so this driver sends
+what the UI sends, {universal: $env:Q_UNIVERSAL_KEY}, prints which endpoint that key will
+reach for --model, and refuses to start without a key (or with one bound for Google's API
+that isn't a Google key). The key never touches a file. Run it from your own terminal. The Reflector gets these keys through the chat request; the daemon does NOT (it reads
+the vault and .env only), so without a connected provider the daemon's LLM work stands
+down, but its gate edges, the thing this run measures, still fire.
+
+A reply that is exactly "⚠️ Connection Error: No API key provided." is not Rick. It means
+the request carried no usable key for the model's provider (wrong variable for --model, or
+none set). The driver counts such a turn as an error and does not save it as an assistant
+message.
 
 Pre-flight it does NOT do for you: app up on :8000, stream_worker.py alive, Redis up
 (without Redis the chat process and the daemon each keep private in-memory inhibition).
@@ -51,6 +59,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 assert os.path.basename(ROOT) == "PersonaApp-merged", f"refusing to run outside the live repo: {ROOT}"
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "backend"))   # telemetry.py and the organs live here since 10-03
 import requests  # noqa: E402
 
 USERNAME = "gaba_live"          # overwritten in main(): gaba_live_<stamp> unless --user
@@ -60,6 +69,59 @@ BASE_URL = "http://127.0.0.1:8000"
 HDR = {"X-Profile-Username": USERNAME, "X-Profile-Key": SECRET}
 OUT_ROOT = os.path.join(HERE, "live_out")
 ERROR_PREFIX = "⚠️"   # the app's error replies all start with this
+# What the UI sends: App.jsx posts exactly {universal: key} on every chat. Only that slot
+# (plus openrouter, which call_llm tries LAST) is read from the environment. Provider slots
+# like GOOGLE_API_KEY are deliberately NOT read: for a google/* model call_llm takes the
+# google slot FIRST, so a stale $env:GOOGLE_API_KEY in the shell silently beat the OpenRouter
+# key and every turn hit Google's endpoint (runs 20261011_104631/_105315: "Please pass a valid
+# API key"). GABA_LIVE_KEYS (JSON, slot -> key) is the explicit escape hatch.
+KEY_ENV = {"universal": "Q_UNIVERSAL_KEY", "openrouter": "OPENROUTER_API_KEY"}
+API_KEYS = {}                   # filled in main() from this process's environment
+
+
+def _clean(v):
+    """cmd's `set X='...'` keeps the quotes; a quoted key never matches the sk-or- reroute."""
+    v = str(v).strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+        v = v[1:-1].strip()
+    return v
+
+
+def _shape(v):
+    return ("sk-or- (OpenRouter)" if v.startswith("sk-or-") else "AIza (Google AI Studio)" if v.startswith("AIza")
+            else "sk-ant- (Anthropic)" if v.startswith("sk-ant-") else "other")
+
+
+def predict_route(model, keys):
+    """Mirror of call_llm's choice (llm_engine.py ~314-381): family slot, then universal, then
+    openrouter; any sk-or- key reroutes to OpenRouter with the original model id."""
+    m = model.lower()
+    fam = ("anthropic" if ("anthropic/" in m or "claude" in m) else
+           "openai" if ("openai/" in m or "gpt" in m) else
+           "google" if ("google/" in m or "gemini" in m) else None)
+    if "openrouter/" in m:
+        fam = None
+    order = ([fam] if fam else []) + ["universal", "openrouter"]
+    slot = next((s for s in order if keys.get(s)), None)
+    if slot is None:
+        return None, None, "no key: every turn will say 'No API key provided'"
+    key = keys[slot]
+    endpoint = "OpenRouter" if key.startswith("sk-or-") else (f"{fam}'s own API" if fam else "OpenRouter")
+    return slot, _shape(key), endpoint
+# No built-in personas (Sky, 2026-10-11): a lab account gets its OWN copy of rick, created
+# through the API like any user's persona. Settings mirror Sky's rick row minus the access code.
+LAB_PERSONA = {"name": "Rick", "avatar": "🧪", "tagline": "The Smartest Man in the Universe",
+               "file": os.path.join("personas", "rick.txt"),
+               "on_demand_files": ["personas/rick_ondemand.txt"],
+               "om_enabled": True, "om_turn_threshold": 5, "deep_memory_enabled": True, "direct_wire": False}
+
+
+def keys_from_env():
+    keys = {slot: _clean(os.environ[var]) for slot, var in KEY_ENV.items() if _clean(os.environ.get(var, ""))}
+    extra = os.environ.get("GABA_LIVE_KEYS", "").strip()
+    if extra:
+        keys.update({k: _clean(v) for k, v in json.loads(extra).items() if _clean(v)})
+    return keys
 
 # ---------------------------------------------------------------- the messages
 T10 = ("Still on the bread thing. My kitchen sits around 68 F and the recipe says the dough "
@@ -147,9 +209,26 @@ def register(session):
     r.raise_for_status()
 
 
+def ensure_persona(session):
+    """Give the lab account its own PERSONA if it has none. Never touches any other account."""
+    r = session.get(f"{BASE_URL}/personas", params={"username": USERNAME}, headers=HDR, timeout=30)
+    r.raise_for_status()
+    if PERSONA in r.json():
+        return "already present"
+    spec = dict(LAB_PERSONA)
+    path = os.path.join(ROOT, spec.pop("file"))
+    with open(path, "r", encoding="utf-8") as f:
+        prompt = f.read()
+    body = {"username": USERNAME, "key": PERSONA, "system_prompt": prompt, **spec}
+    r = session.post(f"{BASE_URL}/personas", json=body, headers=HDR, timeout=300)
+    if r.status_code != 200:
+        raise RuntimeError(f"create persona: {r.status_code} {r.text[:200]}")
+    return f"created from {os.path.relpath(path, ROOT)} ({len(prompt):,} chars)"
+
+
 def stream_turn(session, message, history, raw_path, model, thinking):
     body = {"username": USERNAME, "message": message, "chat_history": history[-8:],
-            "target_model_id": model, "thinking_level": thinking}
+            "target_model_id": model, "thinking_level": thinking, "active_api_keys": API_KEYS}
     t_send = time.time()
     t_first = None
     chunks, finish, n_events, http = [], None, 0, 200
@@ -281,7 +360,7 @@ def digest(t_start, t_end, wait_window, out_dir, username=None):
 
 # ---------------------------------------------------------------- main
 def main():
-    global USERNAME, HDR
+    global USERNAME, HDR, API_KEYS
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dry", action="store_true")
     ap.add_argument("--gap", type=float, default=30.0, help="seconds between turns (default 30)")
@@ -316,8 +395,19 @@ def main():
         print(f"  {i:2d} [{p}] {m[:90]}{'...' if len(m) > 90 else ''}")
     est = (n - 1) * (args.gap + 15) + args.wait + 15 + args.quiet
     print(f"[plan] ~{est / 60:.0f} min if replies take ~15 s")
+    API_KEYS = keys_from_env()
+    shapes = ", ".join(f"{s}={_shape(v)}" for s, v in sorted(API_KEYS.items())) or "NONE"
+    print(f"[keys] from this shell: {shapes} (values never printed)")
+    slot, shape, endpoint = predict_route(args.model, API_KEYS)
+    print(f"[keys] {args.model} -> slot {slot} ({shape}) -> {endpoint}")
     if args.dry:
         return
+    if not API_KEYS:
+        sys.exit("[keys] no key in this shell, so every turn would come back 'No API key provided'.\n"
+                 "       Use the same key the UI holds:   $env:Q_UNIVERSAL_KEY = 'sk-or-...'")
+    if endpoint != "OpenRouter" and shape != "AIza (Google AI Studio)" and "google" in endpoint:
+        sys.exit(f"[keys] a {shape} key would go to Google's own API and be rejected. "
+                 "Use an sk-or- key in Q_UNIVERSAL_KEY.")
 
     for url, what in ((f"{BASE_URL}/docs", "app"),):
         try:
@@ -330,6 +420,7 @@ def main():
     raw_path = os.path.join(out_dir, "raw_sse.txt")
     s = requests.Session()
     register(s)
+    print(f"[persona] {USERNAME}/{PERSONA}: {ensure_persona(s)}", flush=True)
     t_start = time.time()
     history = []
     wait_window = None
@@ -352,7 +443,7 @@ def main():
                 finish = "error"
                 history += [{"role": "user", "content": m}]
                 print(f"   <- APP ERROR after {dur:.1f}s, not saved: {text[:120]}")
-                print("      (on the Vertex route this means attempt 1 was refused; see [VERTEX FALLBACK] on the app terminal)")
+                print("      (no usable key for this model's provider: check the KEY_ENV variable matches --model)")
             elif text:
                 save_http = save_assistant(s, res["text"])
                 history += [{"role": "user", "content": m}, {"role": "assistant", "content": res["text"]}]

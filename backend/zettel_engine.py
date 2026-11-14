@@ -37,6 +37,33 @@ import redis_client
 # across users (only Redis had a TTL).
 _EMBEDDING_CACHE = OrderedDict()
 _CACHE_LOCK = threading.Lock()
+
+# Norepinephrine reuses the query embedding instead of encoding the user message a
+# second time (lab_notes/norepinephrine.md §3). Keyed by (username, persona); the text
+# must match exactly, or the caller encodes for itself.
+_LAST_QUERY_VEC = OrderedDict()
+_LAST_QUERY_LOCK = threading.Lock()
+
+
+def _remember_query_vec(username, persona, query_text, vec):
+    try:
+        flat = [float(x) for x in vec.reshape(-1)]
+        with _LAST_QUERY_LOCK:
+            _LAST_QUERY_VEC[(username, persona)] = (query_text, flat)
+            _LAST_QUERY_VEC.move_to_end((username, persona))
+            while len(_LAST_QUERY_VEC) > 256:
+                _LAST_QUERY_VEC.popitem(last=False)
+    except Exception:
+        pass   # an optimisation, never load-bearing
+
+
+def last_query_embedding(username, persona, text):
+    """The embedding query_knowledge_graph computed for exactly this text, or None."""
+    with _LAST_QUERY_LOCK:
+        hit = _LAST_QUERY_VEC.get((username, persona))
+    if hit and hit[0] == text:
+        return list(hit[1])
+    return None
 MAX_CACHED_PERSONAS = 50
 
 # FIX(per-message-io): path -> (mtime, sha256). The compile check runs on every
@@ -1808,6 +1835,7 @@ def query_knowledge_graph(username: str, persona: str, query_text: str, top_k: i
     body_sims = {}     # ...with these: node pk -> cos(query, node body), every node
     if model and cache:
         query_vec = model.encode([query_text], convert_to_numpy=True).reshape(1, -1)
+        _remember_query_vec(username, persona, query_text, query_vec)
         
         # FIX(lock-contention): only snapshot references under the lock.
         # bulk_append replaces cache["embeddings"] via np.vstack (a NEW array)
@@ -2048,9 +2076,10 @@ def query_knowledge_graph(username: str, persona: str, query_text: str, top_k: i
     behav_parts = []
     if final_behav:
         behav_parts.extend([
-            "\n[ACTIVE BEHAVIORAL MODULES: Character Psychological Substrate & Lived Experience]",
-            "Treat the following directives as high-priority behavioral modifiers for this turn only.",
-            "They represent external fictional character psychology. Do NOT cite these modules.",
+            "\n[ACTIVE MEMORY SUBSTRATE: Lived Experience & Stored Mechanics]",
+            "This is my own memory surfacing, not documentation someone handed me to consult or recite.",
+            "Tables and schemas are just how I file things: compressed storage, not how thought sounds.",
+            "I digest it instantly. What comes out is me knowing the domain, not the file read back with seasoning.",
             "--------------------------------"
         ])
         for node in final_behav:
@@ -2074,11 +2103,11 @@ def query_knowledge_graph(username: str, persona: str, query_text: str, top_k: i
                     ln_content = ln_content.split("\n\n", 1)[1]
                 behav_parts.append(f"  → ({rel}) {ln.get('node_id', '')}: {_truncate_at_sentence(ln_content, 200)}")
             behav_parts.append("[/LINKED_MODULES]")
-        behav_parts.append("[/ACTIVE BEHAVIORAL MODULES]\n")
+        behav_parts.append("[/ACTIVE MEMORY SUBSTRATE]\n")
 
     lore_parts = []
     if final_lore_seeds or final_lore_expand:
-        lore_parts.append("[KNOWLEDGE_GRAPH: Established Fictional Lore & Character Backstory]")
+        lore_parts.append("[ACTIVE MEMORY SUBSTRATE: Long-Term Context & History]")
         for node in final_lore_seeds:
             node_id = node.get("node_id", "")
             title = node.get("title", "")
@@ -2101,7 +2130,7 @@ def query_knowledge_graph(username: str, persona: str, query_text: str, top_k: i
                 lore_parts.append(f"  → ({rel}) {node_id}: {_truncate_at_sentence(content, 200)}")
             lore_parts.append("[/LINKED_CONTEXT]")
             
-        lore_parts.append("[/KNOWLEDGE_GRAPH]")
+        lore_parts.append("[/ACTIVE MEMORY SUBSTRATE]")
 
     ret_parts = []
     if behav_parts:

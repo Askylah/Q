@@ -258,7 +258,7 @@ if pytest:
 def test_a1_deterministic_trigger():
     """A1: Query containing exact trigger 'ad hominem' -> BEHAV-AD-HOMINEM fires via regex."""
     context = retrieve_context("test_user", "rick", "You are committing an ad hominem fallacy.")
-    assert "ACTIVE BEHAVIORAL MODULES" in context
+    assert "ACTIVE MEMORY SUBSTRATE: Lived Experience" in context
     assert "BEHAV-AD-HOMINEM" in context
     assert "challenged on intelligence" in context
 
@@ -266,7 +266,7 @@ def test_a1_deterministic_trigger():
 def test_a2_lore_vector_search():
     """A2: Lore query 'Tell me about the Citadel' -> Citadel-related lore node appears."""
     context = retrieve_context("test_user", "rick", "Tell me about the Citadel.")
-    assert "KNOWLEDGE_GRAPH" in context
+    assert "ACTIVE MEMORY SUBSTRATE: Long-Term Context" in context
     assert "citadel-001" in context
     assert "trans-dimensional city-state" in context
 
